@@ -274,12 +274,14 @@ states.
   not TOML-as-database" stance; no schema-from-struct magic that hides the contract.
 - Linear integer versioning is easy to reason about and to gate in CI.
 
-Layout (`migrations/` at repo root):
+Layout (`migrations/` inside the control-plane module so `//go:embed` can reach it):
 ```
-migrations/
+control-plane/migrations/
   0001_initial_schema.up.sql     -- all six tables, CHECKs, indexes, updated_at trigger
   0001_initial_schema.down.sql   -- drops them in FK-safe order
 ```
+The golang-migrate CLI can target this path directly:
+`migrate -path control-plane/migrations -database "$DATABASE_URL" up`
 File naming is golang-migrate's `{version}_{description}.{up|down}.sql`. Future changes are new
 numbered pairs; **0001 is frozen** like the rest of this contract. The committed SQL in
 `migrations/` is the authoritative DDL — this document is its prose companion; if they ever
