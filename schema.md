@@ -191,10 +191,25 @@ Indexes: `(user_id, created_at DESC)` for a user's session list; `(host_id)` and
 for the availability sums; partial index `(gpu_id) WHERE state IN ('assigned','starting','running')`
 to make the reservation sum cheap.
 
-> **Single-token-per-session note.** Phase 1 keeps one active signaling token *on the session
-> row*. If reconnection or multiple concurrent tokens are needed later, the three
-> `signaling_token_*` columns lift cleanly into a `session_tokens(session_id, …)` child table
-> with no change to the rest of the schema — an additive migration, deliberately deferred.
+> **Single-token-per-session note (known limitation — see `signaling.md`).** Phase 1 keeps one
+> active signaling token *on the session row*, which means a session cannot be re-signalled after
+> its token is consumed without re-launching (the mid-session WebRTC reconnection limitation
+> documented in `signaling.md`). The migration path is additive and deliberately deferred:
+> lift the three `signaling_token_*` columns into a child table
+> ```sql
+> CREATE TABLE session_tokens (
+>     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+>     session_id   UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+>     token_hash   TEXT NOT NULL UNIQUE,
+>     expires_at   TIMESTAMPTZ NOT NULL,
+>     consumed_at  TIMESTAMPTZ,
+>     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+> );
+> ```
+> Then a fresh single-use token can be minted for an already-`running` session (a reconnect),
+> and signaling validation joins `session_tokens` instead of reading the session row. Nothing
+> else in this schema changes; the message shapes and relay in `signaling.md`/`agent-api.md` are
+> untouched.
 
 ---
 
@@ -205,33 +220,50 @@ progress via callbacks (P1-A `session_state`) and the control plane maps those o
 states.
 
 ```
-                    launch (P1-B)        scheduler places            agent acks assign,
-                    creates row          + reserves GPU              brings pipeline up
-   (none) ───────────▶ pending ───────────▶ assigned ───────────▶ starting ───────────▶ running
-                          │                    │                      │                    │
-                          │                    │                      │     stop (P1-B/idle/error)
-                          │                    │                      ▼                    ▼
-                          └────────────────────┴──────────────────▶ stopping ──────────▶ stopped
-                                          (any pre-running failure /                       ▲
-                                           agent error)                                    │
-                                                  └──────────────────────────────────▶ failed
+              launch (P1-B)    scheduler places     agent acks assign,
+              creates row      + reserves GPU       brings pipeline up
+ (none) ───────▶ pending ───────▶ assigned ───────▶ starting ───────▶ running ───┐
+                    │                 │                 │                 │       │ stop
+                    │                 │                 │                 │       ▼  (P1-B / idle / drain)
+                    │                 │                 │                 └────▶ stopping ───▶ stopped
+                    │                 │                 │                            │
+   ── failure from ─┴─────────────────┴─────────────────┴────────────────────────────┴──▶ failed
+      ANY non-terminal state (pending, assigned, starting, running, stopping)
 ```
 
-| state | meaning | resources reserved? | who drives the transition |
-|---|---|---|---|
-| `pending` | row created, not yet placed | no | control plane (launch) |
-| `assigned` | scheduler chose host+GPU, reserved VRAM+slots, sent `session_assign` | **yes** | control plane (scheduler) |
-| `starting` | agent acked assign, bringing up compositor→encode→webrtcbin | yes | agent callback |
-| `running` | pipeline live, signaling offer available; client may connect | yes | agent callback |
-| `stopping` | teardown requested, pipeline coming down | yes (released on `stopped`) | control plane or agent |
-| `stopped` | terminated normally, **reservation released** | no | agent callback (or control plane on confirmed teardown) |
-| `failed` | terminated abnormally; `error_message` set, **reservation released** | no | agent callback / control-plane timeout |
+`stopped` and `failed` are the only **terminal** states; the other five are non-terminal and
+**every one of them can transition directly to `failed`**.
 
-Reservation is **held** for `assigned`/`starting`/`running` (this is exactly the filter in the
-GPU-availability sums) and **released** when the row reaches `stopped`/`failed`. Whether the
-client's WebRTC transport is connected is a *transport* detail, not a session state — the
-session is `running` once the pipeline is up regardless of browser connection (matches
-architecture invariant #3: transport is an interface, not part of the session model).
+| state | meaning | resources reserved? | who drives the transition | → `failed` cause |
+|---|---|---|---|---|
+| `pending` | row created, not yet placed | no | control plane (launch) | scheduler error; `capacity_unavailable` after the row exists; launch abandoned |
+| `assigned` | scheduler chose host+GPU, reserved VRAM+slots, sent `session_assign` | **yes** | control plane (scheduler) | agent `ack{ok:false}`; assign times out; host goes `offline` before start |
+| `starting` | agent acked assign, bringing up compositor→encode→webrtcbin | yes | agent callback | pipeline build error (`session_state:failed`); agent WS drops; start times out |
+| `running` | pipeline live, signaling offer available; client may connect | yes | agent callback | pipeline crash (`session_state:failed`); **agent WS drops / host heartbeat-miss → host `offline`** |
+| `stopping` | teardown requested, pipeline coming down | yes (released on terminal) | control plane or agent | agent dies mid-teardown; teardown times out (control-plane reconciliation still ends it terminal) |
+| `stopped` | terminated normally, **reservation released** | no | agent callback (or control plane on confirmed teardown) | — (terminal) |
+| `failed` | terminated abnormally; `error_message` set, **reservation released** | no | agent callback / control-plane timeout / host-offline reaper | — (terminal) |
+
+### Failure & reservation-release invariants (load-bearing)
+1. **`failed` is reachable from every non-terminal state.** There is no non-terminal state from
+   which a session cannot fail; a stuck session is a bug, not a designed state.
+2. **Every terminal transition releases the reservation in the same transaction** that writes the
+   terminal state. The release is unconditional: reservation is *held* only while
+   `state ∈ {assigned, starting, running}` (exactly the GPU-availability-sum filter), so on
+   `pending → failed` the release is a no-op (nothing was reserved) and on every other path it
+   returns the held VRAM + encode slots. There is **no terminal path that leaves a reservation
+   dangling.**
+3. **The agent WebSocket dropping while a session is `running` is an explicit failure edge.**
+   Per `agent-api.md` §Reconnection: a heartbeat-miss / lost agent connection past the threshold
+   marks the host `offline` and the control-plane reaper drives **all** that host's non-terminal
+   sessions (including `running` and `stopping`) to `failed`, releasing each reservation. This is
+   the multi-host failure model exercised at N=1 — the reaper is the authority of last resort, so
+   liveness never depends on a cooperative `session_state` callback that a dead agent can't send.
+4. Whether the client's WebRTC transport is connected is a *transport* detail, not a session
+   state — the session is `running` once the pipeline is up regardless of browser connection
+   (architecture invariant #3: transport is an interface, not part of the session model). A
+   browser disconnect therefore does **not** by itself fail the session; see the mid-session
+   reconnection limitation in `signaling.md`.
 
 ## Migrations
 **Tooling: `golang-migrate`** with plain-SQL, paired up/down files. Chosen because:
