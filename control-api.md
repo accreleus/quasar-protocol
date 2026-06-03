@@ -33,6 +33,52 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 
 ---
 
+## Authorization — roles & the admin surface
+
+> *Additive, admin-gated amendment (P1-Auth-Enforce). This does not change any
+> request/response shape, status code, or endpoint already frozen above — it makes
+> explicit the role gate the admin surface always implied (it is "no frozen-interface
+> change — additive, admin-gated", as the Library section already notes). Implemented
+> in the control plane as `RequireAuth → RequireAdmin` middleware.*
+
+Two roles exist, from `schema.md` `users.role` (`CHECK (role IN ('user','admin'))`):
+`user` (default for every `/v1/auth/register` account) and `admin`.
+
+**Normative rule (server-enforced, never UI-gated).** An admin endpoint **MUST**
+reject a valid **non-admin** bearer token with `403 forbidden`, independent of which
+client made the call. Hiding the admin UI is **never** the access control — the gate
+is this server check. Order of checks: missing/invalid token ⇒ `401`; valid token but
+insufficient role ⇒ `403`. The `403` precedes any resource lookup, so an admin
+endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`, not
+`404`).
+
+| endpoint | required role | notes |
+|---|---|---|
+| `POST /v1/apps` | **admin** | create an app |
+| `PATCH /v1/apps/{id}` | **admin** | edit an app |
+| `GET /v1/hosts`, `GET /v1/hosts/{id}` | **admin** | host/capacity oversight |
+| `GET /v1/apps`, `GET /v1/apps/{id}` | user / public | the public library (list is unauthenticated) |
+| `GET /v1/sessions/{id}`, `GET /v1/sessions`, `DELETE /v1/sessions/{id}` | **owner or admin** | resource-ownership check (`403` otherwise), not a blanket admin gate |
+| everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account |
+
+### First-admin bootstrap (decision)
+A fresh database has no admin, and `/v1/auth/register` deliberately mints **only**
+`role=user` (so the role can never be claimed from the wire). The first admin is
+therefore **operator-provisioned**, not "whoever registers first" — on a publicly
+reachable fresh instance the latter would let an attacker who races to `register`
+seize admin. The control plane, at startup, reads:
+
+- `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_USERNAME`, `BOOTSTRAP_ADMIN_PASSWORD`
+
+and, **only when no admin yet exists**, provisions that admin (creating the account,
+or promoting an already-registered account with that email). It is idempotent and a
+no-op once any admin exists — safe to run on every boot, and serialized by an advisory
+lock so concurrently-booting instances cannot create two. Operators rotate/extend admins
+thereafter through the admin surface. Leaving the variables unset is valid (no admin is
+seeded); a partial set is an operator error.
+
+---
+
 ## Auth
 
 ### `POST /v1/auth/register`
