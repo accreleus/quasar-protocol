@@ -11,7 +11,7 @@ Phase 0 uses plain JSON for everything to stay debuggable. A compact binary inpu
 ## Phase 1 contracts (P1-A..D)
 The four interface contracts that let the control plane, node agent, and web client be built in
 parallel on cheaper tiers. They are mutually consistent: the schema shapes the APIs, the APIs
-shape signaling. See `../docs/phase1-plan.md`.
+shape signaling. See `../docs/completed/phase1-plan.md` (archived; Phase 1 is complete). Phase 2 amends these contracts additively — see `../docs/phase2/`.
 
 - `agent-api.md` (P1-A) — control-plane ↔ node-agent: registration, capacity, session
   assign/start/stop, state callbacks, signaling relay. The spine of the control-plane/node-agent split.
