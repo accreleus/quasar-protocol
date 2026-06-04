@@ -10,6 +10,19 @@ coordinates the client then connects with.
 against this freely; changes need Opus + human sign-off. Co-defined with `schema.md` (response
 bodies mirror its rows and **session states**) and `signaling.md` (the launch response).
 
+> **Amendment — P2-01 (resource-governance + admission-control), requires sign-off.** Adds the
+> §Admission control section below and three error codes — `no_host_available` (503),
+> `capacity_exhausted` (503), `session_quota_exceeded` (409) — to the enumerated set. These are
+> **additive** (new codes, a new behavioural rule for a launch path that at N=1 never actually
+> rejected). **One refinement is not purely additive and is the item this sign-off covers:** the
+> launch capacity-rejection moves from `409 capacity_unavailable` to the two new **503** codes,
+> because the host being up-but-full (or no host being up) is a *server/transient* condition, not
+> a 4xx client error. `capacity_unavailable` is **retained** in the enum (it is frozen — not
+> removed) but is **no longer emitted** by the launch path; it is superseded by the two 503 codes.
+> No request body, response body, or existing status-code-for-an-existing-code changes. See
+> `docs/phase2/P2-01-contract-resource-governance.md`. **Stops at the contract — the governor
+> that emits these codes is P2-03.**
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -26,8 +39,16 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   { "error": { "code": "invalid_credentials", "message": "human readable" } }
   ```
   Codes: `validation_failed` (400), `unauthorized` (401), `forbidden` (403), `not_found` (404),
-  `conflict` (409, e.g. duplicate email), `capacity_unavailable` (409, no host/GPU can satisfy a
-  launch), `rate_limited` (429), `internal` (500).
+  `conflict` (409, e.g. duplicate email), `session_quota_exceeded` (409, *P2-01* — caller is at
+  their per-user concurrent-session limit), `rate_limited` (429), `no_host_available` (503,
+  *P2-01* — no online host/GPU can serve the request), `capacity_exhausted` (503, *P2-01* — a
+  matching GPU is online but its free encode slots / VRAM cannot satisfy the request right now),
+  `internal` (500). **Retryable:** `no_host_available`, `capacity_exhausted`, `rate_limited`
+  (and `session_quota_exceeded` once one of the caller's sessions ends).
+  *Superseded:* `capacity_unavailable` (409) — the original Phase-1 launch capacity-rejection;
+  retained for compatibility but **no longer emitted** (the launch path now returns the more
+  specific 503 `no_host_available` / `capacity_exhausted`, see §Admission control). At N=1 it
+  never actually fired, since one GPU's generous slots always satisfied the request.
 - **Pagination** (list endpoints) is `?limit=&cursor=`; responses carry `{ "items": [...],
   "next_cursor": "<opaque|null>" }`. Generous defaults at N=1; the shape is real.
 
@@ -171,9 +192,21 @@ is the single hinge to `signaling.md`.
   }
 }
 ```
-- The scheduler reserves transactionally against `gpus` availability (`schema.md`). If nothing
-  can satisfy the request: `409 capacity_unavailable` and **no** session row persists. At N=1 the
-  single GPU's generous slots always satisfy it — the reservation code path still runs.
+- The scheduler reserves transactionally against `gpus` availability (`schema.md`), and first
+  enforces the caller's per-user session quota. Rejections (see §Admission control for the exact
+  rule) — in all of which **no session row persists** (quota/availability is checked before the
+  row is committed, or the row is rolled back):
+  - **`409 session_quota_exceeded`** — the caller already holds `max_concurrent_sessions` active
+    sessions (`state ∈ {pending, assigned, starting, running}`).
+  - **`503 no_host_available`** — no online host has a GPU that could serve the request.
+  - **`503 capacity_exhausted`** — a matching GPU is online but its available encode slots / VRAM
+    (totals − active reservations) cannot satisfy the request right now; retryable once a session
+    ends.
+
+  At N=1 with generous slots and a quota of 3, the single GPU always satisfies an in-quota
+  request — the reservation and quota code paths still run. *(Phase-1 documented a single
+  `409 capacity_unavailable` here; P2-01 supersedes it with the codes above — see the amendment
+  note at the top of this file.)*
 - `signaling.token` is single-use, short-TTL (default 60 s), stored **hashed** on the session
   (`signaling_token_hash`). It is returned plaintext only here. The client must connect promptly.
 - The response returns as soon as the session is `assigned` (reservation committed, assign sent
@@ -181,6 +214,43 @@ is the single hinge to `signaling.md`.
   advance `assigned → starting → running` via signaling/`GET`.
 - `state` may already be `starting`/`running` by the time the client reads it — these are the
   `schema.md` states verbatim.
+
+### Admission control (P2-01)
+> *Additive amendment — the rule the launch path enforces. Defines wire behaviour only; the
+> implementation (atomic, no-double-admit-under-concurrency) is P2-03.*
+
+A `POST /v1/sessions` launch is admitted only if **both** gates pass, evaluated in this order:
+
+1. **Per-user session quota.** Let `active` = the caller's sessions in `state ∈ {pending,
+   assigned, starting, running}` (the non-terminal, pre-teardown set — see `schema.md`
+   `users.max_concurrent_sessions`). If `count(active) ≥ user.max_concurrent_sessions`, reject
+   with **`409 session_quota_exceeded`** and persist no row. A `max_concurrent_sessions` of `0`
+   blocks every launch for that user. This gate is per-user and independent of host capacity.
+
+2. **Per-GPU capacity (the governor).** The request's resource ask comes from the app row —
+   `requested_encode_slots = apps.default_encode_slots`, `requested_vram_mb = apps.default_vram_mb`
+   (clients never set these; the `stream` block carries resolution/bitrate, not resource
+   reservations). A GPU admits the launch iff, with availability derived per `schema.md` §gpus
+   (`total − Σ reservations of sessions in {assigned, starting, running}`):
+   ```
+   encode_slots_available ≥ requested_encode_slots   AND   vram_available ≥ requested_vram_mb
+   ```
+   - If **no online host** has any GPU that could serve the request — no host is `online`, or none
+     has a GPU whose **totals** could ever satisfy the ask — reject with **`503 no_host_available`**.
+     This is the "fleet is empty/down" condition; it is distinct from "full".
+   - If a candidate GPU exists (its totals suffice) but **no** candidate currently has enough
+     **available** slots/VRAM, reject with **`503 capacity_exhausted`**. This is the "up but full
+     right now" condition; it is **retryable** — a later launch may succeed once an active session
+     ends and frees its reservation.
+   - Otherwise the scheduler picks a satisfying GPU and reserves transactionally
+     (`SELECT … FOR UPDATE` on the `gpus` row, P1-8 / P2-03) so concurrent launches cannot
+     oversubscribe, commits the `sessions` row as `assigned`, and returns `201`.
+
+Both 503s carry the uniform error body and **no** session row persists. The two conditions are
+kept distinct so the client and the admin UI can tell "nothing is serving" (`no_host_available`
+— operator should check why the agent is offline) from "everything is busy" (`capacity_exhausted`
+— a transient, retry-later condition). `503` (not a 4xx) because in both cases the request is
+well-formed and authorized; the server simply has no room to place it now.
 
 ### `GET /v1/sessions/{id}` — poll lifecycle
 ```json

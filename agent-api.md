@@ -97,6 +97,13 @@ the scheduler's reservation path is exercised from day one. The control plane up
 `(host_id, index)`; GPUs absent from the report are removed (cascade-safe — a GPU with active
 sessions should not vanish, that's a fault the control plane logs).
 
+> **P2-01 review verdict — no agent-api change required.** The Phase-2 resource governor
+> (`control-api.md` §Admission control) needs only per-GPU `vram_mb_total`, `encode_slots_total`,
+> `vendor`, `model` to compute availability — all already carried here. The per-user session
+> quota lives entirely in the control plane (`schema.md` `users.max_concurrent_sessions`) and
+> never reaches the agent. This contract is therefore **unchanged** by P2-01; the note is
+> recorded only for traceability.
+
 ### `heartbeat` — liveness + live utilization
 ```json
 { "type": "heartbeat", "running_sessions": ["<session_id>"], "ts_unix_ms": 1735689600000 }

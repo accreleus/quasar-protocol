@@ -1,5 +1,16 @@
 # P1-C — Postgres schema (FROZEN)
 
+> **Amendment — P2-01 (resource-governance + admission-control), additive, requires sign-off.**
+> Adds one column, `users.max_concurrent_sessions` (`INT NOT NULL DEFAULT 3 CHECK (>= 0)`),
+> via migration `0002_user_session_quota`. This is the per-user concurrent-session quota the
+> Phase-2 launch path enforces (`control-api.md` `session_quota_exceeded`). It is **purely
+> additive** — a new defaulted column, no change to any existing column, type, constraint, or
+> to the frozen `0001` migration — so it falls under the documented `control-api.md
+> §Authorization` additive-extension exception. No other table changes. The schema's resource
+> model (`gpus` derived availability, `sessions` reservation columns) is **unchanged**: P2-01
+> defines the *enforcement semantics* over the existing columns, it does not add reservation
+> storage. See `docs/phase2/P2-01-contract-resource-governance.md`.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-as-database**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
@@ -63,8 +74,22 @@ Accounts. Login is by email; `username` is the display handle.
 | `password_hash` | `TEXT` NOT NULL | full argon2id PHC string (`$argon2id$v=19$m=...,t=...,p=...$salt$hash`); params live in the string. Never the password. |
 | `role` | `TEXT` NOT NULL DEFAULT `'user'` | `CHECK (role IN ('user','admin'))`. Multi-user authz (Phase 2) and admin CRUD (P1-3) need this from the start. |
 | `disabled_at` | `TIMESTAMPTZ` NULL | non-null = account deactivated; login + token mint refused. |
+| `max_concurrent_sessions` | `INT` NOT NULL DEFAULT `3` | *(P2-01, migration 0002)* per-user cap on simultaneously-active sessions, admin-settable. `CHECK (max_concurrent_sessions >= 0)`; `0` blocks all launches for the user (without disabling the account). Enforced at launch (`control-api.md` `session_quota_exceeded`); "active" = `state ∈ {pending, assigned, starting, running}`. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 | `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
+
+> **Per-user quota — design choice (P2-01).** A per-user column (option (a) in the ticket),
+> not a single server-wide config default (option (b)), because per-user governance is the
+> end-state shape (an admin raises a power user's limit, sets a guest's to a lower value, or
+> sets `0` to suspend launching) — it costs one defaulted column now and avoids a migration
+> later. The default of `3` is a generous single-host starting point; the real hard limit on a
+> busy host is the **per-GPU capacity governor** (encode slots / VRAM), not this per-user
+> fairness cap. The quota's "active" set **includes `pending`** (a not-yet-placed launch counts
+> against you, so a user cannot evade the cap by spamming launches faster than the scheduler
+> places them) and **excludes `stopping`** and the terminal states (a session on its way out
+> frees the user's quota immediately). Note this set differs from the **reservation**-holding
+> set `{assigned, starting, running}` used for GPU availability — quota counts the in-flight
+> `pending` row, GPU reservation does not (nothing is reserved until `assigned`).
 
 ## `auth_tokens`
 Opaque bearer tokens issued at login (P1-B `/auth/login`). The control plane is
@@ -279,10 +304,13 @@ Layout (`migrations/` inside the control-plane module so `//go:embed` can reach 
 control-plane/migrations/
   0001_initial_schema.up.sql     -- all six tables, CHECKs, indexes, updated_at trigger
   0001_initial_schema.down.sql   -- drops them in FK-safe order
+  0002_user_session_quota.up.sql -- (P2-01) ADD users.max_concurrent_sessions INT NOT NULL DEFAULT 3 CHECK (>= 0)
+  0002_user_session_quota.down.sql -- DROP that column
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`
 File naming is golang-migrate's `{version}_{description}.{up|down}.sql`. Future changes are new
-numbered pairs; **0001 is frozen** like the rest of this contract. The committed SQL in
-`migrations/` is the authoritative DDL — this document is its prose companion; if they ever
-disagree, that is a bug to fix under sign-off, not a silent divergence.
+numbered pairs; **0001 is frozen** like the rest of this contract (so `0002` is a new pair, not
+an edit to `0001`). The default applies to existing rows, so no backfill is needed. The
+committed SQL in `migrations/` is the authoritative DDL — this document is its prose companion;
+if they ever disagree, that is a bug to fix under sign-off, not a silent divergence.
