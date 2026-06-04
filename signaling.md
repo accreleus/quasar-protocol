@@ -53,6 +53,17 @@ In Phase 1, signaling sits **behind the control plane**. The Phase 0 message sha
 `offer`/`answer`/`ice`/`bye`/`error` objects and the host-is-offerer handshake are identical.
 Co-defined with `control-api.md` (mints the token) and `agent-api.md` (relays the messages).
 
+> **Amendment — P2-02 (launcher↔game swap): signaling is UNCHANGED.** The app-swap operation
+> (`control-api.md` `POST /v1/sessions/{id}/swap`, `agent-api.md` `session_swap_app`) swaps a
+> session's source container **behind** the encoder via a GStreamer interpipe boundary while the
+> encode tail and `webrtcbin` stay up. There is **no new offer, no answer, no ICE restart, and no
+> new DataChannel** — the same PeerConnection carries the same media track and input DataChannel
+> across the swap; only the pixels flowing into the encoder change. This "no renegotiation" is the
+> **defining constraint** of swap (it is what makes it seamless to the browser): if the P2-07
+> implementation ever finds it needs to renegotiate, that is a contract change — **stop and
+> escalate** (Opus + sign-off), do not add a signaling message to make swap work. No shape on this
+> page changes. See `docs/phase2/P2-02-contract-app-swap.md`.
+
 ## What changes vs Phase 0
 1. **The WebSocket endpoint is the control plane, not the host.** The browser connects to the
    control plane's signaling endpoint (`wss://<control-plane>/v1/signal`), the same origin it

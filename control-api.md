@@ -23,6 +23,15 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > `docs/phase2/P2-01-contract-resource-governance.md`. **Stops at the contract — the governor
 > that emits these codes is P2-03.**
 
+> **Amendment — P2-02 (launcher↔game swap), additive, requires sign-off.** Adds the
+> `POST /v1/sessions/{id}/swap` endpoint (§Sessions), two error codes — `session_not_swappable`
+> (409), `swap_exceeds_reservation` (409) — and one Authorization-table row (owner-or-admin, same
+> rule as `DELETE`). **Purely additive:** a new endpoint + new codes, no change to any existing
+> shape; signaling is explicitly **unchanged** (the swap keeps the same WebRTC transport — see
+> `signaling.md`). The swapped app must **fit within the session's held reservation** in Phase 2
+> (no reservation resize — deferred). See `docs/phase2/P2-02-contract-app-swap.md`. **Stops at the
+> contract — the interpipe implementation is P2-07.**
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -40,7 +49,9 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   ```
   Codes: `validation_failed` (400), `unauthorized` (401), `forbidden` (403), `not_found` (404),
   `conflict` (409, e.g. duplicate email), `session_quota_exceeded` (409, *P2-01* — caller is at
-  their per-user concurrent-session limit), `rate_limited` (429), `no_host_available` (503,
+  their per-user concurrent-session limit), `session_not_swappable` (409, *P2-02* — session is not
+  in a state that can be app-swapped), `swap_exceeds_reservation` (409, *P2-02* — the new app needs
+  more than the session's held reservation), `rate_limited` (429), `no_host_available` (503,
   *P2-01* — no online host/GPU can serve the request), `capacity_exhausted` (503, *P2-01* — a
   matching GPU is online but its free encode slots / VRAM cannot satisfy the request right now),
   `internal` (500). **Retryable:** `no_host_available`, `capacity_exhausted`, `rate_limited`
@@ -80,6 +91,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/hosts`, `GET /v1/hosts/{id}` | **admin** | host/capacity oversight |
 | `GET /v1/apps`, `GET /v1/apps/{id}` | user / public | the public library (list is unauthenticated) |
 | `GET /v1/sessions/{id}`, `GET /v1/sessions`, `DELETE /v1/sessions/{id}` | **owner or admin** | resource-ownership check (`403` otherwise), not a blanket admin gate |
+| `POST /v1/sessions/{id}/swap` | **owner or admin** | *(P2-02)* same ownership check as `DELETE` |
 | everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account |
 
 ### First-admin bootstrap (decision)
@@ -272,6 +284,44 @@ List, newest first, owner-scoped. Same item shape as `GET /v1/sessions/{id}`.
 Requests teardown: control plane sends `session_stop` to the agent (`agent-api.md`), session
 goes `stopping → stopped`, reservation released. `202` with the current session body. Idempotent
 on an already-terminal session (`200`/`202`, no error).
+
+### `POST /v1/sessions/{id}/swap` — swap the running app (P2-02)
+Swaps the **source app** of a live session (launcher → game, or game → game) **without tearing
+down the WebRTC transport**: the node-agent swaps the source container behind a GStreamer
+interpipe boundary while encode + `webrtcbin` stay up, so the browser stream never re-negotiates
+(`signaling.md` is unchanged — same offer, same DataChannel). Owner-or-admin (same rule as
+`DELETE`).
+```json
+// request — the app to swap to
+{ "app_id": "<uuid>" }
+// 202 — swap accepted; agent is performing it. Body is the current session.
+{ "session": {
+    "id": "<uuid>", "app_id": "<uuid>",   // app_id is still the OLD app until the swap completes
+    "state": "running", "state_detail": "swapping", "error_message": null,
+    "stream": { "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 15000, "h264_profile": "main" },
+    "created_at": "...", "started_at": "...", "ended_at": null
+  } }
+```
+- **Async, like launch/stop.** The control plane validates, sends `session_swap_app`
+  (`agent-api.md`) to the assigned host, sets `state_detail = "swapping"`, and returns `202`. The
+  client polls `GET /v1/sessions/{id}` to watch `state_detail` go `swapping → ` (a running detail)
+  on success. **The top-level `state` stays `running` throughout** — swap does not change the
+  session's scheduled/reserved status (see `schema.md`).
+- **On success** the control plane sets `sessions.app_id` to the new app and clears the `swapping`
+  detail. **On a failed swap that the agent rolled back**, `app_id` is unchanged and the session
+  stays `running` on the previous app (the detail reports the failure). **On a failed swap with no
+  recoverable previous app**, the session goes `failed` and its reservation is released
+  (`agent-api.md` defines which). A browser already attached keeps its media throughout.
+- **Reservation rule (Phase 2): the swap must fit within the held reservation.** The new app's
+  `default_vram_mb` / `default_encode_slots` must each be ≤ the session's `reserved_vram_mb` /
+  `reserved_encode_slots`. If not, `409 swap_exceeds_reservation` and **no** swap is attempted
+  (the session is untouched). Reservation *resize* on swap is deferred past Phase 2.
+- **Errors** (the session is left untouched in every rejection):
+  - `409 session_not_swappable` — the session is not in a swappable state: top-level `state` is not
+    `running`, or a swap is already in progress (`state_detail = "swapping"`).
+  - `404 not_found` — no such app, or the app is disabled (same visibility rule as `GET /v1/apps/{id}`).
+  - `409 swap_exceeds_reservation` — as above.
+  - `403 forbidden` — caller is neither owner nor admin; `404 not_found` — no such session.
 
 ---
 

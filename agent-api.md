@@ -10,6 +10,13 @@ implement against this freely; changes need Opus + human sign-off. Co-defined wi
 `schema.md` (the `hosts`/`gpus`/`sessions` tables and the **session state machine** are the
 source of truth) and with `signaling.md` (this channel relays signaling — see §Signaling relay).
 
+> **Amendment — P2-02 (launcher↔game swap), additive, requires sign-off.** Adds one
+> control→node message, `session_swap_app` (§Messages — control → node), with its own ack +
+> `session_state` callback semantics. **Additive** — a new `ControlMsg` variant; no existing
+> message, field, or the assign/start/stop ack contract changes. The swap keeps the encode +
+> `webrtcbin` tail live (no signaling renegotiation — `signaling.md` is unchanged). See
+> `docs/phase2/P2-02-contract-app-swap.md`. **Stops at the contract — P2-07 implements the swap.**
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -194,6 +201,45 @@ the signaling relay (below) can carry the offer to the client.
 `reason` ∈ `user_requested | idle_timeout | host_draining | admin | error`. The agent tears down
 and reports `session_state: stopping` → `stopped`. The reservation is released when `stopped`
 arrives.
+
+### `session_swap_app` — swap the source app, transport stays live (P2-02)
+Tells the agent to swap a `running` session's **source container** behind its interpipe boundary
+while the encode + `webrtcbin` tail (and thus the WebRTC transport) stay up. `app` is the same
+`AppSpec` shape as `session_assign.app`.
+```json
+{
+  "type": "session_swap_app",
+  "id": "<command-id>",
+  "session_id": "<uuid>",
+  "app": { "image": "ghcr.io/quasar/game-bar:latest", "args": [], "env": {}, "mounts": [], "gpu": true }
+}
+```
+The control plane has already validated ownership, swappable state, and that the new app **fits
+within the held reservation** (`control-api.md`) before sending this — the agent does not re-check
+the budget; it must keep the swapped container within the same `resources` the session was
+assigned.
+
+**Ack semantics (swap-specific — differs from assign/start).** The agent replies
+`ack{ id, ok, error? }`:
+- `ack{ok:true}` — the agent accepted the swap and will attempt it; progress comes via
+  `session_state`.
+- **`ack{ok:false, error}` — the agent rejected the command (e.g. it does not hold this session,
+  or the spec is unusable). The session is left running the *previous* app and stays `running` —
+  the swap is a no-op.** This is the load-bearing difference from `session_assign`/`session_start`,
+  where `ack{ok:false}` fails the session: **a rejected swap never fails the session.** The control
+  plane surfaces the swap as failed to the caller but does not change session state.
+
+**`session_state` callbacks during a swap** (top-level `state` stays `running` throughout — swap
+does not change the reservation; see `schema.md`):
+- `session_state{ state:"running", detail:"swapping" }` — swap in progress.
+- `session_state{ state:"running", detail:"<running detail>" }` — **swap succeeded**; the new app
+  is the source. The control plane sets `sessions.app_id` to the new app on this callback.
+- `session_state{ state:"running", detail:"swap failed; rolled back" }` — swap failed but the
+  agent **restored the previous app**; the session keeps running it. `app_id` is unchanged. (Per
+  the state machine, `error` is set only with `failed`, so the failure reason rides in `detail`.)
+- `session_state{ state:"failed", error:"<reason>" }` — swap failed and the previous app could
+  **not** be restored; the session is terminal and its reservation is released (the normal `failed`
+  path). **Roll back when possible; only fail the session when rollback is impossible.**
 
 ---
 

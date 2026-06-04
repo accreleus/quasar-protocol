@@ -11,6 +11,17 @@
 > defines the *enforcement semantics* over the existing columns, it does not add reservation
 > storage. See `docs/phase2/P2-01-contract-resource-governance.md`.
 
+> **Amendment — P2-02 (launcher↔game swap), no DDL change.** The app-swap operation
+> (`control-api.md` `POST /v1/sessions/{id}/swap`) introduces **no new column and no new session
+> state**. A swap rides **within** the `running` state as `state_detail = 'swapping'` (a
+> convention over the existing free-text `sessions.state_detail` column — the `state` CHECK set is
+> untouched), because a swap does not change the session's scheduled/reserved status, so no reader
+> should have to handle a new top-level state. On a successful swap the control plane updates the
+> existing `sessions.app_id` column to the new app (a row write, not a schema change); a failed
+> swap that rolled back leaves `app_id` unchanged. The swap must fit within the existing
+> `reserved_vram_mb` / `reserved_encode_slots` (no reservation resize in Phase 2). See
+> `docs/phase2/P2-02-contract-app-swap.md`.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-as-database**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
