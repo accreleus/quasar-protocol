@@ -79,6 +79,7 @@ users ──< auth_tokens                users 1─< sessions >─1 apps
 hosts 1─< gpus
 ```
 Six tables: `users`, `auth_tokens`, `apps`, `hosts`, `gpus`, `sessions`.
+*(P4-01 adds two observability tables: `session_metrics` and `user_devices`.)*
 
 ---
 
@@ -296,6 +297,88 @@ to make the reservation sum cheap.
 
 ---
 
+## `session_metrics` (P4-01)
+> *Additive, observability amendment (migration 0003). A new append-only table; it changes
+> no existing table, column, type, or the session state machine. Telemetry is a cache of
+> reporter truth for troubleshooting — never the access control, never a session-state
+> authority.*
+
+Per-session performance telemetry, append-only time-series, **one row per sample per
+source**. Two independent reporters write here: the **agent** (`agent-api.md`
+`session_metrics`, host-observable encode numbers) and the **browser** (`control-api.md`
+`POST /v1/sessions/{id}/stats`, its own `getStats()` — RTT, jitter-buffer, decode time,
+packet loss, frame drops). The `source` column keeps them distinct so the admin surface can
+reconcile a host→browser timeline (`P4-05`/`P4-06`).
+
+| column | type | notes |
+|---|---|---|
+| `id` | `UUID` PK | `gen_random_uuid()` |
+| `session_id` | `UUID` NOT NULL → `sessions(id)` ON DELETE CASCADE | the session this sample belongs to; cascade so a deleted session takes its metrics with it. |
+| `source` | `TEXT` NOT NULL | `CHECK (source IN ('agent','browser'))`. Which reporter produced the sample. |
+| `ts_unix_ms` | `BIGINT` NOT NULL | reporter wall-clock of the sample (ms since epoch), same convention as `agent-api.md` `heartbeat.ts_unix_ms`. |
+| `metrics` | `JSONB` NOT NULL DEFAULT `'{}'` | the sample payload (the field dictionary below). JSONB (not frozen columns) so a new metric is not a migration; no consumer reserves a fixed shape — but the **deep-trace staged-budget keys are enumerated** so two implementers cannot invent divergent names. |
+| `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | **server-only** ingestion time (distinct from `ts_unix_ms`, the reporter's clock); not surfaced by the admin read. |
+
+Index: `(session_id, ts_unix_ms DESC)` — serves "latest N samples for a session" (the admin
+read) and the per-source ordering cheaply.
+
+**`metrics` field dictionary.** All keys optional (a reporter sends what it has); units are in
+the key suffix (`_ms`, `_kbps`). The `source` column scopes which set applies.
+- **`source='agent'` (host-observable):** `fps`, `bitrate_kbps`, `encode_ms`, `frames_encoded`,
+  `frames_dropped` (encoder-side), and — in deep trace — `encode_ms_p50` / `encode_ms_p95` /
+  `encode_ms_max`, `overlay_frames`.
+- **`source='browser'` (`getStats()`-derived):** `fps`, `bitrate_kbps`, `rtt_ms`,
+  `jitter_buffer_ms`, `decode_ms`, `packets_lost`, `frames_dropped` (receiver-side), and — in
+  deep trace — the **staged glass-to-glass budget**, one key per Phase-0 stage
+  (`docs/completed/phase0-latency-report.md`): `glass_to_glass_ms` (total), `encode_ms`
+  (host number echoed for the timeline), **`network_pacing_ms`**, **`jitter_buffer_ms`**,
+  **`decode_display_ms`**, and **`interactive_ms`** (the ping-as-marker input→photon number).
+  These six keys are the contract for the host→browser timeline the admin UI reconstructs
+  (`P4-05`/`P4-06`); the budget closes as `glass_to_glass_ms ≈ encode_ms + network_pacing_ms +
+  jitter_buffer_ms + decode_display_ms` (`network_pacing_ms` is `rtt_ms/2` on a clean link, or
+  the residual when `rtt` is untrustworthy — `P4-04` documents which, per the report's rule).
+- **Cross-source note:** `frames_dropped` exists under **both** sources with **different**
+  meaning (encoder-side vs receiver-side). It is disambiguated by `source`; a merged
+  `latest_metrics` (`control-api.md`) **must** keep them source-scoped (namespace or pick by
+  source), never blind-overlay one key over the other.
+
+> **Retention (bounded — load-bearing).** This table must not grow without bound. The policy
+> (implemented in `P4-05`, tunable there): (1) the control plane keeps only a **rolling
+> recent window per session** while it runs (prune samples older than a window — e.g. the
+> last hour — so a long-lived session has bounded rows); and (2) on a session reaching a
+> **terminal** state, its metrics are retained for a short TTL for post-hoc troubleshooting,
+> then deleted (or dropped immediately via the `ON DELETE CASCADE` if the session row is
+> reaped). The admin "recent history" view (`P4-06`) is always a bounded window, never the
+> full history. No metric write is on the session hot path — ingestion is decoupled from the
+> lifecycle transaction.
+
+## `user_devices` (P4-01)
+> *Additive amendment (migration 0004). A new table, owner-scoped; it changes no existing
+> table. Built here because login is the natural capture point; **Phase 7 surfaces and
+> manages it** (device list, trust posture) — Phase 4 only writes it. Privacy: `device_key`
+> is an app-scoped opaque id the client generates, **not** a hardware fingerprint or
+> cross-site identifier (see below).*
+
+One row per `(user, device)` — the per-device connection + decode-capability probe captured
+at login (`control-api.md` `POST /v1/me/devices`). The data source for later per-user/-device
+settings (FPS tiering, codec selection); **Phase 4 produces it, no optimizer consumes it.**
+
+| column | type | notes |
+|---|---|---|
+| `id` | `UUID` PK | `gen_random_uuid()` |
+| `user_id` | `UUID` NOT NULL → `users(id)` ON DELETE CASCADE | owner. |
+| `device_key` | `TEXT` NOT NULL | a **stable, privacy-preserving** per-device id the client generates once (random UUID) and persists in `localStorage`; app-scoped, **not** derived from hardware and **not** a cross-site supercookie. Clearing browser storage resets it (a new device row results) — acceptable; this is best-effort device grouping, not identity. |
+| `user_agent` | `TEXT` NULL | last-seen UA string (mirrors `auth_tokens.user_agent`). |
+| `capabilities` | `JSONB` NOT NULL DEFAULT `'{}'` | the probe result: `{ "codecs": {"h264":true,"hevc":false,"av1":false,"vp9":true}, "max_decode_height": 2160, "bandwidth_kbps": 48000, "rtt_ms": 12, "measured_at": "<rfc3339>" }`. JSONB so the probe can grow without a migration. `measured_at` is **server-stamped** at upsert (not client-supplied, so a client cannot backdate). **Note:** browsers do not directly expose *hardware*-decode support; `codecs` is a best-effort heuristic (codec acceptance via `RTCRtpReceiver.getCapabilities` + a resolution probe) and is documented as such in `P4-08`. |
+| `first_seen_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | first login from this device. |
+| `last_seen_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | updated on each capability upsert. |
+
+Constraints: `UNIQUE (user_id, device_key)` — the upsert key (insert on first sight, update
+`capabilities`/`last_seen_at`/`user_agent` thereafter). Index `(user_id)` for listing a
+user's devices (the Phase-7 surface).
+
+---
+
 ## Session state machine (shared contract)
 This is the canonical lifecycle. `agent-api.md` and `control-api.md` use exactly these
 names. State is owned by the **control plane** (it writes the row); the agent *reports*
@@ -367,6 +450,10 @@ control-plane/migrations/
   0001_initial_schema.down.sql   -- drops them in FK-safe order
   0002_user_session_quota.up.sql -- (P2-01) ADD users.max_concurrent_sessions INT NOT NULL DEFAULT 3 CHECK (>= 0)
   0002_user_session_quota.down.sql -- DROP that column
+  0003_session_metrics.up.sql    -- (P4-01) CREATE session_metrics (append-only telemetry) + index
+  0003_session_metrics.down.sql  -- DROP session_metrics
+  0004_user_devices.up.sql       -- (P4-01) CREATE user_devices (per-device capability) + unique(user_id, device_key)
+  0004_user_devices.down.sql     -- DROP user_devices
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`

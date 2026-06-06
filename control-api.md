@@ -62,7 +62,9 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   `conflict` (409, e.g. duplicate email), `session_quota_exceeded` (409, *P2-01* — caller is at
   their per-user concurrent-session limit), `session_not_swappable` (409, *P2-02* — session is not
   in a state that can be app-swapped), `swap_exceeds_reservation` (409, *P2-02* — the new app needs
-  more than the session's held reservation), `rate_limited` (429), `no_host_available` (503,
+  more than the session's held reservation), `session_not_traceable` (409, *P4-01* — deep trace
+  cannot be toggled: the session is not `running`, its host is offline, or the agent rejected a live
+  toggle), `rate_limited` (429), `no_host_available` (503,
   *P2-01* — no online host/GPU can serve the request), `capacity_exhausted` (503, *P2-01* — a
   matching GPU is online but its free encode slots / VRAM cannot satisfy the request right now),
   `internal` (500). **Retryable:** `no_host_available`, `capacity_exhausted`, `rate_limited`
@@ -104,6 +106,10 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/apps`, `GET /v1/apps/{id}` | user / public | the public library (list is unauthenticated) |
 | `GET /v1/sessions/{id}`, `GET /v1/sessions`, `DELETE /v1/sessions/{id}` | **owner or admin** | resource-ownership check (`403` otherwise), not a blanket admin gate |
 | `POST /v1/sessions/{id}/swap` | **owner or admin** | *(P2-02)* same ownership check as `DELETE` |
+| `POST /v1/sessions/{id}/stats` | **owner or admin** | *(P4-01)* the client posts its own session's browser telemetry — same ownership check as `DELETE` |
+| `GET /v1/admin/sessions/{id}/metrics` | **admin** | *(P4-01)* per-session telemetry read (oversight) |
+| `POST /v1/admin/sessions/{id}/trace` | **admin** | *(P4-01)* toggle the session's deep trace |
+| `POST /v1/me/devices` | user (self) | *(P4-01)* upsert the caller's own device capability; owner is the bearer identity, never a body field |
 | everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account |
 
 ### First-admin bootstrap (decision)
@@ -377,6 +383,94 @@ Returns a `draining` host to `online` so the scheduler may place on it again.
 - **Errors:** `404 not_found`; `409 conflict` (host is `offline` — its agent is not connected, so
   there is nothing to return to service; the host comes back `online` on its own when its agent
   reconnects).
+
+---
+
+## Telemetry & devices (P4-01)
+> *Additive, observability amendment. New endpoints; no change to any existing shape, status
+> code, or endpoint. Reads are admin-gated, writes are owner-gated (the bearer identity, never
+> a body field) — telemetry and device data are **observability, never the access control**,
+> enforced server-side like every endpoint here. Stored per `schema.md` `session_metrics` /
+> `user_devices`. No consumer/optimizer reads `user_devices` in this phase.*
+
+### `POST /v1/sessions/{id}/stats` — client posts its session telemetry
+The browser reports its own `getStats()`-derived telemetry for **its** live session. Owner-or-
+admin (same ownership rule as `DELETE /v1/sessions/{id}`; a non-owner is `403`, an unknown id
+`404`). Returns **`202`** (accepted, no body). Untrusted client input: the body is bounded to
+**≤ 64 samples per request and ≤ 32 KB**, and **rate-limited** (`429 rate_limited`); only the
+keys in the `schema.md` field dictionary are persisted (unknown keys are ignored, not stored).
+```json
+// request — a small batch of recent samples (browser clock, ms)
+{ "samples": [
+    { "ts_unix_ms": 1735689600000,
+      "metrics": { "fps": 59.6, "bitrate_kbps": 14710, "rtt_ms": 12, "jitter_buffer_ms": 28,
+                   "decode_ms": 1.4, "packets_lost": 0, "frames_dropped": 0,
+                   // deep trace only — the staged glass-to-glass budget (schema.md dictionary):
+                   "glass_to_glass_ms": 71, "encode_ms": 4.6, "network_pacing_ms": 7.5,
+                   "decode_display_ms": 30.9, "interactive_ms": 92 } }
+  ] }
+// 202 — accepted (no body); samples are written with source='browser'
+```
+- Each sample becomes a `session_metrics` row with `source='browser'`. The staged-budget keys
+  (`glass_to_glass_ms`, `network_pacing_ms`, `decode_display_ms`, `interactive_ms`, …) appear
+  only when the session is in deep trace; the lightweight keys always.
+- Best-effort: a malformed sample is dropped, not fataled. Accepting telemetry never affects
+  session state.
+
+### `GET /v1/admin/sessions/{id}/metrics` — read per-session telemetry (admin)
+Returns the **bounded recent window** of telemetry for one session, both sources, newest first.
+Admin-only (`403` before any lookup per §Authorization; `404` for an unknown session to an admin).
+```json
+// 200 — paginated, newest first; ?limit=&cursor=&source=agent|browser optional
+{ "items": [
+    { "source": "agent",   "ts_unix_ms": 1735689600000,
+      "metrics": { "fps": 59.8, "bitrate_kbps": 14820, "encode_ms": 4.6, "frames_dropped": 1 } },
+    { "source": "browser", "ts_unix_ms": 1735689600100,
+      "metrics": { "fps": 59.6, "rtt_ms": 12, "jitter_buffer_ms": 28, "decode_ms": 1.4,
+                   "glass_to_glass_ms": 71 } }
+  ],
+  "next_cursor": null }
+```
+The window is bounded by `schema.md`'s retention policy — this is "recent history", not the full
+series. The admin session **list** (`GET /v1/admin/sessions`) may additionally carry an optional
+additive `latest_metrics` object per item (the most-recent merged sample) so the list view shows
+current values without an N+1 fan-out; absent when a session has no telemetry yet.
+
+### `POST /v1/admin/sessions/{id}/trace` — toggle deep trace (admin)
+Turns the session's deep glass-to-glass trace on/off. The control plane relays `session_trace`
+(`agent-api.md`) to the owning agent and returns the current session body.
+```json
+// request
+{ "deep_trace": true }
+// 200 — relayed; body is the current session (same shape as GET /v1/sessions/{id})
+{ "session": { "id": "<uuid>", "state": "running", "state_detail": "pipeline live", "...": "..." } }
+```
+- **Errors:** `404 not_found` (no such session); `409 session_not_traceable` (the session is not
+  `running`, its host is `offline`, or the agent rejected a live toggle — e.g. deep trace is
+  start-time-only on that agent, `agent-api.md`). A rejected toggle **never** changes session
+  state — the session is left exactly as it was.
+
+### `POST /v1/me/devices` — upsert the caller's device capability
+The client posts its login-time connection + decode-capability probe. Owner is the **bearer
+identity** (never a body field); a user can only write their own devices. Upsert on
+`(user_id, device_key)` (`schema.md` `user_devices`): insert on first sight, update
+`capabilities`/`last_seen_at`/`user_agent` thereafter. Body is **size-validated** (`400
+validation_failed` on garbage) and **rate-limited** (`429`, low ceiling — the upsert is
+idempotent on `(user_id, device_key)`, so a login-frequency call is ample). `measured_at` in
+`capabilities` is **server-stamped**, ignoring any client-supplied value.
+```json
+// request
+{ "device_key": "<client-generated opaque id, persisted in localStorage>",
+  "capabilities": { "codecs": {"h264":true,"hevc":false,"av1":false,"vp9":true},
+                    "max_decode_height": 2160, "bandwidth_kbps": 48000, "rtt_ms": 12 } }
+// 200 — upserted (no sensitive body)
+{ "device": { "id": "<uuid>", "first_seen_at": "...", "last_seen_at": "..." } }
+```
+- `device_key` is an app-scoped opaque id the client generates and persists — **not** a hardware
+  fingerprint (see `schema.md` `user_devices` privacy note). The probe is **best-effort and
+  non-blocking** at login (`P4-08`); failure to post is silent and never blocks sign-in.
+- **No consumer.** Nothing in this phase reads `user_devices` to alter a session/codec/fps
+  decision — the optimizer is a later phase; Phase 7 surfaces/manages the device list.
 
 ---
 

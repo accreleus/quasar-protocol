@@ -153,6 +153,53 @@ launch spec). The control plane then transitions the session to `failed` and rel
 reservation. An `ack` only confirms *receipt/acceptance*; actual progress comes via
 `session_state`.
 
+### `session_metrics` — per-session telemetry (P4-01)
+> *Additive, observability amendment. A new upstream message; it changes no existing
+> message shape, and the control plane that predates it simply ignores an unknown `type`.
+> It is **fire-and-forget like `heartbeat`** (no `ack`), and carries **no** session-state
+> authority — `session_state` remains the only progress signal. Telemetry is observability,
+> never access control.*
+
+Emitted by the agent **once per `running` session, on the `heartbeat_interval_ms` cadence**,
+carrying only **host-observable** numbers from the GStreamer pipeline. (The browser's own
+`getStats()` telemetry does **not** travel through the agent — the client posts it straight
+to the control plane, `control-api.md` `POST /v1/sessions/{id}/stats`. The two sources are
+kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
+```json
+{
+  "type": "session_metrics",
+  "session_id": "<uuid>",
+  "ts_unix_ms": 1735689600000,
+  "window_ms": 5000,
+  "fps": 59.8,
+  "bitrate_kbps": 14820,
+  "encode_ms": 4.6,
+  "frames_encoded": 299,
+  "frames_dropped": 1,
+  "deep": {
+    "encode_ms_p50": 4.4,
+    "encode_ms_p95": 6.1,
+    "encode_ms_max": 9.2,
+    "overlay_frames": 299
+  }
+}
+```
+- **Lightweight fields (always present):** realized `fps`, actual `bitrate_kbps`, mean
+  `encode_ms` over the window (from the encode pad-probe FIFO — *timing only*, no overlay
+  write), `frames_encoded`, `frames_dropped`. `window_ms` is the aggregation period — it
+  **equals the emit cadence** (`heartbeat_interval_ms`) so windows are contiguous and
+  non-overlapping. These are the always-on signal the design promised — collectible with **no
+  overlay stamping**, so the default hot path is unchanged (the Phase-0 invariant; see `P4-03`).
+- **`deep` object (present only when the session is in deep-trace mode):** encode-time
+  percentiles (`p50`/`p95`/`max`) and overlay coverage (`overlay_frames`). Deep trace is
+  armed at start (`session_assign.deep_trace`, below) or toggled live (`session_trace`). The
+  exact `metrics` JSONB keys (lightweight + deep) are enumerated in `schema.md`'s field
+  dictionary — implementers use those names verbatim.
+- The control plane writes a `session_metrics` row with `source='agent'` (`schema.md`).
+  A malformed or unparsable message is dropped without dropping the connection. A sample whose
+  `session_id` is not currently `running` on this host (e.g. it arrived as the session went
+  terminal) is **dropped, not stored** — metrics never resurrect or alter a session.
+
 ---
 
 ## Messages — control → node (downstream)
@@ -194,6 +241,14 @@ reserve→prepare→go-live steps are real (P1-6), even though at N=1 `start` ma
 `resources` mirrors the reserved amounts. The agent must not exceed `resources` (it's the
 budget the control plane reserved). `gpu_index` maps to the agent's local GPU enumeration
 (same index it reported in `capacity`).
+
+> *(P4-01, additive)* `session_assign` may carry an optional **`deep_trace`: bool** (default
+> `false` when absent). When `true`, the agent **arms the deep trace at pipeline build** —
+> the on-frame Y-plane overlay + ping/pong clock-sync + encode-percentile reporting (the
+> graduated T7 instrument, `P4-03`). When absent/`false`, only the lightweight
+> `session_metrics` fields are emitted and the pipeline graph is identical to today. An
+> older agent that does not understand the field ignores it (lightweight-only). The field is
+> the only change to this message; all existing fields are unchanged.
 
 ### `session_start` — bring the pipeline up
 ```json
@@ -249,6 +304,31 @@ does not change the reservation; see `schema.md`):
 - `session_state{ state:"failed", error:"<reason>" }` — swap failed and the previous app could
   **not** be restored; the session is terminal and its reservation is released (the normal `failed`
   path). **Roll back when possible; only fail the session when rollback is impossible.**
+
+### `session_trace` — toggle deep trace on a running session (P4-01)
+> *Additive, observability amendment. New downstream command; no change to any existing
+> message. Like `session_swap_app`, a **rejected `session_trace` never fails the session** —
+> tracing is observability, not lifecycle.*
+
+Turns the deep trace (overlay + ping/pong + encode percentiles) on or off for a `running`
+session without restructuring its pipeline. This is the wire behind the admin
+`POST /v1/admin/sessions/{id}/trace` (`control-api.md`).
+```json
+{ "type": "session_trace", "id": "<command-id>", "session_id": "<uuid>", "deep_trace": true }
+```
+**Ack semantics (trace-specific).** The agent replies `ack{ id, ok, error? }`:
+- `ack{ok:true}` — the trace mode changed; subsequent `session_metrics` include/omit the
+  `deep` object accordingly.
+- **`ack{ok:false, error}` — the agent could not change the trace mode** (e.g. it does not
+  hold this session, or its pipeline cannot flip overlay stamping live without
+  renegotiation — `P4-03` may make deep trace **start-time-only**, in which case a live
+  toggle to `true` is rejected here). **The session is left exactly as it was and stays
+  `running`** — like a rejected swap, a rejected trace is a no-op on session state. The
+  control plane surfaces the failure to the admin caller (`session_not_traceable`) but does
+  not change the session.
+
+Toggling trace **never** touches the encode/`webrtcbin` tail, so `webrtcbin` does not
+renegotiate (exactly one `offer` per session across toggles — the P2-07 interpipe invariant).
 
 ---
 
