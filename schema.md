@@ -22,6 +22,14 @@
 > `reserved_vram_mb` / `reserved_encode_slots` (no reservation resize in Phase 2). See
 > `docs/phase2/P2-02-contract-app-swap.md`.
 
+> **Amendment — P3-01 (host-lifecycle + multi-host scheduling), additive, requires sign-off.**
+> **No DDL.** Defines the **host status state machine** (the transitions over the existing
+> `hosts.status` `{online,offline,draining}` column — the value `draining` was provisioned in `0001`
+> for exactly this), and a new `sessions.state_detail` convention **`host_lost`** the offline reaper
+> stamps when a host disconnect fails its sessions (a free-text value over the existing column,
+> exactly like P2-02's `swapping` — the `state` CHECK set is untouched). No new column, type,
+> constraint, or migration. See `docs/phase3/P3-01-contract-host-lifecycle.md`.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-as-database**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
@@ -161,6 +169,45 @@ capacity (CPU/mem) lives here; GPU capacity is per-row in `gpus`.
 | `last_heartbeat_at` | `TIMESTAMPTZ` NULL | liveness; `online` requires recent heartbeat. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
+### Host status state machine (P3-01)
+`hosts.status ∈ {online, offline, draining}`. **Liveness** is connection-derived (the agent's
+WebSocket + heartbeats, `agent-api.md`); **`draining`** is an administrative cordon
+(`control-api.md` `POST /v1/hosts/{id}/drain`). The scheduler (Phase 3 placement) considers
+**only `online`** hosts — `draining` and `offline` are both ineligible for new sessions.
+
+```
+                 agent (re)connect + heartbeat
+   offline ──────────────────────────────────────▶ online
+      ▲                                            ▲   │
+      │ agent disconnect /                         │   │ admin drain
+      │ heartbeat-miss (from online or draining)   │   ▼
+      └──────────────────────────────────────────── draining
+                       admin uncordon ─────────────┘
+```
+
+| transition | driver | trigger |
+|---|---|---|
+| `offline → online` | system | agent (re)connects and heartbeats — **unless** the host was `draining` before the drop (see the limitation note) |
+| `online → draining` | **admin** | `POST /v1/hosts/{id}/drain` |
+| `draining → online` | **admin** | `POST /v1/hosts/{id}/uncordon` (requires the agent connected) |
+| `{online, draining} → offline` | system | agent disconnect or heartbeat-miss past threshold (`agent-api.md`) |
+
+- **`draining` is stable, not transient.** A drained host stays `draining` (reachable, still
+  heartbeating) until an admin uncordons it or its agent disconnects. It does **not** auto-flip to
+  `offline` when its last session ends — auto-flipping would be indistinguishable from a crash and
+  would be undone by the next heartbeat.
+- **Offline reaping** (the existing frozen failure model — see the session state machine below and
+  `agent-api.md` §Reconnection): when a host goes `offline`, its non-terminal sessions are driven to
+  `failed` with `state_detail = 'host_lost'` (P3-01) and their reservations released.
+
+> **Known limitation (Phase 3) — drain intent is not preserved across a full agent disconnect.**
+> Because `status` is a single column conflating liveness with cordon-intent, a `draining` host
+> whose agent disconnects becomes `offline`, and on reconnect returns to `online` (not `draining`) —
+> the operator must re-drain. This is benign for short maintenance drains. The **additive** migration
+> path (no shape change, exactly the pattern of the signaling-token note below) is a k8s-style
+> orthogonal `hosts.cordoned_at TIMESTAMPTZ` column (schedulable ⇔ `status='online' AND cordoned_at
+> IS NULL`), deferred until rolling-ops at scale need intent to survive a reconnect.
+
 ## `gpus`
 Per-GPU capacity — the real resource budget. A `sessions` row reserves against exactly one
 GPU. Totals are reported by the agent; **availability is derived** (totals minus the sum of
@@ -295,6 +342,9 @@ states.
    sessions (including `running` and `stopping`) to `failed`, releasing each reservation. This is
    the multi-host failure model exercised at N=1 — the reaper is the authority of last resort, so
    liveness never depends on a cooperative `session_state` callback that a dead agent can't send.
+   *(P3-01)* The reaper stamps `state_detail = 'host_lost'` on these sessions so a client can
+   distinguish a host-loss from an ordinary failure; `state` stays `failed` (a free-text convention
+   over the existing column, like P2-02's `swapping` — no new state).
 4. Whether the client's WebRTC transport is connected is a *transport* detail, not a session
    state — the session is `running` once the pipeline is up regardless of browser connection
    (architecture invariant #3: transport is an interface, not part of the session model). A

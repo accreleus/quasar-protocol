@@ -17,6 +17,15 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > `webrtcbin` tail live (no signaling renegotiation — `signaling.md` is unchanged). See
 > `docs/phase2/P2-02-contract-app-swap.md`. **Stops at the contract — P2-07 implements the swap.**
 
+> **Amendment — P3-01 (host-lifecycle + multi-host scheduling): no wire change.** Host drain/cordon
+> is a **control-plane** concern (`control-api.md` `POST /v1/hosts/{id}/drain`; the host-status state
+> machine lives in `schema.md`). A **force**-drain reuses the existing `session_stop`
+> `reason:"host_draining"` (already enumerated under §`session_stop`) — no new or changed message.
+> The offline reaper (§Reconnection & reconciliation) is unchanged; it now additionally stamps the
+> session `state_detail = 'host_lost'`, a control-plane-side `sessions` write that does not touch
+> this wire. **This contract is therefore unchanged by P3-01; the note is recorded for
+> traceability.** See `docs/phase3/P3-01-contract-host-lifecycle.md`.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated

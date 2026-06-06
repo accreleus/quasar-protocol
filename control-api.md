@@ -32,6 +32,17 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > (no reservation resize — deferred). See `docs/phase2/P2-02-contract-app-swap.md`. **Stops at the
 > contract — the interpipe implementation is P2-07.**
 
+> **Amendment — P3-01 (host-lifecycle + multi-host scheduling), additive, requires sign-off.**
+> Adds the host drain/cordon admin operations `POST /v1/hosts/{id}/drain` and
+> `POST /v1/hosts/{id}/uncordon` (§Hosts), two Authorization rows (both **admin**), and the
+> `host_lost` session `state_detail` convention (`schema.md`) the offline reaper stamps. **Purely
+> additive:** new admin endpoints + a free-text `state_detail` value; **no new error code** (reuses
+> `not_found`/`conflict`/`forbidden`), **no DDL** (the `hosts.status` value `draining` already
+> exists, `schema.md`), and **no change to signaling or agent-api** (a force-drain reuses the
+> existing `session_stop` `reason:"host_draining"`). The host drain/cordon state machine is defined
+> in `schema.md` §"Host status state machine". See `docs/phase3/P3-01-contract-host-lifecycle.md`.
+> **Stops at the contract — P3-03 implements the lifecycle, P3-04 the failover.**
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -89,6 +100,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `POST /v1/apps` | **admin** | create an app |
 | `PATCH /v1/apps/{id}` | **admin** | edit an app |
 | `GET /v1/hosts`, `GET /v1/hosts/{id}` | **admin** | host/capacity oversight |
+| `POST /v1/hosts/{id}/drain`, `POST /v1/hosts/{id}/uncordon` | **admin** | *(P3-01)* host lifecycle — cordon a host out of service / return it |
 | `GET /v1/apps`, `GET /v1/apps/{id}` | user / public | the public library (list is unauthenticated) |
 | `GET /v1/sessions/{id}`, `GET /v1/sessions`, `DELETE /v1/sessions/{id}` | **owner or admin** | resource-ownership check (`403` otherwise), not a blanket admin gate |
 | `POST /v1/sessions/{id}/swap` | **owner or admin** | *(P2-02)* same ownership check as `DELETE` |
@@ -322,6 +334,49 @@ interpipe boundary while encode + `webrtcbin` stay up, so the browser stream nev
   - `404 not_found` — no such app, or the app is disabled (same visibility rule as `GET /v1/apps/{id}`).
   - `409 swap_exceeds_reservation` — as above.
   - `403 forbidden` — caller is neither owner nor admin; `404 not_found` — no such session.
+
+---
+
+## Hosts (admin lifecycle, P3-01)
+> *Additive, admin-gated amendment. New endpoints; no change to any existing shape. The host
+> status values and transitions are defined in `schema.md` §"Host status state machine".*
+
+Host **read** oversight (`GET /v1/hosts`, `GET /v1/hosts/{id}`, and the P2-09 capacity reads) is
+the admin oversight surface. P3-01 adds the two **lifecycle** operations an operator uses to take a
+host out of service for maintenance and bring it back. Both are **admin-only** (a valid non-admin
+bearer is `403`, before any host lookup, per §Authorization) and both return the updated host body.
+
+### `POST /v1/hosts/{id}/drain` — cordon a host
+Marks an `online` host `draining`: the scheduler places **no new sessions** on it, while its
+existing sessions are allowed to finish (graceful) or are stopped now (force). The host stays
+`draining` (reachable, still heartbeating) until an admin uncordons it — it does **not**
+auto-transition to `offline`.
+```json
+// request — force is optional (default false = graceful)
+{ "force": false }
+// 200 — host is now draining
+{ "host": { "id": "<uuid>", "node_name": "gpu-host-01", "status": "draining", "...": "..." } }
+```
+- **Graceful (`force:false`, default):** the host goes `draining`; running sessions are left to end
+  on their own. The drain stops nothing.
+- **Force (`force:true`):** the host goes `draining` and the control plane sends `session_stop` with
+  `reason:"host_draining"` (`agent-api.md`) to every non-terminal session on the host; each tears
+  down `stopping → stopped` and releases its reservation.
+- **Idempotent.** Draining an already-`draining` host is a `200` no-op (a `force:true` re-drain
+  stops any sessions that have since appeared).
+- **Errors:** `404 not_found` (no such host); `409 conflict` (host is `offline` — nothing to drain).
+
+### `POST /v1/hosts/{id}/uncordon` — return a host to service
+Returns a `draining` host to `online` so the scheduler may place on it again.
+```json
+// 200 — host is back online
+{ "host": { "id": "<uuid>", "node_name": "gpu-host-01", "status": "online", "...": "..." } }
+```
+- Requires the host's **agent to be connected** (only a live, heartbeating host can accept work).
+  Idempotent on an already-`online` host (`200` no-op).
+- **Errors:** `404 not_found`; `409 conflict` (host is `offline` — its agent is not connected, so
+  there is nothing to return to service; the host comes back `online` on its own when its agent
+  reconnects).
 
 ---
 
