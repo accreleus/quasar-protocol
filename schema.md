@@ -328,7 +328,14 @@ the key suffix (`_ms`, `_kbps`). The `source` column scopes which set applies.
   `frames_dropped` (encoder-side), and — in deep trace — `encode_ms_p50` / `encode_ms_p95` /
   `encode_ms_max`, `overlay_frames`.
 - **`source='browser'` (`getStats()`-derived):** `fps`, `bitrate_kbps`, `rtt_ms`,
-  `jitter_buffer_ms`, `decode_ms`, `packets_lost`, `frames_dropped` (receiver-side), and — in
+  `jitter_buffer_ms`, `decode_ms`, `packets_lost`, `frames_dropped` (receiver-side),
+  the **presentation-pacing** keys (`#108`, always-on, `requestVideoFrameCallback`-derived):
+  `present_fps` (distinct frames presented to the display per second),
+  `present_interval_sd_ms` (σ of frame-to-frame *presentation* intervals — the headline
+  smoothness/judder metric: a clean 60 fps stream onto a 60 Hz display reads ~2 ms when smooth,
+  rising sharply when the playout buffer is too tight to keep a frame ready for every vsync),
+  `present_interval_p95_ms`, and `playout_target_ms` (the receiver jitter-buffer/playout target
+  the sample was measured under, so a stored σ correlates with its setting); and — in
   deep trace — the **staged glass-to-glass budget**, one key per Phase-0 stage
   (`docs/completed/phase0-latency-report.md`): `glass_to_glass_ms` (total), `encode_ms`
   (host number echoed for the timeline), **`network_pacing_ms`**, **`jitter_buffer_ms`**,

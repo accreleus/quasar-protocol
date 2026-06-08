@@ -405,6 +405,9 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
     { "ts_unix_ms": 1735689600000,
       "metrics": { "fps": 59.6, "bitrate_kbps": 14710, "rtt_ms": 12, "jitter_buffer_ms": 28,
                    "decode_ms": 1.4, "packets_lost": 0, "frames_dropped": 0,
+                   // presentation pacing (#108, always-on; schema.md dictionary):
+                   "present_fps": 59.8, "present_interval_sd_ms": 2.9,
+                   "present_interval_p95_ms": 18.0, "playout_target_ms": 100,
                    // deep trace only — the staged glass-to-glass budget (schema.md dictionary):
                    "glass_to_glass_ms": 71, "encode_ms": 4.6, "network_pacing_ms": 7.5,
                    "decode_display_ms": 30.9, "interactive_ms": 92 } }
