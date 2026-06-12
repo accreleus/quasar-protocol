@@ -400,8 +400,8 @@ homes are host-local; a shared-storage driver later relaxes `host_id`).
 | column | type | notes |
 |---|---|---|
 | `id` | `UUID` PK | `gen_random_uuid()` |
-| `user_id` | `UUID` NOT NULL → `users(id)` | **no CASCADE**: user deletion tombstones the row (sets `gc_after`) so the janitor reaps the backing store first; the row is removed after the reap. (Deliberately different from `sessions`' 0007 cascade — session rows have no out-of-band backing store.) |
-| `app_id` | `UUID` NOT NULL → `apps(id)` | same tombstone-then-reap rule on app deletion. |
+| `user_id` | `UUID` **NULL** → `users(id)` **ON DELETE SET NULL** | *P5-05 erratum to P5-01: changed from NOT NULL/no-cascade.* NULL means the user was deleted and the row is orphaned pending GC. User deletion tombstones the row (sets `gc_after`) **before** the user row is deleted; the FK then sets this to NULL. The janitor reaps after the grace period and removes the row. |
+| `app_id` | `UUID` **NULL** → `apps(id)` **ON DELETE SET NULL** | *P5-05 erratum to P5-01: changed from NOT NULL/no-cascade.* Same orphan-pending-GC rule on app deletion. |
 | `host_id` | `UUID` NULL → `hosts(id)` | the host holding the backing store. NULLable for future shared-storage drivers (a shared home belongs to no single host). |
 | `provider` | `TEXT` NOT NULL | `CHECK (provider IN ('volume','local'))` — extended by future driver amendments, never repurposed. |
 | `ref` | `TEXT` NOT NULL | provider-scoped locator: the docker volume name (`volume`) or the host path under the agent's `QUASAR_HOME_ROOT` (`local`). |
@@ -492,6 +492,7 @@ control-plane/migrations/
   0006_metrics_prune_idx.up.sql  -- (#148) INDEX session_metrics (session_id, created_at) for the retention prune
   0007_user_delete_cascade.up.sql -- (#154) sessions.user_id FK → ON DELETE CASCADE (admin user deletion)
   0008_storage_foundation.up.sql -- (P5-01) CREATE user_homes; ADD apps.managed_home, apps.home_container_path
+  0009_user_homes_orphans.up.sql -- (P5-05 erratum) user_homes.user_id/app_id NULLable + ON DELETE SET NULL
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`
