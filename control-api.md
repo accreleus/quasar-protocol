@@ -58,6 +58,20 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > `docs/phase5/P5-01-contract-storage.md`. **Stops at the contract — P5-02 implements the
 > provider, P5-04/P5-05 the guards.**
 
+> **Amendment — #175 (agent backing-store reaping), additive, signed off 2026-06-12 (operator approval, PR #180).** Adds the
+> §Agent storage GC section: two **agent-authenticated** HTTP endpoints
+> (`GET /v1/agent/storage/gc-pending`, `POST /v1/agent/storage/gc-confirm`) by which a
+> node-agent pulls the tombstoned homes on its own host that are past the 24h GC grace period,
+> reaps each backing store host-side (docker volume / directory — the control plane has no
+> host access, invariant #1), and confirms the reaped ids so the row is hard-deleted. **No new
+> user/admin endpoint, no new error code, no change to any existing shape.** Auth is the
+> existing per-node `node_secret` (the agent reconnect credential), not a user bearer token —
+> see the section for the scheme. **`agent-api.md` is byte-identical** — this is a *new
+> additive HTTP surface*, not a WebSocket-message change; the pull deliberately avoids touching
+> the frozen agent WS contract. Backing semantics note in `schema.md` (`user_homes` GC
+> lifecycle — janitor now row-deletes only host-unpinned tombstones; pinned ones go via the
+> agent confirm). See issue #175.
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -536,6 +550,55 @@ asynchronously. `202` accepted; `404` unknown; `409 home_in_use` if a live sessi
   "bytes_used": 123456789, "last_used_at": "…" } ] }
 ```
 Owner is the bearer identity.
+
+### Agent storage GC (#175 amendment — signed off 2026-06-12)
+
+> *Backing-store reaping for tombstoned homes. The control plane tombstones a `user_homes`
+> row (`gc_after = now()`) but cannot remove the home's backing store — it has no host/docker
+> access (invariant #1). So the **node-agent pulls** the reapable homes on its own host,
+> removes the docker named volume / local directory host-side, and confirms the ids, which is
+> what hard-deletes the row. This is a **new additive HTTP surface; the agent WebSocket
+> contract (`agent-api.md`) is byte-identical** — no new WS message.*
+
+**Authentication (not a user bearer token).** These two endpoints authenticate the calling
+*node-agent*, not a user. The agent presents:
+- `Authorization: Bearer {node_secret}` — the per-node secret issued at enrollment (the same
+  credential the agent uses to reconnect over `/agent/ws`).
+- `X-Quasar-Node: {node_name}` — the agent's stable node name.
+
+The control plane looks up the `hosts` row by `node_name` and verifies `node_secret` against
+`hosts.node_secret_hash` using the **same `hex(sha256(secret))` scheme** the agent WS reconnect
+uses (constant-time). The resolved `host_id` scopes every query — an agent can only ever see
+and reap homes pinned to its own host. Any failure (missing/empty headers, unknown node, bad
+secret) → `401 unauthorized`; the response never distinguishes which.
+
+#### `GET /v1/agent/storage/gc-pending`
+Returns up to 100 homes pinned to the calling agent's host that are past the 24h GC grace
+period (`gc_after IS NOT NULL AND gc_after + interval '24 hours' < now()`). Host-unpinned
+(`host_id IS NULL`) tombstones are never returned here — no agent owns them; the control-plane
+janitor row-deletes those directly.
+```json
+{ "homes": [ { "id": "…", "provider": "volume", "ref": "quasar-home-…" } ] }
+```
+`provider` is `"volume"` or `"local"`; `ref` is the docker volume name or the absolute host
+directory path. The list is a hint, not a lock — an empty list is the steady state.
+
+#### `POST /v1/agent/storage/gc-confirm`
+Body: `{ "home_ids": ["…", …] }`. For each id the control plane hard-deletes the row **only**
+if it is still a past-grace tombstone on the calling host:
+```sql
+DELETE FROM user_homes
+WHERE id = $1 AND host_id = $callingHost
+  AND gc_after IS NOT NULL AND gc_after + interval '24 hours' < now()
+```
+This guard makes a confirm a **no-op** for a home that was *revived* (a launch cleared
+`gc_after` between the agent's pull and its confirm) or *relocated* to another host — the
+live row survives, and the agent's reap of a now-stale backing store is harmless (its reap is
+idempotent). Response:
+```json
+{ "deleted": 2 }
+```
+`deleted` is the count of rows actually removed (≤ `home_ids` length).
 
 ---
 

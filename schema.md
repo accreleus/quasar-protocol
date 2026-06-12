@@ -400,7 +400,7 @@ homes are host-local; a shared-storage driver later relaxes `host_id`).
 | column | type | notes |
 |---|---|---|
 | `id` | `UUID` PK | `gen_random_uuid()` |
-| `user_id` | `UUID` **NULL** → `users(id)` **ON DELETE SET NULL** | *P5-05 erratum to P5-01: changed from NOT NULL/no-cascade.* NULL means the user was deleted and the row is orphaned pending GC. User deletion tombstones the row (sets `gc_after`) **before** the user row is deleted; the FK then sets this to NULL. The janitor reaps after the grace period and removes the row. |
+| `user_id` | `UUID` **NULL** → `users(id)` **ON DELETE SET NULL** | *P5-05 erratum to P5-01: changed from NOT NULL/no-cascade.* NULL means the user was deleted and the row is orphaned pending GC. User deletion tombstones the row (sets `gc_after`) **before** the user row is deleted; the FK then sets this to NULL. After the grace period the row (and its backing store) is removed per the GC lifecycle note below — by the agent confirm if still host-pinned, else by the janitor. |
 | `app_id` | `UUID` **NULL** → `apps(id)` **ON DELETE SET NULL** | *P5-05 erratum to P5-01: changed from NOT NULL/no-cascade.* Same orphan-pending-GC rule on app deletion. |
 | `host_id` | `UUID` NULL → `hosts(id)` | the host holding the backing store. NULLable for future shared-storage drivers (a shared home belongs to no single host). |
 | `provider` | `TEXT` NOT NULL | `CHECK (provider IN ('volume','local'))` — extended by future driver amendments, never repurposed. |
@@ -408,10 +408,23 @@ homes are host-local; a shared-storage driver later relaxes `host_id`).
 | `bytes_used` | `BIGINT` NOT NULL DEFAULT `0` | last reported usage (the agent measures post-session; `volume`-driver usage is measured the same way via the mounted path). Advisory freshness — quota is enforced against the last report. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 | `last_used_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | touched on session end. |
-| `gc_after` | `TIMESTAMPTZ` NULL | non-null = tombstoned; the GC janitor reaps the backing store at/after this time, then deletes the row. |
+| `gc_after` | `TIMESTAMPTZ` NULL | non-null = tombstoned; after a 24h grace period the row is removed — see the GC lifecycle note below for *who* removes it (control-plane janitor vs. agent confirm). |
 
 Unique: `(user_id, app_id, host_id)` — one home per (user, app) per host.
 Index: `(user_id)` (per-user usage summation); `(gc_after)` partial `WHERE gc_after IS NOT NULL` (janitor sweep).
+
+> **GC lifecycle (#175 note).** A tombstoned row (`gc_after` set) lives out a 24h grace period,
+> then its **backing store and row** are removed by one of two paths depending on `host_id`:
+> - **`host_id` set (host-pinned).** The home's backing store sits on a specific host, and only
+>   that host's node-agent can remove it (the control plane has no host/docker access —
+>   invariant #1). The agent **pulls** these past-grace rows (`GET /v1/agent/storage/gc-pending`,
+>   `control-api.md §Agent storage GC`), reaps the docker volume / directory host-side, and
+>   **confirms** (`POST …/gc-confirm`) — the confirm is what hard-deletes the row, *after* the
+>   backing store is gone. The control-plane janitor deliberately **leaves these rows alone**.
+> - **`host_id IS NULL` (unpinned / host removed).** No agent owns the backing store, so there
+>   is nothing to reap and nobody to confirm. The control-plane **janitor** hard-deletes these
+>   rows directly after grace (a row-only delete — the pre-#175 status quo, when the janitor
+>   deleted every past-grace row regardless).
 
 ## Session state machine (shared contract)
 This is the canonical lifecycle. `agent-api.md` and `control-api.md` use exactly these
