@@ -151,6 +151,8 @@ defaults the scheduler and pipeline need.
 | `default_fps` | `INT` NOT NULL DEFAULT `60` | |
 | `default_bitrate_kbps` | `INT` NOT NULL DEFAULT `15000` | |
 | `enabled` | `BOOLEAN` NOT NULL DEFAULT `true` | hidden from the public library when false. |
+| `managed_home` | `BOOLEAN` NOT NULL DEFAULT `false` | *(P5-01, migration 0008)* when true the control plane injects the caller's per-(user, app) home into `runtime_spec.mounts` at dispatch (assign **and** swap) and enforces the single-writer + quota rules (`control-api.md` §Storage). False = today's stateless behaviour, byte-identical dispatch. |
+| `home_container_path` | `TEXT` NOT NULL DEFAULT `'/home/quasar'` | *(P5-01, migration 0008)* container-side mount point for the managed home. |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | |
 
 ## `hosts`
@@ -386,6 +388,31 @@ user's devices (the Phase-7 surface).
 
 ---
 
+## `user_homes` (P5-01)
+> *Additive amendment (migration 0008). A new bookkeeping table; it changes no existing
+> table semantics. The table tracks managed homes — the **backing store** (a docker volume
+> or a host directory) is the authoritative data; rows here are the control plane's index
+> of it (where it lives, how big it is, whether it awaits GC).*
+
+One row per provisioned per-(user, app) home, **pinned to the host that holds it** (v1
+homes are host-local; a shared-storage driver later relaxes `host_id`).
+
+| column | type | notes |
+|---|---|---|
+| `id` | `UUID` PK | `gen_random_uuid()` |
+| `user_id` | `UUID` NOT NULL → `users(id)` | **no CASCADE**: user deletion tombstones the row (sets `gc_after`) so the janitor reaps the backing store first; the row is removed after the reap. (Deliberately different from `sessions`' 0007 cascade — session rows have no out-of-band backing store.) |
+| `app_id` | `UUID` NOT NULL → `apps(id)` | same tombstone-then-reap rule on app deletion. |
+| `host_id` | `UUID` NULL → `hosts(id)` | the host holding the backing store. NULLable for future shared-storage drivers (a shared home belongs to no single host). |
+| `provider` | `TEXT` NOT NULL | `CHECK (provider IN ('volume','local'))` — extended by future driver amendments, never repurposed. |
+| `ref` | `TEXT` NOT NULL | provider-scoped locator: the docker volume name (`volume`) or the host path under the agent's `QUASAR_HOME_ROOT` (`local`). |
+| `bytes_used` | `BIGINT` NOT NULL DEFAULT `0` | last reported usage (the agent measures post-session; `volume`-driver usage is measured the same way via the mounted path). Advisory freshness — quota is enforced against the last report. |
+| `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
+| `last_used_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | touched on session end. |
+| `gc_after` | `TIMESTAMPTZ` NULL | non-null = tombstoned; the GC janitor reaps the backing store at/after this time, then deletes the row. |
+
+Unique: `(user_id, app_id, host_id)` — one home per (user, app) per host.
+Index: `(user_id)` (per-user usage summation); `(gc_after)` partial `WHERE gc_after IS NOT NULL` (janitor sweep).
+
 ## Session state machine (shared contract)
 This is the canonical lifecycle. `agent-api.md` and `control-api.md` use exactly these
 names. State is owned by the **control plane** (it writes the row); the agent *reports*
@@ -461,6 +488,10 @@ control-plane/migrations/
   0003_session_metrics.down.sql  -- DROP session_metrics
   0004_user_devices.up.sql       -- (P4-01) CREATE user_devices (per-device capability) + unique(user_id, device_key)
   0004_user_devices.down.sql     -- DROP user_devices
+  0005_session_playout.up.sql    -- (AS-02) ADD sessions.playout0_ms (tier-selected initial playout)
+  0006_metrics_prune_idx.up.sql  -- (#148) INDEX session_metrics (session_id, created_at) for the retention prune
+  0007_user_delete_cascade.up.sql -- (#154) sessions.user_id FK → ON DELETE CASCADE (admin user deletion)
+  0008_storage_foundation.up.sql -- (P5-01) CREATE user_homes; ADD apps.managed_home, apps.home_container_path
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`

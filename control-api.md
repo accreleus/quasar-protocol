@@ -43,6 +43,21 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > in `schema.md` §"Host status state machine". See `docs/phase3/P3-01-contract-host-lifecycle.md`.
 > **Stops at the contract — P3-03 implements the lifecycle, P3-04 the failover.**
 
+> **Amendment — P5-01 (storage & state foundation), additive, requires sign-off.** Adds the
+> §Storage section (admin home oversight + the caller's own usage read), one error code —
+> `home_in_use` (409) — emitted by the launch path, two optional **request** fields on the
+> existing admin app create/PATCH (`apps.managed_home` / `apps.home_container_path` —
+> additive JSON fields, absent = unchanged), and the matching Authorization rows. **Usage is
+> visibility-only in this amendment — no quota column, no quota enforcement** (operator
+> decision at sign-off; a quota is a clean later additive amendment if wanted).
+> **Purely additive:** new endpoints + new codes + new optional fields; no existing shape,
+> status code, or endpoint changes. **`agent-api.md` is explicitly unchanged** — the
+> session_assign/swap `app.mounts` array already carries arbitrary mount strings, and the
+> per-user home rides in it; this was a considered decision, not an omission. Backing DDL in
+> `schema.md` (`user_homes`, two `apps` columns — migration 0008). See
+> `docs/phase5/P5-01-contract-storage.md`. **Stops at the contract — P5-02 implements the
+> provider, P5-04/P5-05 the guards.**
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -64,11 +79,13 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   in a state that can be app-swapped), `swap_exceeds_reservation` (409, *P2-02* — the new app needs
   more than the session's held reservation), `session_not_traceable` (409, *P4-01* — deep trace
   cannot be toggled: the session is not `running`, its host is offline, or the agent rejected a live
-  toggle), `rate_limited` (429), `no_host_available` (503,
+  toggle), `home_in_use` (409, *P5-01* —
+  the caller already has a live session of this managed-home app; the per-(user, app) home is
+  single-writer), `rate_limited` (429), `no_host_available` (503,
   *P2-01* — no online host/GPU can serve the request), `capacity_exhausted` (503, *P2-01* — a
   matching GPU is online but its free encode slots / VRAM cannot satisfy the request right now),
   `internal` (500). **Retryable:** `no_host_available`, `capacity_exhausted`, `rate_limited`
-  (and `session_quota_exceeded` once one of the caller's sessions ends).
+  (and `session_quota_exceeded` / `home_in_use` once one of the caller's sessions ends).
   *Superseded:* `capacity_unavailable` (409) — the original Phase-1 launch capacity-rejection;
   retained for compatibility but **no longer emitted** (the launch path now returns the more
   specific 503 `no_host_available` / `capacity_exhausted`, see §Admission control). At N=1 it
@@ -110,6 +127,9 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/sessions/{id}/metrics` | **admin** | *(P4-01)* per-session telemetry read (oversight) |
 | `POST /v1/admin/sessions/{id}/trace` | **admin** | *(P4-01)* toggle the session's deep trace |
 | `POST /v1/me/devices` | user (self) | *(P4-01)* upsert the caller's own device capability; owner is the bearer identity, never a body field |
+| `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
+| `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
+| `GET /v1/me/storage` | user (self) | *(P5-01)* the caller's own per-app storage usage |
 | everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account |
 
 ### First-admin bootstrap (decision)
@@ -474,6 +494,48 @@ idempotent on `(user_id, device_key)`, so a login-frequency call is ample). `mea
   non-blocking** at login (`P4-08`); failure to post is silent and never blocks sign-in.
 - **No consumer.** Nothing in this phase reads `user_devices` to alter a session/codec/fps
   decision — the optimizer is a later phase; Phase 7 surfaces/manages the device list.
+
+---
+
+## Storage (P5-01)
+
+> *Additive amendment — per-user managed homes (Phase 5). DDL companion: `schema.md`
+> `user_homes` + `apps.managed_home`/`home_container_path`.*
+
+When an app has `managed_home = true`, the control plane injects one extra mount into the
+app's `mounts` array at dispatch (assign **and** swap) so the user's per-(user, app) home is
+bound at `home_container_path` (default `/home/quasar`). The wire shape of
+`session_assign`/`session_swap_app` is untouched — the home rides in the existing opaque
+`mounts` array (`agent-api.md` unchanged, by design).
+
+Launch-path behaviour (POST /v1/sessions, additive rule only):
+- managed-home app + the caller already has a live session of the **same app** ⇒
+  `409 home_in_use` (single-writer per (user, app); a different app concurrently is fine).
+
+Storage usage is **visibility-only** in this amendment: `bytes_used` is reported and
+surfaced (admin + self reads below) but nothing enforces a cap. A per-user quota, if ever
+wanted, is a later additive amendment (one column + one error code).
+
+### `GET /v1/admin/storage/homes` — list managed homes (admin)
+Query: `user_id`, `app_id`, `pending_gc` (bool) — all optional filters. Paginated like
+`GET /v1/users`.
+```json
+{ "items": [ { "id": "…", "user_id": "…", "app_id": "…", "host_id": "…",
+  "provider": "volume", "ref": "quasar-home-…", "bytes_used": 123456789,
+  "created_at": "…", "last_used_at": "…", "gc_after": null } ], "next_cursor": null }
+```
+
+### `DELETE /v1/admin/storage/homes/{id}` — tombstone a home (admin)
+Marks the home for GC (`gc_after = now()`); the janitor reaps the backing store
+asynchronously. `202` accepted; `404` unknown; `409 home_in_use` if a live session of that
+(user, app) currently mounts it.
+
+### `GET /v1/me/storage` — the caller's own usage
+```json
+{ "items": [ { "app_id": "…", "app_name": "…",
+  "bytes_used": 123456789, "last_used_at": "…" } ] }
+```
+Owner is the bearer identity.
 
 ---
 
