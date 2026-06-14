@@ -17,6 +17,14 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > `webrtcbin` tail live (no signaling renegotiation — `signaling.md` is unchanged). See
 > `docs/phase2/P2-02-contract-app-swap.md`. **Stops at the contract — P2-07 implements the swap.**
 
+> **Amendment — host-runtime-settings-admin: additive, requires sign-off.** Adds two new
+> downstream (control → node) messages: `config_update` (push the resolved knob block after
+> registration and after every admin change) and `restart` (ask the agent to exit cleanly so
+> its container restart policy restarts it with the new config). **Additive** — new `ControlMsg`
+> variants; no existing message, field, ack contract, or upstream message changes. An older agent
+> that does not understand the new `type` values silently ignores them (existing discipline).
+> See `control-api.md` §"Host Runtime Settings" for the admin surface that drives these messages.
+
 > **Amendment — P3-01 (host-lifecycle + multi-host scheduling): no wire change.** Host drain/cordon
 > is a **control-plane** concern (`control-api.md` `POST /v1/hosts/{id}/drain`; the host-status state
 > machine lives in `schema.md`). A **force**-drain reuses the existing `session_stop`
@@ -304,6 +312,89 @@ does not change the reservation; see `schema.md`):
 - `session_state{ state:"failed", error:"<reason>" }` — swap failed and the previous app could
   **not** be restored; the session is terminal and its reservation is released (the normal `failed`
   path). **Roll back when possible; only fail the session when rollback is impossible.**
+
+### `config_update` — push resolved runtime settings (host-runtime-settings-admin)
+> *Additive amendment. New downstream message; no change to any existing message. Fire-and-
+> forget — no `ack` is expected. An older agent that does not recognise the `type` ignores it
+> (existing discipline for unknown message types).*
+
+Delivers the **full resolved knob block** to the agent: for every catalog knob, the override
+value if one is set for this host, otherwise the catalog default. This is the complete
+effective config — the agent does **not** need to merge or fall back; every key is present.
+
+The control plane sends `config_update`:
+1. **Once, immediately after `registered`** — so the agent has its config snapshot before any
+   session is assigned, without a synchronous REST fetch.
+2. **Again on every admin `PATCH /v1/admin/hosts/{id}/settings`** that changes a live-class
+   knob — the agent swaps its in-memory settings and applies them to the next session build.
+
+```json
+{
+  "type": "config_update",
+  "settings": {
+    "abr_enabled": true,
+    "abr_floor_kbps": null,
+    "abr_floor_ratio": 0.3,
+    "gop": 60,
+    "slices": 8,
+    "target_usage": 6,
+    "queue_buffers": 3,
+    "zerocopy": false,
+    "idle_timeout_secs": 120,
+    "encoder": "va",
+    "render_node": "software",
+    "cuda_device": 0
+  }
+}
+```
+- **`settings`** is the complete resolved map — every catalog knob, never sparse (knobs with a
+  non-null default, such as `render_node` and `cuda_device`, always carry a concrete value;
+  only an explicitly-nullable knob like `abr_floor_kbps` may be `null`). Because the map is
+  always complete, the agent overlays it key-by-key onto its in-memory `RuntimeSettings` and the
+  result is equivalent to a full replace.
+- **Live-class knobs** (`abr_enabled`, `gop`, `slices`, etc.) take effect on the **next session
+  build**. Running sessions are never modified mid-life — the pipeline is static once built.
+- **Restart-class knobs** (`encoder`, `render_node`, `cuda_device`) are read at the agent's
+  **first session build** (inside the `ensure_gst_init` call, which runs the `gst::init` process-
+  wide `Once`). A `config_update` carrying a new restart-class value after sessions have already
+  run cannot retro-actively change them — those values are latched for the process lifetime.
+  Changing them requires the `restart` command below.
+- **Env-var fallback.** If the agent has not yet received a `config_update` when its first
+  session is assigned (race window on a newly enrolled agent), it falls back to its env-var
+  defaults — the same values that shipped before this feature. This makes the knob system fully
+  backward-compatible: an existing deployment that never touches `PATCH /v1/admin/hosts/{id}/settings`
+  behaves exactly as before.
+
+### `restart` — graceful agent exit to apply restart-class config (host-runtime-settings-admin)
+> *Additive amendment. New downstream command; no change to any existing message. Unlike
+> session commands, `restart` is handled directly in the agent's WS receive loop (not in
+> `handle_control`) so the ack can be flushed before exit.*
+
+Instructs the agent to acknowledge and then exit cleanly. The container's restart policy
+(typically `always` or `unless-stopped`) restarts the process, which re-registers with the
+control plane and receives a fresh `config_update` — so the new process builds its first
+session with the updated encoder/render-node/CUDA-device.
+
+Only used for **restart-class knobs** (`encoder`, `render_node`, `cuda_device`), because those
+are read once inside `ensure_gst_init` (which calls the process-wide `gst::init` `Once`) and
+cannot be changed in a running process without a restart.
+
+```json
+{ "type": "restart", "id": "<cmd-id>" }
+```
+**Ack semantics.** The agent replies immediately before exiting:
+```json
+{ "type": "ack", "id": "<cmd-id>", "ok": true }
+```
+The agent flushes the ack frame, then calls `std::process::exit(0)` (or equivalent). The
+control plane should not treat the subsequent WS disconnect as a fault — it is the expected
+outcome and sets `hosts.pending_restart = true` until the agent reconnects. On reconnect, the
+agent re-registers, the control plane sends `config_update` with the new settings, and
+`pending_restart` is cleared.
+
+Running sessions are **not** forcibly stopped by the `restart` command. Operators who want a
+clean cut should drain the host first (`POST /v1/hosts/{id}/drain`, `control-api.md`) before
+changing a restart-class knob.
 
 ### `session_trace` — toggle deep trace on a running session (P4-01)
 > *Additive, observability amendment. New downstream command; no change to any existing

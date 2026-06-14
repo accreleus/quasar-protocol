@@ -95,7 +95,10 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   cannot be toggled: the session is not `running`, its host is offline, or the agent rejected a live
   toggle), `home_in_use` (409, *P5-01* —
   the caller already has a live session of this managed-home app; the per-(user, app) home is
-  single-writer), `rate_limited` (429), `no_host_available` (503,
+  single-writer), `restart_required` (409, *host-runtime-settings* — a `PATCH` to
+  `/v1/admin/hosts/{id}/settings` changed a restart-class knob while the host has live sessions
+  but `restart_confirm` was not `true`; includes `{ "live_sessions": N }` in the error body),
+  `rate_limited` (429), `no_host_available` (503,
   *P2-01* — no online host/GPU can serve the request), `capacity_exhausted` (503, *P2-01* — a
   matching GPU is online but its free encode slots / VRAM cannot satisfy the request right now),
   `internal` (500). **Retryable:** `no_host_available`, `capacity_exhausted`, `rate_limited`
@@ -144,6 +147,9 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `GET /v1/me/storage` | user (self) | *(P5-01)* the caller's own per-app storage usage |
+| `GET /v1/admin/config/catalog` | **admin** | *(host-runtime-settings)* read the knob catalog |
+| `GET /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* read a host's resolved settings + overrides |
+| `PATCH /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* update per-host overrides |
 | everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account |
 
 ### First-admin bootstrap (decision)
@@ -599,6 +605,142 @@ idempotent). Response:
 { "deleted": 2 }
 ```
 `deleted` is the count of rows actually removed (≤ `home_ids` length).
+
+---
+
+## Host Runtime Settings (host-runtime-settings-admin)
+
+> *Additive, admin-gated amendment. New endpoints; no change to any existing shape, status
+> code, or endpoint. All three endpoints are gated by `RequireAuth → RequireAdmin` — a valid
+> non-admin bearer is `403` before any resource lookup, consistent with §Authorization.*
+
+The control plane maintains a **server-side knob catalog** and a **per-host sparse override
+table** (`schema.md` `host_settings`). A missing `host_settings` row means all knobs resolve
+to catalog defaults. Env vars on the agent container remain the bootstrap fallback and are not
+visible here — they are only in effect before the agent receives its first `config_update`.
+
+### `GET /v1/admin/config/catalog` — read the knob catalog
+Returns the full typed catalog of all tunable knobs. Used by the admin UI to render controls
+generically (bool → toggle, int → number input, enum → select, etc.).
+```json
+// 200
+{
+  "knobs": [
+    {
+      "key": "abr_enabled",
+      "type": "bool",
+      "default": false,
+      "nullable": false,
+      "class": "live",
+      "env_var": "QUASAR_ABR"
+    },
+    {
+      "key": "abr_floor_kbps",
+      "type": "int",
+      "default": null,
+      "min": 1,
+      "nullable": true,
+      "class": "live",
+      "env_var": "QUASAR_ABR_FLOOR_KBPS"
+    },
+    {
+      "key": "encoder",
+      "type": "enum",
+      "default": "openh264",
+      "enum": ["openh264", "va", "nvenc"],
+      "nullable": false,
+      "class": "restart",
+      "env_var": "QUASAR_ENCODER"
+    }
+  ]
+}
+```
+Each catalog entry carries:
+- **`key`** — the knob identifier used in `overrides` JSONB and `config_update` messages.
+- **`type`** — one of `bool`, `int`, `float`, `enum`, `string`.
+- **`default`** — the catalog default (equals the env-var default; never `null` for non-nullable knobs).
+- **`min` / `max`** — optional numeric bounds (present for `int`/`float` knobs that have them).
+- **`enum`** — optional array of valid string values (present when `type = "enum"`).
+- **`nullable`** — whether `null` is a valid value (a `null` override clears to catalog default; a knob whose default is `null` explicitly accepts it).
+- **`class`** — `live` (takes effect on the next session launch, no restart) or `restart` (requires an agent restart; see `agent-api.md`).
+- **`env_var`** — the corresponding environment variable on the agent container (informational; displayed in the UI).
+
+### `GET /v1/admin/hosts/{id}/settings` — read a host's settings
+Returns the resolved (effective) knob values and the sparse override map for one host.
+```json
+// 200
+{
+  "resolved": {
+    "abr_enabled": true,
+    "abr_floor_kbps": null,
+    "abr_floor_ratio": 0.3,
+    "gop": 60,
+    "encoder": "va"
+  },
+  "overrides": {
+    "abr_enabled": true,
+    "encoder": "va"
+  },
+  "pending_restart": false
+}
+```
+- **`resolved`** — the full set of effective knob values for this host: for each catalog knob,
+  the override value if one exists, otherwise the catalog default.
+- **`overrides`** — the sparse map of only the knobs that differ from their catalog defaults.
+  Empty object when no overrides are set.
+- **`pending_restart`** — `true` when a restart-class knob was changed (or the `restart`
+  command was sent) and the agent has not yet reconnected reporting the new encoder/device.
+  Cleared when the agent's next `register` + `config_update` cycle completes.
+- **Errors:** `404 not_found` — no host with that id.
+
+### `PATCH /v1/admin/hosts/{id}/settings` — update per-host overrides
+Sets, updates, or clears individual knob overrides for a host. Validates the full override map
+against the catalog before persisting. Pushes the new resolved config to the agent immediately
+as a `config_update` message (`agent-api.md`).
+```json
+// request — sparse map; a null value clears that override (restores catalog default)
+{
+  "overrides": {
+    "abr_enabled": true,
+    "encoder": "va",
+    "abr_floor_kbps": null
+  },
+  "restart_confirm": false
+}
+// 200 — new effective state
+{
+  "resolved": { "abr_enabled": true, "encoder": "va", "abr_floor_kbps": null, "...": "..." },
+  "overrides": { "abr_enabled": true, "encoder": "va" },
+  "restart_triggered": false
+}
+```
+- **Validation.** Unknown keys → `400 validation_failed`. Wrong type → `400 validation_failed`.
+  Out-of-range value (beyond `min`/`max`) → `400 validation_failed`. Only the keys in the
+  request `overrides` map are touched; unmentioned keys are unchanged.
+- **`null` value.** Setting a key to `null` deletes that override, returning the knob to its
+  catalog default on the next resolve. A knob whose catalog default is `null` (nullable) may
+  be set to `null` explicitly — this is a valid value, not a deletion marker for those knobs;
+  the control plane distinguishes "absent from overrides" from "present as null".
+- **Restart-class knobs with live sessions.** When any restart-class knob is changed and the
+  host has one or more sessions in `state ∈ {assigned, starting, running}`:
+  - If `restart_confirm` is absent or `false` → **`409 restart_required`** with body
+    `{ "error": { "code": "restart_required", "message": "...", "live_sessions": N } }`.
+    No override is persisted and the agent is not contacted.
+  - If `restart_confirm: true` → the overrides are persisted, `restart_triggered: true` is
+    returned, `pending_restart` is set on the host row, the `restart` command is sent to the
+    agent (`agent-api.md`), and the agent exits; its container restart policy brings it back.
+    Running sessions are **not** forcibly stopped — the restart command races gracefully with
+    the container lifecycle; operators should drain first (`POST /v1/hosts/{id}/drain`) if they
+    want a clean cut.
+- **Live-class knobs.** Overrides are persisted and a `config_update` message is sent to the
+  agent immediately (`agent-api.md`). The agent applies new values to the next session build —
+  live sessions are unaffected. `restart_triggered` is `false`.
+- **`restart_triggered: true`** in the response means the `restart` downstream message was sent
+  to the agent this request; `pending_restart` on the host is now `true`. The caller should
+  poll `GET /v1/admin/hosts/{id}/settings` to detect when `pending_restart` clears (agent
+  reconnected with updated config).
+- **Errors:** `404 not_found` — no host with that id; `400 validation_failed` — bad knob key,
+  wrong type, or out-of-range value; `409 restart_required` — as above.
 
 ---
 

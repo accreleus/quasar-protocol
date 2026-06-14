@@ -388,6 +388,35 @@ user's devices (the Phase-7 surface).
 
 ---
 
+## `host_settings` (native-client-spike-186 / host-runtime-settings-admin)
+> *Additive amendment (migration 0010). A new table; it changes no existing table, column,
+> type, or constraint. Stores per-host sparse overrides for the server-side knob catalog;
+> the JSONB column means future knobs are catalog-only additions (no migration per new knob).*
+
+One row per host that has **at least one knob override**. Hosts with no overrides simply have
+no row — the control plane resolves every knob to its catalog default in that case.
+
+| column | type | notes |
+|---|---|---|
+| `host_id` | `UUID` PRIMARY KEY → `hosts(id)` ON DELETE CASCADE | the host these overrides belong to. PK so there is exactly one overrides row per host. Cascade-deletes automatically when the host is removed. |
+| `overrides` | `JSONB` NOT NULL DEFAULT `'{}'` | **sparse** map of catalog knob keys → values. Absent keys resolve to the catalog default at read time. The JSONB is **validated server-side against the hostcfg catalog on every PATCH** and is never trusted blindly — unknown keys, out-of-range values, and wrong types are rejected before the row is written. |
+| `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | last modification time; maintained by the application. |
+| `updated_by` | `UUID` NULL → `users(id)` | the admin user who last changed the overrides. NULL until the first admin write (e.g. pre-populated by a migration). No cascade — the admin's identity is kept for the audit trail even after the admin user is deleted. |
+
+Migration: `0010_host_settings.up.sql` — `CREATE TABLE host_settings (...)`. The down migration drops the table.
+
+> **Knob catalog (authoritative in the control plane, not in the schema).** The catalog is a
+> server-side typed manifest — each entry carries: key, type (`bool`/`int`/`float`/`enum`/`string`),
+> default (equals today's env-var default), optional range/enum constraints, the corresponding env
+> var name, and a class (`live` or `restart`). The control plane exposes the catalog to the UI via
+> `GET /v1/admin/config/catalog` (`control-api.md`). **Live-class knobs** take effect on the next
+> session launch (no restart needed). **Restart-class knobs** (`encoder`, `render_node`,
+> `cuda_device`) are read once at the agent's first session build (`gst::init` is a process-wide
+> `Once`); changing them requires an agent restart via the `restart` downstream message (`agent-api.md`).
+> Precedence: catalog default → per-host override; env vars are the agent's bootstrap fallback only.
+
+---
+
 ## `user_homes` (P5-01)
 > *Additive amendment (migration 0008). A new bookkeeping table; it changes no existing
 > table semantics. The table tracks managed homes — the **backing store** (a docker volume
