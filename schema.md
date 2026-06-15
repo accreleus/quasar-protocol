@@ -30,7 +30,7 @@
 > exactly like P2-02's `swapping` — the `state` CHECK set is untouched). No new column, type,
 > constraint, or migration. See `docs/phase3/P3-01-contract-host-lifecycle.md`.
 
-The persistence model for the control plane. This **replaces Wolf's TOML-as-database**:
+The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
 

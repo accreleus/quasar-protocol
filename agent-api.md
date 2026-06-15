@@ -43,7 +43,7 @@ friendly).
 Why node-initiated and persistent:
 - **NAT / K8s friendly.** The control plane never has to reach *into* a node. Nodes behind NAT,
   or as a DaemonSet pod dialing a control-plane Service, work with zero extra plumbing. This is
-  exactly why Wolf-on-K8s was all workarounds and this is not.
+  exactly why this split makes the Kubernetes story fall out cleanly.
 - **Single liveness signal.** Connection up + heartbeats = host `online`; disconnect = `offline`
   and its sessions are reaped. No separate health-check fabric.
 - **Bidirectional.** Upstream events (capacity, heartbeat, session state, signaling) and
