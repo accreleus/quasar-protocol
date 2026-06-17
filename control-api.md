@@ -615,9 +615,18 @@ idempotent). Response:
 > non-admin bearer is `403` before any resource lookup, consistent with §Authorization.*
 
 The control plane maintains a **server-side knob catalog** and a **per-host sparse override
-table** (`schema.md` `host_settings`). A missing `host_settings` row means all knobs resolve
-to catalog defaults. Env vars on the agent container remain the bootstrap fallback and are not
-visible here — they are only in effect before the agent receives its first `config_update`.
+table** (`schema.md` `host_settings`). A missing `host_settings` row means the host has **no
+overrides**, so every knob is left at the **agent's env value** (`QUASAR_*`).
+
+> **#194 amendment — resolution precedence is `stored-override → agent env → catalog default`.**
+> The `config_update` pushed to the agent carries only the **sparse overrides** (see
+> `agent-api.md`); the agent overlays them on its env baseline. So clearing an override reverts
+> the knob to the **agent's env**, not the catalog default, and an un-overridden knob on a GPU
+> host keeps its `QUASAR_ENCODER=nvenc` (it is no longer silently forced to the `openh264`
+> catalog default). The `resolved` field below is a **display** view (`catalog-default ←
+> overrides`); it does **not** see the agent's env, so on a host whose env differs from the
+> catalog default it can differ from what the agent actually runs. Surfacing the agent's true
+> effective config in `/admin` is a tracked follow-up.
 
 ### `GET /v1/admin/config/catalog` — read the knob catalog
 Returns the full typed catalog of all tunable knobs. Used by the admin UI to render controls
@@ -661,7 +670,7 @@ Each catalog entry carries:
 - **`default`** — the catalog default (equals the env-var default; never `null` for non-nullable knobs).
 - **`min` / `max`** — optional numeric bounds (present for `int`/`float` knobs that have them).
 - **`enum`** — optional array of valid string values (present when `type = "enum"`).
-- **`nullable`** — whether `null` is a valid value (a `null` override clears to catalog default; a knob whose default is `null` explicitly accepts it).
+- **`nullable`** — whether `null` is a valid value (a `null` override **clears** the knob — on the agent it reverts to the env baseline; in the `resolved` display view it falls back to the catalog default; a knob whose default is `null` explicitly accepts it).
 - **`class`** — `live` (takes effect on the next session launch, no restart) or `restart` (requires an agent restart; see `agent-api.md`).
 - **`env_var`** — the corresponding environment variable on the agent container (informational; displayed in the UI).
 
