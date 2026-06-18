@@ -95,7 +95,9 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   cannot be toggled: the session is not `running`, its host is offline, or the agent rejected a live
   toggle), `home_in_use` (409, *P5-01* —
   the caller already has a live session of this managed-home app; the per-(user, app) home is
-  single-writer), `restart_required` (409, *host-runtime-settings* — a `PATCH` to
+  single-writer), `profile_ineligible` (409, *AS10-03* — a user-facing launch selected a stream
+  profile that is `ineligible` for the caller's device, or a non-user-facing profile without an
+  admin/explicit-override bypass), `restart_required` (409, *host-runtime-settings* — a `PATCH` to
   `/v1/admin/hosts/{id}/settings` changed a restart-class knob while the host has live sessions
   but `restart_confirm` was not `true`; includes `{ "live_sessions": N }` in the error body),
   `rate_limited` (429), `no_host_available` (503,
@@ -244,15 +246,18 @@ Creates a session, runs the scheduler (pick host+GPU, reserve VRAM+encode slots)
 agent to assign+start, and returns the **signaling coordinates** the client connects with. This
 is the single hinge to `signaling.md`.
 ```json
-// request — app_id required; stream params optional (default from the app row)
+// request — app_id required; profile_id is the normal user-facing selector
+// (AS10-03); the explicit stream block remains available for admin/debug/back-compat.
 {
   "app_id": "<uuid>",
+  "profile_id": "1080p60",
   "stream": { "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 15000 }
 }
 // 201
 {
   "session": {
     "id": "<uuid>", "app_id": "<uuid>", "state": "assigned",
+    "profile_id": "1080p60",
     "stream": { "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 15000, "h264_profile": "constrained-baseline" },
     "created_at": "..."
   },
@@ -285,6 +290,37 @@ is the single hinge to `signaling.md`.
   advance `assigned → starting → running` via signaling/`GET`.
 - `state` may already be `starting`/`running` by the time the client reads it — these are the
   `schema.md` states verbatim.
+
+#### Launch by profile (AS10-03)
+> *Additive amendment — adds an optional `profile_id` request field and an optional
+> `profile_id` response field (persisted on the session, `schema.md`); changes no existing
+> shape. Wants Opus + human sign-off per the frozen-contract rule.*
+
+`profile_id` is the normal user-facing way to launch: it names a profile from the AS10-01
+catalog (the user-facing ids returned by `GET /v1/me/profiles`) and the control plane resolves
+it to concrete `width`/`height`/`fps`/`bitrate_kbps`/`h264_profile`/`playout0_ms`. Rules:
+
+- **Resolution & FPS are fixed for the session.** In-session adaptation (ABR, AS10-04+) changes
+  bitrate/quality only — never the resolution or frame rate.
+- **H.264 profile is negotiated for the transport.** A profile's nominal `h264_profile` (e.g.
+  `high`) is its preference for a capable client; the **browser (WebRTC) receiver rejects High**
+  (verified on both VA and NVENC), so for today's browser-only transport the launch resolves
+  `h264_profile` down to the **constrained-baseline** floor. The selected `profile_id` still
+  records the rung. A future native client (AS10-12) — or an explicit `stream.h264_profile`
+  override — lifts it. (This is why the resolved `stream.h264_profile` above reads
+  `constrained-baseline` even for a `high`-nominal profile.)
+- **Eligibility gate.** A user-facing launch naming a profile that is **`ineligible`** for the
+  caller's device (the same verdict `GET /v1/me/profiles` returns) is rejected with
+  **`409 profile_ineligible`** and no session row persists. A `risky` profile is allowed. A
+  caller with no/stale probe is never rejected for eligibility (unknown → allow).
+- **Unknown `profile_id`** → `400 validation_failed`.
+- **Overrides & bypass (back-compat / admin / debug).** An explicit `stream` block beats the
+  profile field-by-field, and its presence — or an **admin** caller — bypasses the eligibility
+  gate (and allows selecting a non-user-facing debug/internal profile such as `720p30`). With no
+  `profile_id`, behaviour is exactly as before (AS-02 tier selection capped by the app defaults).
+- The selected `profile_id` is **persisted on the session** and echoed in every session body
+  (launch + `GET`); it is `null` for a legacy/tier/override launch. The resolved concrete values
+  live in `stream`; full profile metadata is at `GET /v1/me/profiles` keyed by this id.
 
 ### Admission control (P2-01)
 > *Additive amendment — the rule the launch path enforces. Defines wire behaviour only; the
@@ -329,6 +365,7 @@ well-formed and authorized; the server simply has no room to place it now.
 { "session": {
     "id": "<uuid>", "app_id": "<uuid>", "host_id": "<uuid|null>",
     "state": "running", "state_detail": "pipeline live", "error_message": null,
+    "profile_id": "1080p60",
     "stream": { "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 15000, "h264_profile": "main" },
     "created_at": "...", "started_at": "...", "ended_at": null
   } }

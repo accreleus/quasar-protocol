@@ -259,6 +259,7 @@ signaling (P1-D).
 | `fps` | `INT` NOT NULL | |
 | `bitrate_kbps` | `INT` NOT NULL | |
 | `h264_profile` | `TEXT` NOT NULL DEFAULT `'constrained-baseline'` | `CHECK (h264_profile IN ('constrained-baseline','main','high'))`. P1-11 negotiates this up; the Phase-0 floor is the default. |
+| `profile_id` | `TEXT` NULL | AS10-03: the AS10-01 stream-profile id this session was launched from (e.g. `'1080p60'`); NULL for a legacy/tier/override launch. The `width`/`height`/`fps`/`bitrate_kbps`/`h264_profile` columns carry the resolved concrete values. Not FK-constrained — the profile catalog is an in-code table, not a DB table. |
 | **reservation** | | what was reserved on assign. |
 | `reserved_vram_mb` | `INT` NOT NULL DEFAULT `0` | |
 | `reserved_encode_slots` | `INT` NOT NULL DEFAULT `0` | |
@@ -535,6 +536,8 @@ control-plane/migrations/
   0007_user_delete_cascade.up.sql -- (#154) sessions.user_id FK → ON DELETE CASCADE (admin user deletion)
   0008_storage_foundation.up.sql -- (P5-01) CREATE user_homes; ADD apps.managed_home, apps.home_container_path
   0009_user_homes_orphans.up.sql -- (P5-05 erratum) user_homes.user_id/app_id NULLable + ON DELETE SET NULL
+  0010_host_settings.up.sql      -- (#212) CREATE host_settings (per-host runtime config overrides)
+  0011_session_profile.up.sql    -- (AS10-03) ADD sessions.profile_id (selected AS10-01 stream profile)
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`
