@@ -144,6 +144,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/sessions/{id}/metrics` | **admin** | *(P4-01)* per-session telemetry read (oversight) |
 | `POST /v1/admin/sessions/{id}/trace` | **admin** | *(P4-01)* toggle the session's deep trace |
 | `POST /v1/me/devices` | user (self) | *(P4-01)* upsert the caller's own device capability; owner is the bearer identity, never a body field |
+| `GET /v1/me/profiles` | user (self) | *(AS10-02)* stream profile eligibility + recommendation for the caller's device; advisory, owner is the bearer identity |
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `GET /v1/me/storage` | user (self) | *(P5-01)* the caller's own per-app storage usage |
@@ -514,6 +515,63 @@ idempotent on `(user_id, device_key)`, so a login-frequency call is ample). `mea
   non-blocking** at login (`P4-08`); failure to post is silent and never blocks sign-in.
 - **No consumer.** Nothing in this phase reads `user_devices` to alter a session/codec/fps
   decision — the optimizer is a later phase; Phase 7 surfaces/manages the device list.
+
+---
+
+### `GET /v1/me/profiles` — stream profile eligibility + recommendation (AS10-02)
+
+> *Additive, user-self amendment (AS10-02). New endpoint; changes no existing
+> request/response shape, status code, or frozen endpoint. Follows the same
+> user-self pattern as `POST /v1/me/devices` / `GET /v1/me/storage`. Wants Opus +
+> human sign-off per the frozen-contract rule.*
+
+Returns the stream profile catalog (AS10-01, user-facing profiles only) annotated
+with an **eligibility verdict** and **reason codes** for the caller's device, plus a
+**recommended** profile. Owner is the **bearer identity**. **Advisory only** — this does
+**not** change what a launch does (the launch path still flows through the legacy tier
+ladder until AS10-03 migrates it). The verdict is computed from the caller's latest
+**fresh** `user_devices` probe (≤ 30 days; a stale/absent probe yields a conservative,
+low-confidence recommendation).
+
+Each profile is classified `eligible` (passes every hard check and has bandwidth
+headroom), `risky` (launchable but with a soft concern — thin headroom, browser-client
+risk, or an unconfirmable high-refresh display), or `ineligible` (fails a hard check).
+`recommended_id` is the highest fully-eligible profile (catalog order); with no usable
+probe it is the conservative default (`1080p60`) and `confidence` is `low`.
+
+```json
+// 200
+{
+  "recommended_id": "1080p60",
+  "confidence": "high" | "low",
+  "notes": [ { "code": "probe_missing", "message": "..." } ],
+  "profiles": [
+    {
+      "id": "1080p60", "display_name": "1080p · 60 FPS",
+      "width": 1920, "height": 1080, "fps": 60,
+      "codecs": [ { "codec": "h264", "status": "launchable" },
+                  { "codec": "hevc", "status": "future" },
+                  { "codec": "av1",  "status": "future" } ],
+      "h264_profile": "high",
+      "nominal_bitrate_kbps": 12000, "min_offer_bandwidth_kbps": 14400,
+      "recommended_offer_bandwidth_kbps": 18000, "headroom_factor": 1.5,
+      "abr_floor_kbps": 4000, "max_startup_rtt_ms": 0, "min_decode_height": 1080,
+      "high_refresh_display": "none", "hardware_encoder_required": false,
+      "browser_client": "recommended", "playout0_ms": 50, "visibility": "user",
+      "eligibility": "eligible",
+      "reasons": [ { "code": "bandwidth_too_low", "message": "..." } ]
+    }
+  ]
+}
+```
+- **Reason codes** (stable, append-only): `bandwidth_too_low`, `rtt_too_high`,
+  `decode_height_too_low`, `codec_not_supported`, `host_encoder_not_supported`,
+  `display_refresh_unknown`, `browser_playout_unsupported`,
+  `historical_client_performance_failed`, `probe_missing`, `probe_stale`.
+  Network/decode/codec checks are skipped for an unmeasured probe field (unknown → allow);
+  host-encoder and historical-failure inputs are not yet populated in AS10-02 (reserved for
+  later issues) and are part of the contract from the start.
+- Debug/internal profiles (`720p30`) are **never** returned.
 
 ---
 
