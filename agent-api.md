@@ -34,6 +34,15 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > this wire. **This contract is therefore unchanged by P3-01; the note is recorded for
 > traceability.** See `docs/phase3/P3-01-contract-host-lifecycle.md`.
 
+> **Amendment — AS10-04 (profile ABR floor), additive, requires sign-off.** Adds one optional
+> field to the `session_assign` `stream` block: **`abr_floor_kbps`: int** (kbit/s, omitted ⇒
+> `0`). When a session was launched from a stream profile (AS10-01) the control plane resolves
+> the profile's ABR floor from its in-code catalog and sends it so the agent's in-session ABR
+> governor honours the profile's stated minimum. **Additive** — a new optional field; no existing
+> field, message, or ack contract changes. Omitted/`0` (legacy/tier/override launch, or an older
+> control plane) ⇒ the agent keeps its env/ratio-derived floor. See §`session_assign` and
+> `docs/phase-as10/`.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -249,6 +258,15 @@ reserve→prepare→go-live steps are real (P1-6), even though at N=1 `start` ma
 `resources` mirrors the reserved amounts. The agent must not exceed `resources` (it's the
 budget the control plane reserved). `gpu_index` maps to the agent's local GPU enumeration
 (same index it reported in `capacity`).
+
+> *(AS10-04, additive)* The `stream` block may carry an optional **`abr_floor_kbps`: int**
+> (kbit/s, omitted ⇒ `0`). When the session was launched from a stream profile (AS10-01) the
+> control plane resolves the profile's ABR floor from its catalog and sends it here, so the
+> agent's in-session ABR governor never starves below the profile's stated minimum. The ABR
+> *ceiling* stays the profile's nominal bitrate = the existing `bitrate_kbps` (no separate
+> ceiling field). **Omitted or `0`** (a legacy/tier/override launch, or an older control plane)
+> ⇒ the agent falls back to its env/ratio-derived floor (`QUASAR_ABR_FLOOR_KBPS`, else `ceiling
+> × QUASAR_ABR_FLOOR_RATIO`) exactly as before. Additive — no existing field or shape changes.
 
 > *(P4-01, additive)* `session_assign` may carry an optional **`deep_trace`: bool** (default
 > `false` when absent). When `true`, the agent **arms the deep trace at pipeline build** —
