@@ -146,6 +146,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/sessions/{id}/metrics` | **admin** | *(P4-01)* per-session telemetry read (oversight) |
 | `POST /v1/admin/sessions/{id}/trace` | **admin** | *(P4-01)* toggle the session's deep trace |
 | `POST /v1/me/devices` | user (self) | *(P4-01)* upsert the caller's own device capability; owner is the bearer identity, never a body field |
+| `GET /v1/me/devices` | user (self) | *(AS10-08)* read the caller's own latest device capability record; owner is the bearer identity |
 | `GET /v1/me/profiles` | user (self) | *(AS10-02)* stream profile eligibility + recommendation for the caller's device; advisory, owner is the bearer identity |
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
@@ -552,6 +553,75 @@ idempotent on `(user_id, device_key)`, so a login-frequency call is ample). `mea
   non-blocking** at login (`P4-08`); failure to post is silent and never blocks sign-in.
 - **No consumer.** Nothing in this phase reads `user_devices` to alter a session/codec/fps
   decision — the optimizer is a later phase; Phase 7 surfaces/manages the device list.
+
+#### Extended capability / certification record (AS10-08)
+
+> *Additive amendment (AS10-08). The `capabilities` JSON column is deliberately
+> **schema-free** (`schema.md` `user_devices`) — this section documents the
+> richer shape the web client now posts, but **no existing field, request, or
+> response shape changes**, and **no DB migration** is involved. The server
+> stores the blob opaquely after **sanitizing** it (bounded string lengths,
+> validated `client_type`, clamped numeric ranges, structural junk dropped) and
+> server-stamping `measured_at`. Fields the server does not model round-trip
+> verbatim within those bounds.*
+
+The probe evolved from a connection/decode probe into a **client performance
+certification record**. The extended (and entirely optional/best-effort) fields:
+
+```json
+{ "device_key": "<opaque id>",
+  "capabilities": {
+    "client_type": "web",
+    "codecs": {"h264":true,"hevc":false,"av1":false,"vp9":true},
+    "max_decode_height": 2160,
+    "bandwidth_kbps": 48000,
+    "rtt_ms": 12,
+    "browser":  { "name": "Chrome", "version": "126.0.0.0" },
+    "platform": "macOS",
+    "display":  { "width": 2560, "height": 1440, "refresh_hz": 120 },
+    "features": { "jitter_buffer_target": true, "playout_delay_hint": true,
+                  "pointer_lock": true, "coalesced_pointer_events": true, "gamepad": true },
+    "profiles": {
+      "<profile-id>": {
+        "h264_profile_decoded": "constrained-baseline",
+        "decode_pass": true, "present_pass": true,
+        "decode_ms": 1.4, "present_fps": 59.8, "dropped_ratio": 0.0,
+        "measured_at": "<RFC3339>"
+      }
+    }
+  } }
+```
+- `client_type` is validated against a known set (`web`/`native`); anything else
+  is normalised to `web` server-side.
+- `browser`/`platform`/`display`/`features` are **best-effort feature detection**;
+  any may be absent. `display.refresh_hz` is omitted when not measurable.
+- `profiles` is a **per-profile certification map**, keyed by stream-profile id
+  (`GET /v1/me/profiles`). Its purpose is the AS10-03 finding that **browser codec
+  acceptance is not proof of hardware decode** — `h264_profile_decoded` records the
+  H.264 profile that *actually decoded* (e.g. `constrained-baseline`), with
+  decode/presentation pass-fail and basic playback metrics. In AS10-08 it is the
+  **shape only** (populated empty / where trivially available); the harness that
+  fills it from historical playback is AS10-10.
+
+### `GET /v1/me/devices` — read the caller's latest device capability record (AS10-08)
+
+> *Additive, user-self amendment (AS10-08). New endpoint; changes no existing
+> request/response shape, status code, or frozen endpoint. Follows the same
+> user-self pattern as `POST /v1/me/devices` / `GET /v1/me/profiles`.*
+
+Returns the caller's **most-recently-seen** device row (by `last_seen_at`),
+including the stored capability record verbatim. Owner is the **bearer identity**;
+a user can only read their own devices. `404 not_found` when the caller has no
+device row yet.
+```json
+// 200
+{ "device": {
+    "id": "<uuid>", "device_key": "<opaque id>",
+    "first_seen_at": "...", "last_seen_at": "...",
+    "capabilities": { "...": "the sanitized, measured_at-stamped blob, verbatim" } } }
+// 404 — caller has no device record
+{ "error": { "code": "not_found", "message": "no device record for caller" } }
+```
 
 ---
 
