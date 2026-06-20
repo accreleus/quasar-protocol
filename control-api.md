@@ -554,6 +554,22 @@ idempotent on `(user_id, device_key)`, so a login-frequency call is ample). `mea
 - **No consumer.** Nothing in this phase reads `user_devices` to alter a session/codec/fps
   decision — the optimizer is a later phase; Phase 7 surfaces/manages the device list.
 
+> **Amendment — AS10-12 (native-client capability/metrics/cert contract), additive, requires sign-off.**
+> A **future native client** reports its capabilities, playback metrics, and per-profile
+> certification through the **same `POST /v1/me/devices`** endpoint, into the **same
+> `user_devices.capabilities` JSONB column**, as an **additive superset of the web probe**
+> documented below. The native report's full wire schema is the new **frozen** contract
+> `protocol/native-client.md`. **No endpoint, request/response shape, status code, or DB
+> migration changes** — the server additively validates a `report_version` integer (dropped
+> if non-integer) and passes the native sub-objects (`os`, `decode`, `audio`, `input`,
+> `metrics`, `health`) through within the existing sanitizer bounds (depth 8 / width 64 /
+> string 512); the flat `codecs` map stays the eligibility surface (the richer per-codec
+> `decode{}` is forward-data, not a new gate). An existing web blob is, unchanged, a valid
+> (minimal) native-family report and stores byte-identically. The 8 KB body cap
+> (`maxDeviceBodyBytes`) is unchanged — a worst-case native payload fits with headroom (see
+> `protocol/native-client.md` §Server handling). No live consumer in AS10-12 — stored
+> forward-data, like the web probe.
+
 #### Extended capability / certification record (AS10-08)
 
 > *Additive amendment (AS10-08). The `capabilities` JSON column is deliberately
