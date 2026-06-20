@@ -72,6 +72,27 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > lifecycle — janitor now row-deletes only host-unpinned tombstones; pinned ones go via the
 > agent confirm). See issue #175.
 
+> **Amendment — P9-01 (native-client prelude), additive, requires sign-off.** Supports the
+> first-party native client (Phase 9, issue #234). Two additions: **(1)** an optional
+> **client version handshake** on `POST /v1/auth/login` — request `client_version` /
+> `contract_version` (optional; web/legacy clients omit them), response `min_client_version`
+> / `latest_client_version` (advisory; absent = no floor advertised). This amendment defines
+> the **fields and their semantics only — the enforcement rule (hard-gate below the floor,
+> soft-warn below latest) is P9-08 (#236)**, not here. **(2)** a third telemetry **source**,
+> `native`: an optional `client` discriminator on `POST /v1/sessions/{id}/stats`
+> (`"browser"` default | `"native"`) that sets the persisted `session_metrics.source`, and
+> `native` becomes a valid value of the existing `?source=` filter on the admin metrics
+> read. The discriminator is a **label, not access control** — ownership is still the bearer
+> identity, never a body field (the P4-01 rule is unchanged). **Purely additive:** new
+> optional request fields, new optional response fields, one new enum value; no existing
+> shape, status code, or endpoint changes. The capability-report ingest (AS10-08/AS10-12) is
+> **unchanged** — native rides the existing `user_devices.capabilities` JSONB.
+> **`agent-api.md`, `signaling.md`, `input.md`, `native-client.md` are unchanged** (gamepad
+> input + HEVC/AV1 are deferred, not in this prelude). Backing change in `schema.md`: the
+> `session_metrics.source` `CHECK` widens to include `'native'` (**migration 0014**). See
+> `docs/phase9/P9-01-contract-prelude.md`. **Stops at the contract — P9-07 implements the
+> native producer + migration 0014, P9-08 the handshake enforcement.**
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -189,18 +210,30 @@ returned — the client logs in next (keeps register/login flows independent).
 ### `POST /v1/auth/login`
 ```json
 // request
-{ "email": "a@b.com", "password": "<plaintext, TLS only>" }
+{ "email": "a@b.com", "password": "<plaintext, TLS only>",
+  // optional, native client only (P9-01); web/legacy clients omit them:
+  "client_version": "1.2.0", "contract_version": "p9-01" }
 // 200
 {
   "access_token": "<opaque bearer>",
   "token_type": "Bearer",
   "expires_at": "2026-06-02T12:00:00Z",
-  "user": { "id": "<uuid>", "email": "a@b.com", "username": "ada", "role": "user" }
+  "user": { "id": "<uuid>", "email": "a@b.com", "username": "ada", "role": "user" },
+  // optional version advisory (P9-01); both absent ⇒ no floor advertised:
+  "min_client_version": "1.0.0", "latest_client_version": "1.3.0"
 }
 ```
 The opaque token is stored **hashed** in `auth_tokens` and returned in plaintext exactly once
 here. `401 invalid_credentials` on bad password / unknown email / disabled account (no
 distinction, to avoid user enumeration).
+
+> *(P9-01, additive) `client_version` / `contract_version` are **optional** request fields a
+> native client sends to identify itself; a request without them (every web / Phase-1 client)
+> behaves exactly as before. `min_client_version` / `latest_client_version` are **optional**
+> response advisories. A client below `min_client_version` SHOULD be hard-gated and one below
+> `latest_client_version` soft-warned — but the **enforcement rule is defined in P9-08
+> (#236)**; this amendment only specifies the fields. `client_version` is a semver string the
+> client owns; `contract_version` is the `protocol/` version tag the client built against.*
 
 ### `POST /v1/auth/logout`
 Revokes the presented bearer token (`auth_tokens.revoked_at = now()`). `204`. Idempotent.
@@ -479,8 +512,9 @@ admin (same ownership rule as `DELETE /v1/sessions/{id}`; a non-owner is `403`, 
 **≤ 64 samples per request and ≤ 32 KB**, and **rate-limited** (`429 rate_limited`); only the
 keys in the `schema.md` field dictionary are persisted (unknown keys are ignored, not stored).
 ```json
-// request — a small batch of recent samples (browser clock, ms)
-{ "samples": [
+// request — a small batch of recent samples (client clock, ms)
+{ "client": "native",   // optional (P9-01): "browser" (default) | "native"; sets session_metrics.source
+  "samples": [
     { "ts_unix_ms": 1735689600000,
       "metrics": { "fps": 59.6, "bitrate_kbps": 14710, "rtt_ms": 12, "jitter_buffer_ms": 28,
                    "decode_ms": 1.4, "packets_lost": 0, "frames_dropped": 0,
@@ -491,9 +525,11 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
                    "glass_to_glass_ms": 71, "encode_ms": 4.6, "network_pacing_ms": 7.5,
                    "decode_display_ms": 30.9, "interactive_ms": 92 } }
   ] }
-// 202 — accepted (no body); samples are written with source='browser'
+// 202 — accepted (no body); samples are written with source = the `client` value (default 'browser')
 ```
-- Each sample becomes a `session_metrics` row with `source='browser'`. The staged-budget keys
+- Each sample becomes a `session_metrics` row with `source =` the request's `client`
+  (default `'browser'`; `'native'` for the native client — P9-01; an unknown `client` value
+  is rejected, not silently coerced). The staged-budget keys
   (`glass_to_glass_ms`, `network_pacing_ms`, `decode_display_ms`, `interactive_ms`, …) appear
   only when the session is in deep trace; the lightweight keys always.
 - Best-effort: a malformed sample is dropped, not fataled. Accepting telemetry never affects
@@ -503,7 +539,7 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
 Returns the **bounded recent window** of telemetry for one session, both sources, newest first.
 Admin-only (`403` before any lookup per §Authorization; `404` for an unknown session to an admin).
 ```json
-// 200 — paginated, newest first; ?limit=&cursor=&source=agent|browser optional
+// 200 — paginated, newest first; ?limit=&cursor=&source=agent|browser|native optional
 { "items": [
     { "source": "agent",   "ts_unix_ms": 1735689600000,
       "metrics": { "fps": 59.8, "bitrate_kbps": 14820, "encode_ms": 4.6, "frames_dropped": 1 } },

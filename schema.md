@@ -30,6 +30,17 @@
 > exactly like P2-02's `swapping` — the `state` CHECK set is untouched). No new column, type,
 > constraint, or migration. See `docs/phase3/P3-01-contract-host-lifecycle.md`.
 
+> **Amendment — P9-01 (native-client prelude), additive, requires sign-off.** Widens the
+> `session_metrics.source` `CHECK` to `('agent','browser','native')` so the first-party
+> native client's per-session telemetry (`control-api.md` `POST /v1/sessions/{id}/stats`
+> with `client: "native"`) persists as a distinct reporter — via **migration 0014**, a plain
+> `CHECK` swap (the enum convention below; the prior values are unchanged). This is the
+> **only** schema change for Phase 9's contract prelude: the version-handshake fields are
+> login req/resp only (no storage), and the native capability report rides the existing
+> `user_devices.capabilities` JSONB (no DDL). No new table, column, or type; no other
+> constraint changes. The migration itself **lands in P9-07** (the native producer), not the
+> contract ticket. See `docs/phase9/P9-01-contract-prelude.md`.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
@@ -317,7 +328,7 @@ reconcile a host→browser timeline (`P4-05`/`P4-06`).
 |---|---|---|
 | `id` | `UUID` PK | `gen_random_uuid()` |
 | `session_id` | `UUID` NOT NULL → `sessions(id)` ON DELETE CASCADE | the session this sample belongs to; cascade so a deleted session takes its metrics with it. |
-| `source` | `TEXT` NOT NULL | `CHECK (source IN ('agent','browser'))`. Which reporter produced the sample. |
+| `source` | `TEXT` NOT NULL | `CHECK (source IN ('agent','browser','native'))` *(P9-01, migration 0014 widens this from `('agent','browser')`)*. Which reporter produced the sample. |
 | `ts_unix_ms` | `BIGINT` NOT NULL | reporter wall-clock of the sample (ms since epoch), same convention as `agent-api.md` `heartbeat.ts_unix_ms`. |
 | `metrics` | `JSONB` NOT NULL DEFAULT `'{}'` | the sample payload (the field dictionary below). JSONB (not frozen columns) so a new metric is not a migration; no consumer reserves a fixed shape — but the **deep-trace staged-budget keys are enumerated** so two implementers cannot invent divergent names. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | **server-only** ingestion time (distinct from `ts_unix_ms`, the reporter's clock); not surfaced by the admin read. |
@@ -347,6 +358,13 @@ the key suffix (`_ms`, `_kbps`). The `source` column scopes which set applies.
   (`P4-05`/`P4-06`); the budget closes as `glass_to_glass_ms ≈ encode_ms + network_pacing_ms +
   jitter_buffer_ms + decode_display_ms` (`network_pacing_ms` is `rtt_ms/2` on a clean link, or
   the residual when `rtt` is untrustworthy — `P4-04` documents which, per the report's rule).
+- **`source='native'` (P9-01, the native client via `client: "native"`):** the same
+  receiver-side key set as `source='browser'` (`fps`, `rtt_ms`, `jitter_buffer_ms`,
+  `decode_ms`, `packets_lost`, `frames_dropped` (receiver-side), the presentation-pacing
+  keys, and — in deep trace — the staged glass-to-glass budget). Values the browser cannot
+  expose — **true hardware-decode** and real jitter-buffer depth — ride the **capability
+  report** (`native-client.md`, `user_devices.capabilities`), not per-sample. The producer
+  + migration 0014 land in **P9-07**.
 - **Cross-source note:** `frames_dropped` exists under **both** sources with **different**
   meaning (encoder-side vs receiver-side). It is disambiguated by `source`; a merged
   `latest_metrics` (`control-api.md`) **must** keep them source-scoped (namespace or pick by
