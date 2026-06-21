@@ -172,6 +172,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `GET /v1/me/storage` | user (self) | *(P5-01)* the caller's own per-app storage usage |
+| `POST /v1/me/password` | user (self) | *(CP-01)* change the caller's own password; subject is the bearer identity, never a body field. Revokes all active tokens on success — client must re-authenticate |
 | `GET /v1/admin/config/catalog` | **admin** | *(host-runtime-settings)* read the knob catalog |
 | `GET /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* read a host's resolved settings + overrides |
 | `PATCH /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* update per-host overrides |
@@ -246,6 +247,22 @@ Revokes the presented bearer token (`auth_tokens.revoked_at = now()`). `204`. Id
 
 > Token refresh and "list my active tokens/sessions" are deliberate Phase-2 additions; the
 > `auth_tokens` table already supports them. Not in the frozen Phase-1 surface.
+
+### `POST /v1/me/password`
+```json
+// request — RequireAuth; the subject is the bearer identity, never a body field
+{ "current_password": "<plaintext, TLS only>", "new_password": "<plaintext, TLS only>" }
+// 204 — no body
+```
+*(CP-01, additive)* Self-service change-password. The caller proves possession of the account by
+supplying `current_password`, verified against the stored argon2id hash exactly as login does. On
+success the password hash is rotated, **all** of the user's active bearer tokens are revoked (log
+out everywhere), and **`204`** is returned with no body — the client **must** re-authenticate with
+the new password (the bearer used for this call is invalid immediately after the `204`). Errors:
+`401 invalid_credentials` if `current_password` is wrong; `400 validation_failed` if `new_password`
+fails the password-strength rule (the same length bounds as `/v1/auth/register`). No new field on
+any existing shape; reuses the login password-verify path, the registration strength rule, and the
+existing token-revocation path. Gated by `RequireAuth` like the other `/v1/me` routes.
 
 ---
 
