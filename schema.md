@@ -330,7 +330,7 @@ reconcile a host→browser timeline (`P4-05`/`P4-06`).
 | `session_id` | `UUID` NOT NULL → `sessions(id)` ON DELETE CASCADE | the session this sample belongs to; cascade so a deleted session takes its metrics with it. |
 | `source` | `TEXT` NOT NULL | `CHECK (source IN ('agent','browser','native'))` *(P9-01, migration 0014 widens this from `('agent','browser')`)*. Which reporter produced the sample. |
 | `ts_unix_ms` | `BIGINT` NOT NULL | reporter wall-clock of the sample (ms since epoch), same convention as `agent-api.md` `heartbeat.ts_unix_ms`. |
-| `metrics` | `JSONB` NOT NULL DEFAULT `'{}'` | the sample payload (the field dictionary below). JSONB (not frozen columns) so a new metric is not a migration; no consumer reserves a fixed shape — but the **deep-trace staged-budget keys are enumerated** so two implementers cannot invent divergent names. |
+| `metrics` | `JSONB` NOT NULL DEFAULT `'{}'` | the sample payload (the field dictionary below). JSONB (not frozen columns) so a new metric is not a migration; no consumer reserves a fixed shape — but the **staged glass-to-glass budget keys are enumerated** so two implementers cannot invent divergent names. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | **server-only** ingestion time (distinct from `ts_unix_ms`, the reporter's clock); not surfaced by the admin read. |
 
 Index: `(session_id, ts_unix_ms DESC)` — serves "latest N samples for a session" (the admin
@@ -339,8 +339,8 @@ read) and the per-source ordering cheaply.
 **`metrics` field dictionary.** All keys optional (a reporter sends what it has); units are in
 the key suffix (`_ms`, `_kbps`). The `source` column scopes which set applies.
 - **`source='agent'` (host-observable):** `fps`, `bitrate_kbps`, `encode_ms`, `frames_encoded`,
-  `frames_dropped` (encoder-side), and — in deep trace — `encode_ms_p50` / `encode_ms_p95` /
-  `encode_ms_max`, `overlay_frames`.
+  `frames_dropped` (encoder-side). The admin UI joins this always-on `encode_ms` as the encode
+  bar of the glass-to-glass timeline (the browser cannot measure host encode directly).
 - **`source='browser'` (`getStats()`-derived):** `fps`, `bitrate_kbps`, `rtt_ms`,
   `jitter_buffer_ms`, `decode_ms`, `packets_lost`, `frames_dropped` (receiver-side),
   the **presentation-pacing** keys (`#108`, always-on, `requestVideoFrameCallback`-derived):
@@ -349,19 +349,20 @@ the key suffix (`_ms`, `_kbps`). The `source` column scopes which set applies.
   smoothness/judder metric: a clean 60 fps stream onto a 60 Hz display reads ~2 ms when smooth,
   rising sharply when the playout buffer is too tight to keep a frame ready for every vsync),
   `present_interval_p95_ms`, and `playout_target_ms` (the receiver jitter-buffer/playout target
-  the sample was measured under, so a stored σ correlates with its setting); and — in
-  deep trace — the **staged glass-to-glass budget**, one key per Phase-0 stage
-  (`docs/completed/phase0-latency-report.md`): `glass_to_glass_ms` (total), `encode_ms`
-  (host number echoed for the timeline), **`network_pacing_ms`**, **`jitter_buffer_ms`**,
-  **`decode_display_ms`**, and **`interactive_ms`** (the ping-as-marker input→photon number).
-  These six keys are the contract for the host→browser timeline the admin UI reconstructs
-  (`P4-05`/`P4-06`); the budget closes as `glass_to_glass_ms ≈ encode_ms + network_pacing_ms +
-  jitter_buffer_ms + decode_display_ms` (`network_pacing_ms` is `rtt_ms/2` on a clean link, or
-  the residual when `rtt` is untrustworthy — `P4-04` documents which, per the report's rule).
+  the sample was measured under, so a stored σ correlates with its setting); and the
+  **always-on staged glass-to-glass budget**, derived browser-side from the abs-capture-time RTP
+  header extension (`control-api.md`) plus `getStats()`, one key per receive-side Phase-0 stage
+  (`docs/completed/phase0-latency-report.md`): `glass_to_glass_ms` (total, host-capture→present),
+  **`network_pacing_ms`**, **`jitter_buffer_ms`**, and **`decode_display_ms`**. These keys are the
+  contract for the timeline the admin UI reconstructs (`P4-05`/`P4-06`), joining the agent
+  `encode_ms` (above) as the host-encode bar; the budget closes as `glass_to_glass_ms ≈ encode_ms +
+  network_pacing_ms + jitter_buffer_ms + decode_display_ms` (`network_pacing_ms` is `rtt_ms/2` on a
+  clean link, or the residual when `rtt` is untrustworthy — `P4-04` documents which, per the
+  report's rule).
 - **`source='native'` (P9-01, the native client via `client: "native"`):** the same
   receiver-side key set as `source='browser'` (`fps`, `rtt_ms`, `jitter_buffer_ms`,
   `decode_ms`, `packets_lost`, `frames_dropped` (receiver-side), the presentation-pacing
-  keys, and — in deep trace — the staged glass-to-glass budget). Values the browser cannot
+  keys, and the always-on staged glass-to-glass budget). Values the browser cannot
   expose — **true hardware-decode** and real jitter-buffer depth — ride the **capability
   report** (`native-client.md`, `user_devices.capabilities`), not per-sample. The producer
   + migration 0014 land in **P9-07**.
