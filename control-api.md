@@ -112,9 +112,7 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   `conflict` (409, e.g. duplicate email), `session_quota_exceeded` (409, *P2-01* — caller is at
   their per-user concurrent-session limit), `session_not_swappable` (409, *P2-02* — session is not
   in a state that can be app-swapped), `swap_exceeds_reservation` (409, *P2-02* — the new app needs
-  more than the session's held reservation), `session_not_traceable` (409, *P4-01* — deep trace
-  cannot be toggled: the session is not `running`, its host is offline, or the agent rejected a live
-  toggle), `home_in_use` (409, *P5-01* —
+  more than the session's held reservation), `home_in_use` (409, *P5-01* —
   the caller already has a live session of this managed-home app; the per-(user, app) home is
   single-writer), `profile_ineligible` (409, *AS10-03* — a user-facing launch selected a stream
   profile that is `ineligible` for the caller's device, or a non-user-facing profile without an
@@ -165,7 +163,6 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `POST /v1/sessions/{id}/swap` | **owner or admin** | *(P2-02)* same ownership check as `DELETE` |
 | `POST /v1/sessions/{id}/stats` | **owner or admin** | *(P4-01)* the client posts its own session's browser telemetry — same ownership check as `DELETE` |
 | `GET /v1/admin/sessions/{id}/metrics` | **admin** | *(P4-01)* per-session telemetry read (oversight) |
-| `POST /v1/admin/sessions/{id}/trace` | **admin** | *(P4-01)* toggle the session's deep trace |
 | `POST /v1/me/devices` | user (self) | *(P4-01)* upsert the caller's own device capability; owner is the bearer identity, never a body field |
 | `GET /v1/me/devices` | user (self) | *(AS10-08)* read the caller's own latest device capability record; owner is the bearer identity |
 | `GET /v1/me/profiles` | user (self) | *(AS10-02)* stream profile eligibility + recommendation for the caller's device; advisory, owner is the bearer identity |
@@ -538,17 +535,18 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
                    // presentation pacing (#108, always-on; schema.md dictionary):
                    "present_fps": 59.8, "present_interval_sd_ms": 2.9,
                    "present_interval_p95_ms": 18.0, "playout_target_ms": 100,
-                   // deep trace only — the staged glass-to-glass budget (schema.md dictionary):
-                   "glass_to_glass_ms": 71, "encode_ms": 4.6, "network_pacing_ms": 7.5,
-                   "decode_display_ms": 30.9, "interactive_ms": 92 } }
+                   // glass-to-glass budget (always-on via the abs-capture-time RTP extension):
+                   "glass_to_glass_ms": 71, "network_pacing_ms": 7.5,
+                   "decode_display_ms": 30.9 } }
   ] }
 // 202 — accepted (no body); samples are written with source = the `client` value (default 'browser')
 ```
 - Each sample becomes a `session_metrics` row with `source =` the request's `client`
   (default `'browser'`; `'native'` for the native client — P9-01; an unknown `client` value
-  is rejected, not silently coerced). The staged-budget keys
-  (`glass_to_glass_ms`, `network_pacing_ms`, `decode_display_ms`, `interactive_ms`, …) appear
-  only when the session is in deep trace; the lightweight keys always.
+  is rejected, not silently coerced). The glass-to-glass keys
+  (`glass_to_glass_ms`, `network_pacing_ms`, `decode_display_ms`) are **always-on** — glass-to-
+  glass is measured from the `abs-capture-time` RTP header extension (no per-frame overlay,
+  hardware-independent). *(Supersedes the removed deep-trace toggle / pixel-overlay instrument.)*
 - Best-effort: a malformed sample is dropped, not fataled. Accepting telemetry never affects
   session state.
 
@@ -570,20 +568,6 @@ The window is bounded by `schema.md`'s retention policy — this is "recent hist
 series. The admin session **list** (`GET /v1/admin/sessions`) may additionally carry an optional
 additive `latest_metrics` object per item (the most-recent merged sample) so the list view shows
 current values without an N+1 fan-out; absent when a session has no telemetry yet.
-
-### `POST /v1/admin/sessions/{id}/trace` — toggle deep trace (admin)
-Turns the session's deep glass-to-glass trace on/off. The control plane relays `session_trace`
-(`agent-api.md`) to the owning agent and returns the current session body.
-```json
-// request
-{ "deep_trace": true }
-// 200 — relayed; body is the current session (same shape as GET /v1/sessions/{id})
-{ "session": { "id": "<uuid>", "state": "running", "state_detail": "pipeline live", "...": "..." } }
-```
-- **Errors:** `404 not_found` (no such session); `409 session_not_traceable` (the session is not
-  `running`, its host is `offline`, or the agent rejected a live toggle — e.g. deep trace is
-  start-time-only on that agent, `agent-api.md`). A rejected toggle **never** changes session
-  state — the session is left exactly as it was.
 
 ### `POST /v1/me/devices` — upsert the caller's device capability
 The client posts its login-time connection + decode-capability probe. Owner is the **bearer
