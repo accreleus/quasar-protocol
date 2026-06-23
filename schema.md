@@ -28,7 +28,7 @@
 > for exactly this), and a new `sessions.state_detail` convention **`host_lost`** the offline reaper
 > stamps when a host disconnect fails its sessions (a free-text value over the existing column,
 > exactly like P2-02's `swapping` — the `state` CHECK set is untouched). No new column, type,
-> constraint, or migration. See `docs/phase3/P3-01-contract-host-lifecycle.md`.
+> constraint, or migration. See `docs/completed/phase3/P3-01-contract-host-lifecycle.md`.
 
 > **Amendment — P9-01 (native-client prelude), additive, requires sign-off.** Widens the
 > `session_metrics.source` `CHECK` to `('agent','browser','native')` so the first-party

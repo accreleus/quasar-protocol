@@ -32,7 +32,7 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > The offline reaper (§Reconnection & reconciliation) is unchanged; it now additionally stamps the
 > session `state_detail = 'host_lost'`, a control-plane-side `sessions` write that does not touch
 > this wire. **This contract is therefore unchanged by P3-01; the note is recorded for
-> traceability.** See `docs/phase3/P3-01-contract-host-lifecycle.md`.
+> traceability.** See `docs/completed/phase3/P3-01-contract-host-lifecycle.md`.
 
 > **Amendment — AS10-04 (profile ABR floor), additive, requires sign-off.** Adds one optional
 > field to the `session_assign` `stream` block: **`abr_floor_kbps`: int** (kbit/s, omitted ⇒

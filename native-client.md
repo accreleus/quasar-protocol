@@ -14,7 +14,7 @@ human sign-off**. The one exception — additive, append-only growth — is desc
 
 > **Status: SPIKE (AS10-12, #208).** This is the *contract*; no native client implements
 > it yet (the native-client spike `#186`/`#191` validated the transport — see
-> `spike/native-client/RESULTS.md` and `docs/native-client-architecture.md`). The
+> `spike/native-client/RESULTS.md` and `docs/phase9/native-client-architecture.md`). The
 > control-plane ingest is in place additively (it parses the known fields, stores the
 > full blob opaquely, and is byte-identical for an existing web blob); a *consumer* of
 > the native-specific fields is a later phase, exactly as `user_devices` has no live
@@ -70,7 +70,7 @@ native client is the answer; **str0m was ruled out** (won the median, lost the p
 A frame-boundary receive path (WebTransport / WebCodecs / a custom UDP transport) is
 **discussed-not-required future work** — when one lands it is a new `render_path` value and,
 if it needs its own negotiation, a *new* additive message, never a change to this report's
-existing shape. See `docs/native-client-architecture.md` for the roadmap.
+existing shape. See `docs/phase9/native-client-architecture.md` for the roadmap.
 
 ## The report schema
 
@@ -230,7 +230,7 @@ vocabulary so the two clients speak one metrics language:
 | `present_fps` | number | presentation frame rate (display-side). |
 | `present_interval_sd_ms` | number | present-interval standard deviation (smoothness / judder; the #108 pacing metric). |
 | `glass_to_glass_ms_p50` | number | glass-to-glass latency, p50. |
-| `glass_to_glass_ms_p95` | number | glass-to-glass latency, p95. **Both p50 and p95 matter** — the native spike's residual was a p95 tail, not the median (`docs/native-client-architecture.md`). |
+| `glass_to_glass_ms_p95` | number | glass-to-glass latency, p95. **Both p50 and p95 matter** — the native spike's residual was a p95 tail, not the median (`docs/phase9/native-client-architecture.md`). |
 | `interactive_ms_p50` | number | input-to-photon (interactive) latency, p50. |
 | `jitter_buffer_ms` | number | the receiver jitter-buffer depth the client is holding. |
 | `render_path` | string | the receive/decode/present path, e.g. `"webrtcbin+videotoolbox"`. A future `"webtransport+webcodecs"` is just a new value here. |

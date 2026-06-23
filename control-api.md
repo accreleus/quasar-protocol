@@ -40,7 +40,7 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > `not_found`/`conflict`/`forbidden`), **no DDL** (the `hosts.status` value `draining` already
 > exists, `schema.md`), and **no change to signaling or agent-api** (a force-drain reuses the
 > existing `session_stop` `reason:"host_draining"`). The host drain/cordon state machine is defined
-> in `schema.md` §"Host status state machine". See `docs/phase3/P3-01-contract-host-lifecycle.md`.
+> in `schema.md` §"Host status state machine". See `docs/completed/phase3/P3-01-contract-host-lifecycle.md`.
 > **Stops at the contract — P3-03 implements the lifecycle, P3-04 the failover.**
 
 > **Amendment — P5-01 (storage & state foundation), additive, requires sign-off.** Adds the
