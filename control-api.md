@@ -285,11 +285,15 @@ Lists enabled apps (the library the user can launch).
 // 200
 { "items": [
     { "id": "<uuid>", "name": "Foo", "description": "...", "cover_url": "https://...",
-      "default_width": 1920, "default_height": 1080, "default_fps": 60, "default_bitrate_kbps": 15000 }
+      "default_width": 1920, "default_height": 1080, "default_fps": 60, "default_bitrate_kbps": 15000,
+      "default_profile_id": "1440p60", "profile_policy": "prefer",
+      "display_stream": { "width": 2560, "height": 1440, "fps": 60, "bitrate_kbps": 20000 } }
   ], "next_cursor": null }
 ```
-`runtime_spec` and resource defaults are **not** exposed to clients (agent-internal /
-scheduler-internal). Disabled apps are omitted.
+`display_stream` is the user-facing stream advertised in the library: it resolves the
+app/global stream-profile policy when available, and otherwise falls back to the legacy
+`default_*` stream fields. `runtime_spec` and resource defaults are **not** exposed to
+clients (agent-internal / scheduler-internal). Disabled apps are omitted.
 
 ### `GET /v1/apps/{id}`
 Single app, same fields as a list item. `404` if absent or disabled.
