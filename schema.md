@@ -258,8 +258,8 @@ signaling (P1-D).
 |---|---|---|
 | `id` | `UUID` PK | session id, used across all four contracts. |
 | `user_id` | `UUID` NOT NULL → `users(id)` | owner. |
-| `app_id` | `UUID` NOT NULL → `apps(id)` | what's launched. |
-| `host_id` | `UUID` NULL → `hosts(id)` | set on assign; NULL while `pending`. |
+| `app_id` | `UUID` NOT NULL → `apps(id)` **ON DELETE CASCADE** | what's launched. *(admin-delete erratum, migration 0014: was no-cascade.* Deleting an app — refused while any non-terminal session references it — cascades that app's **terminal** session history away.) |
+| `host_id` | `UUID` NULL → `hosts(id)` **ON DELETE CASCADE** | set on assign; NULL while `pending`. *(admin-delete erratum, migration 0014: was no-cascade.* Forgetting a host — refused while online or holding a non-terminal session — cascades that host's terminal session history away; NULL rows unaffected.)* |
 | `gpu_id` | `UUID` NULL → `gpus(id)` | set on assign; the reserved GPU. |
 | `state` | `TEXT` NOT NULL DEFAULT `'pending'` | `CHECK (state IN ('pending','assigned','starting','running','stopping','stopped','failed'))`. See state machine below. |
 | `state_detail` | `TEXT` NULL | human-readable substate / progress. |
@@ -451,7 +451,7 @@ homes are host-local; a shared-storage driver later relaxes `host_id`).
 | `id` | `UUID` PK | `gen_random_uuid()` |
 | `user_id` | `UUID` **NULL** → `users(id)` **ON DELETE SET NULL** | *P5-05 erratum to P5-01: changed from NOT NULL/no-cascade.* NULL means the user was deleted and the row is orphaned pending GC. User deletion tombstones the row (sets `gc_after`) **before** the user row is deleted; the FK then sets this to NULL. After the grace period the row (and its backing store) is removed per the GC lifecycle note below — by the agent confirm if still host-pinned, else by the janitor. |
 | `app_id` | `UUID` **NULL** → `apps(id)` **ON DELETE SET NULL** | *P5-05 erratum to P5-01: changed from NOT NULL/no-cascade.* Same orphan-pending-GC rule on app deletion. |
-| `host_id` | `UUID` NULL → `hosts(id)` | the host holding the backing store. NULLable for future shared-storage drivers (a shared home belongs to no single host). |
+| `host_id` | `UUID` NULL → `hosts(id)` **ON DELETE SET NULL** | the host holding the backing store. NULLable for future shared-storage drivers (a shared home belongs to no single host). *(admin-delete erratum, migration 0014: was no-cascade.* Forgetting a host tombstones its homes (`gc_after`) **before** the host row is deleted; the FK then NULLs `host_id` and the janitor reaps the orphan via the `host_id`-NULL GC path.)* |
 | `provider` | `TEXT` NOT NULL | `CHECK (provider IN ('volume','local'))` — extended by future driver amendments, never repurposed. |
 | `ref` | `TEXT` NOT NULL | provider-scoped locator: the docker volume name (`volume`) or the host path under the agent's `QUASAR_HOME_ROOT` (`local`). |
 | `bytes_used` | `BIGINT` NOT NULL DEFAULT `0` | last reported usage (the agent measures post-session; `volume`-driver usage is measured the same way via the mounted path). Advisory freshness — quota is enforced against the last report. |

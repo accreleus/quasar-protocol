@@ -41,6 +41,18 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > exists, `schema.md`), and **no change to signaling or agent-api** (a force-drain reuses the
 > existing `session_stop` `reason:"host_draining"`). The host drain/cordon state machine is defined
 > in `schema.md` §"Host status state machine". See `docs/completed/phase3/P3-01-contract-host-lifecycle.md`.
+
+> **Amendment — admin delete (app + host), additive, requires sign-off.** Adds two
+> admin-gated terminal operations: `DELETE /v1/apps/{id}` (§Library) and `DELETE /v1/hosts/{id}`
+> (§Hosts), plus their two Authorization rows (both **admin**). **Purely additive:** new admin
+> endpoints; **no change to any existing shape**; **no new error code** (reuses `not_found` /
+> `conflict`). Both are *refuse-if-in-use*: a `409 conflict` while the target is live (an app
+> with a non-terminal session; a host that is online or still hosting a non-terminal session),
+> else a `204` hard delete that **cascades the target's terminal session history** and tombstones
+> its managed homes for GC. The cascade + the FK policy changes are defined in `schema.md`
+> (`sessions.app_id`/`sessions.host_id` → `ON DELETE CASCADE`, `user_homes.host_id` → `ON DELETE
+> SET NULL`, migration `0014`). No change to signaling or agent-api. See
+> `docs/ui-polish/2026-06-24-ui-polish.md` (Thread 1).
 > **Stops at the contract — P3-03 implements the lifecycle, P3-04 the failover.**
 
 > **Amendment — P5-01 (storage & state foundation), additive, requires sign-off.** Adds the
@@ -156,8 +168,10 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 |---|---|---|
 | `POST /v1/apps` | **admin** | create an app |
 | `PATCH /v1/apps/{id}` | **admin** | edit an app |
+| `DELETE /v1/apps/{id}` | **admin** | *(admin-delete)* remove an app from the catalog — refuse-if-in-use |
 | `GET /v1/hosts`, `GET /v1/hosts/{id}` | **admin** | host/capacity oversight |
 | `POST /v1/hosts/{id}/drain`, `POST /v1/hosts/{id}/uncordon` | **admin** | *(P3-01)* host lifecycle — cordon a host out of service / return it |
+| `DELETE /v1/hosts/{id}` | **admin** | *(admin-delete)* forget an offline host — refuse-if-online-or-in-use |
 | `GET /v1/apps`, `GET /v1/apps/{id}` | user / public | the public library (list is unauthenticated) |
 | `GET /v1/sessions/{id}`, `GET /v1/sessions`, `DELETE /v1/sessions/{id}` | **owner or admin** | resource-ownership check (`403` otherwise), not a blanket admin gate |
 | `POST /v1/sessions/{id}/swap` | **owner or admin** | *(P2-02)* same ownership check as `DELETE` |
@@ -284,6 +298,20 @@ Single app, same fields as a list item. `404` if absent or disabled.
 > **admin** surface (`role=admin`), built in P1-3 against the same `schema.md`. The read shapes
 > above are the public subset; admin write shapes are P1-3's to define within this contract's
 > conventions (no frozen-interface change — they're additive, admin-gated).
+
+### `DELETE /v1/apps/{id}` — remove an app *(admin-delete)*
+Admin-only. Removes an app from the catalog entirely.
+```json
+// 204 No Content — app removed; its terminal session history is purged
+```
+- **Refuse-if-in-use.** `409 conflict` if any **non-terminal** session
+  (`pending`/`assigned`/`starting`/`running`/`stopping`) references the app — disable it
+  (`PATCH … {"enabled": false}`) and let live sessions drain first.
+- **Cascade.** On success the app row is deleted; its **terminal session history** (and those
+  sessions' metrics/tokens) cascade away, and its managed homes are tombstoned for GC. FK policy in
+  `schema.md` (`sessions.app_id` → `ON DELETE CASCADE`, `user_homes.app_id` → `ON DELETE SET NULL`,
+  migration `0014`).
+- **Errors:** `404 not_found` (no such app); `409 conflict` (in use by a non-terminal session).
 
 ---
 
@@ -509,6 +537,23 @@ Returns a `draining` host to `online` so the scheduler may place on it again.
 - **Errors:** `404 not_found`; `409 conflict` (host is `offline` — its agent is not connected, so
   there is nothing to return to service; the host comes back `online` on its own when its agent
   reconnects).
+
+### `DELETE /v1/hosts/{id}` — forget a host *(admin-delete)*
+Removes a host record entirely — the operator's way to clear a **dead/decommissioned** host from
+the fleet. Intended for an `offline` host (its agent is gone for good); a host that is merely
+draining or temporarily offline does not need forgetting, since it returns to service on its own
+when its agent reconnects. A forgotten host that later re-enrolls comes back as a **fresh** record.
+```json
+// 204 No Content — host record, its GPUs, and its terminal session history are removed
+```
+- **Refuse-if-in-use.** The host must be **offline** (its agent is **not** connected) **and** hold
+  **no non-terminal session**. The online check is against the live agent connection, not only the
+  stored `status`, so a host that reconnected since the page loaded is not silently deleted.
+- **Cascade.** On success the host row is deleted; its `gpus` rows and its **terminal session
+  history** (with the sessions' metrics/tokens) cascade away, and its managed homes are tombstoned
+  for GC (the backing store died with the host). FK policy in `schema.md` (migration `0014`).
+- **Errors:** `404 not_found` (no such host); `409 conflict` (host is online, or still holds a
+  non-terminal session). The body distinguishes the two.
 
 ---
 
