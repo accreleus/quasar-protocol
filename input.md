@@ -4,7 +4,9 @@ Input events travel **client -> host** over the WebRTC **DataChannel** named `in
 
 Encoding: JSON, one object per channel message, discriminated by `t`. (A compact binary encoding is a later optimization — keep JSON for Phase 0 debuggability.)
 
-DataChannel is configured **unreliable + unordered** for input events (`ordered:false, maxRetransmits:0`) so a late packet never head-of-line-blocks newer input. Clock-sync pings tolerate loss too.
+DataChannel transport: the agent-offered channel is **reliable + ordered** by default (`ordered:true`, the SCTP default retransmission). The original Phase-0 **unreliable + unordered** configuration (`ordered:false, maxRetransmits:0`) is retained as an A/B fallback via `QUASAR_INPUT_CHANNEL_MODE=legacy` on the agent. Both configurations coexist; the wire shapes are identical. Clock-sync pings tolerate loss under either mode.
+
+> **Amendment (input-jitter investigation, 2026-06):** the reliable+ordered default was validated against the Moonlight common-c input path, which also sends relative mouse packets reliably (`ENET_PACKET_FLAG_RELIABLE`). A late or dropped relative-motion sample is more costly to perceived smoothness than the small head-of-line delay of reliable delivery, because the agent now coalesces bursty arrivals into one uinput write per ~1 ms (see Host-side batching below), so a dropped sample leaves a gap the batching cannot reconstruct.
 
 ## Coordinate + code conventions
 - Relative motion (`dx`,`dy`) is in device pixels at the streamed resolution.
@@ -13,6 +15,7 @@ DataChannel is configured **unreliable + unordered** for input events (`ordered:
 - Mouse buttons use Linux input codes: left `0x110` (BTN_LEFT), right `0x111`, middle `0x112`.
 - Keys use **Linux evdev keycodes**. The client maps `KeyboardEvent.code` -> evdev keycode (a static lookup table; lives in the client). The host passes the evdev code straight to the compositor.
 - Gamepad: button/axis indexing follows the **W3C Standard Gamepad** layout from the browser Gamepad API. The host maps this to the virtual pad it presents (Phase 0 may map to compositor input directly; Phase 1 routes through inputtino so a containerized game sees a real evdev device).
+- Unknown fields on any message MUST be ignored by the host. The host deserializes with `serde_json` which ignores unknown keys by default; clients MUST tolerate forward-compatible additive fields. This amendment relies on that rule (see `mm` below).
 
 ## Messages (client -> host)
 ```json
@@ -23,6 +26,16 @@ DataChannel is configured **unreliable + unordered** for input events (`ordered:
 { "t": "k",  "code": 30, "pressed": true }              // key (evdev code; 30 = KEY_A)
 { "t": "gp", "i": 0, "buttons": [0,1,0,...], "axes": [0.0,-0.3,...] } // gamepad state on change
 ```
+
+### `mm` optional instrumentation fields (additive amendment, 2026-06)
+A client MAY attach two optional fields to a relative-mouse-move message for input-jitter correlation:
+```json
+{ "t": "mm", "dx": 4, "dy": -2, "seq": 17, "tc": 123456.7 }
+```
+- `seq` (number, optional): per-session monotonic message counter, wraps allowed. Used to detect gaps/reordering on the agent side.
+- `tc` (number, optional): client monotonic timestamp in milliseconds, same clock as the `ping`/`pong` `tc` field (e.g. `performance.now()` in the browser). Used to correlate send/receive timing.
+
+Both fields are **optional**. A sender MAY omit them entirely; the host MUST treat absence as "not instrumented" and continue normally. A sender MUST NOT make correctness depend on the host reading them — they are observational only. The host ignores these fields on the live input-injection path; they are consumed only when input-trace logging is enabled (`QUASAR_INPUT_TRACE=1` on the agent). The wire shape of `mm` is otherwise unchanged: `dx` and `dy` are required and keep their Phase-0 meaning.
 
 ## Clock sync + latency (T7)
 Ping/pong over the same channel establishes the client<->host clock offset so glass-to-glass and interactive latency can be estimated. `tc` = client monotonic ms; `ts` = host monotonic ms.
@@ -40,3 +53,12 @@ The host translates each message to a compositor input call (`gst-wayland-displa
 - `mb` -> pointer_button(button, pressed);  `ms` -> pointer_axis(dx,dy)
 - `k`  -> keyboard_input(code, pressed)
 - `gp` -> diff against last state; emit button/axis changes
+
+## Host-side relative-mouse batching (Moonlight-derived, 2026-06)
+The agent coalesces bursty relative-mouse arrivals into a single uinput write per ~1 ms window, decoupled from both the browser render clock and per-arrival injection. This smooths the bursty per-message uinput cadence that was the dominant cause of perceived mouse steppiness (the streamed video appeared smooth while input felt jittery).
+
+- A dedicated flush thread (`quasar-rel-flush`) accumulates integer relative deltas into a pending buffer and writes one `REL_X`/`REL_Y`/`SYN_REPORT` frame per window.
+- Fractional motion is accumulated across `mm` messages and only the integer part is emitted (`trunc()` toward zero), carrying the fractional remainder forward — so 0.4+0.4+0.4 → 1, not 0+0+0 (per-message `round()` quantizes inconsistently and was a secondary steppiness source).
+- Non-`mm` events (button/key/scroll/abs) drain any pending motion synchronously before being injected, so a click always lands at the cursor position the user saw.
+- `QUASAR_INPUT_BATCH_MS` (default `1`, `0` = disabled → per-arrival writes with fractional accumulation still active) configures the window.
+- The batching is purely host-side: the wire shape is unchanged, no new messages are introduced, and a browser that sends `mm` per-arrival (the Phase-0 behavior) is fully compatible.
