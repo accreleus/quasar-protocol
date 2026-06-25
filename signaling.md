@@ -39,6 +39,40 @@ Either direction (optional, diagnostics):
 { "type": "bye" }
 ```
 
+### `pc` field — separate audio/video PeerConnections (amendment, #304)
+
+The `offer`, `answer`, and `ice` messages gain an **optional** `pc` field identifying which
+PeerConnection the message belongs to:
+
+```json
+{ "type": "offer", "pc": "video", "sdp": "<SDP string>" }
+{ "type": "offer", "pc": "audio", "sdp": "<SDP string>" }
+{ "type": "answer", "pc": "video", "sdp": "<SDP string>" }
+{ "type": "answer", "pc": "audio", "sdp": "<SDP string>" }
+{ "type": "ice", "pc": "video", "candidate": { ... } }
+{ "type": "ice", "pc": "audio", "candidate": { ... } }
+```
+
+- `pc` is `"video"` or `"audio"`. The **video** PeerConnection carries the video track and the
+  `"input"` DataChannel; the **audio** PeerConnection carries only the audio track.
+- `pc` is **optional**. When absent, the message belongs to the `"video"` PeerConnection (this
+  is the pre-amendment behaviour — a single PeerConnection carrying video + audio + DataChannel).
+  This keeps the field backwards-compatible: an old client that doesn't send `pc` still works
+  with a host that only creates the video PeerConnection.
+- Splitting audio into a separate PeerConnection eliminates browser A/V clock-coupling latency:
+  Chrome's NetEQ + RTCP SR A/V sync pulls video playout toward the audio jitter buffer, inflating
+  video latency by ~15ms even with 10ms Opus frames and `mode=synced` jitter buffers (measured on
+  Quasar, issue #304 Phase 0). Separate PeerConnections give the browser no audio track to couple
+  against on the video PC, reclaiming that floor.
+- The host creates **two** `webrtcbin` instances (one per PeerConnection). Each fires its own
+  `on-negotiation-needed` → its own offer, and its own ICE candidates. The single-offer guard is
+  per-webrtcbin (each negotiates exactly once).
+- The `"input"` DataChannel is created on the **video** webrtcbin only. Input latency is unaffected
+  by audio jitter buffer behaviour.
+- Both PeerConnections use the same STUN/TURN config. ICE gathering runs in parallel for both.
+- An audio-disabled session (`QUASAR_AUDIO_DISABLED=1` on the agent) creates only the video
+  PeerConnection; no `pc: "audio"` messages are sent.
+
 ## Phase 0 simplifications (revisit later)
 - No authentication on the WebSocket. Phase 1 puts signaling behind the control plane with an authenticated, single-use session token in the connect URL.
 - One client per host process. Multi-session is the node agent's job (Phase 1+).
