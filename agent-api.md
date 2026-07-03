@@ -43,6 +43,18 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > control plane) ⇒ the agent keeps its env/ratio-derived floor. See §`session_assign` and
 > `docs/phase-as10/`.
 
+> **Amendment — ST-01 (Observability v2 — session trace), additive, requires sign-off.** Adds one
+> upstream (node → control) message, `session_trace_event` (§Messages — node → control), by which
+> the agent emits host-side discrete trace markers (ABR retarget, source swap, encoder drop burst,
+> host webrtcbin ICE/connection transitions) event-driven, not on a clock. **Additive** — a new
+> upstream `type`; no existing message, field, or ack contract changes. Like `session_metrics` it
+> is **fire-and-forget** (no `ack`), carries **no** session-state authority (`session_state` stays
+> the only progress signal), and is host-ownership validated (`GetSessionHostState`) exactly like
+> `session_metrics` — a cross-host or not-running-here event is dropped, not stored, never fatal to
+> the WS. An older control plane simply ignores the unknown `type`; an older agent never sends it.
+> `signaling.md`, `input.md`, `native-client.md` are unchanged. See `docs/session-trace/contract-amendment.md` §C
+> and `docs/session-trace/trace-format.md` §3.2 (the agent event allow-list).
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -208,6 +220,40 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   A malformed or unparsable message is dropped without dropping the connection. A sample whose
   `session_id` is not currently `running` on this host (e.g. it arrived as the session went
   terminal) is **dropped, not stored** — metrics never resurrect or alter a session.
+
+### `session_trace_event` — host-side discrete trace marker (ST-01)
+> *Additive, observability amendment. A new upstream message; it changes no existing message
+> shape, and a control plane that predates it simply ignores the unknown `type`. Unlike
+> `session_metrics` (heartbeat cadence) this is **event-driven** — sent when the event happens,
+> not on a clock. It is **fire-and-forget** (no `ack`), carries **no** session-state authority
+> (`session_state` remains the only progress signal), and is host-ownership validated exactly like
+> `session_metrics`. Telemetry is observability, never access control.*
+
+Emitted by the agent when a host-side trace event occurs during a `running` session — an in-session
+ABR retarget, a launcher↔game source swap completing, an encoder frame-drop burst, or a host
+`webrtcbin` ICE/connection transition. The discrete counterpart to the periodic `session_metrics`
+samples; the control plane joins the two on one timeline for the diagnostic bundle (`control-api.md`).
+```json
+{
+  "type": "session_trace_event",
+  "session_id": "<uuid>",
+  "ts_unix_ms": 1735689600000,
+  "event": "abr.retarget",
+  "payload": { "from_kbps": 14000, "to_kbps": 11000, "reason": "gcc_downshift" }
+}
+```
+- **`type`** is the WS message discriminator (`"session_trace_event"`). **`event`** is the trace
+  event type from the agent allow-list (`abr.retarget`, `pipeline.source_swapped`,
+  `encoder.drop_detected`, `webrtc.state_changed` — `trace-format.md` §3.2). **`payload`** is the
+  per-type object (`trace-format.md` §3). `ts_unix_ms` is the agent wall-clock at the event (same
+  convention as `session_metrics.ts_unix_ms`).
+- **`webrtc.state_changed` — Connected/Completed both mean established.** ICE may jump
+  `Checking → Completed`, skipping `Connected`; a reader treats both as transport-established.
+- The control plane writes a `session_trace_events` row with `source='agent'` (`schema.md`) after
+  validating host ownership (`GetSessionHostState`). A malformed or unparsable message is dropped
+  without dropping the connection. An event whose `session_id` is not currently `running` on this
+  host is **dropped, not stored** — events never resurrect or alter a session (identical posture to
+  `session_metrics`).
 
 ---
 
