@@ -105,6 +105,45 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > `docs/phase9/P9-01-contract-prelude.md`. **Stops at the contract — P9-07 implements the
 > native producer + migration 0014, P9-08 the handshake enforcement.**
 
+> **Amendment — ST-01 (Observability v2 — session trace), additive, requires sign-off.** Adds the
+> §Session trace (Observability v2) section: seven endpoints — five **admin-only** reads
+> (`GET .../trace`, `.../trace/window`, `.../trace/metrics`, `.../trace/events`,
+> `.../diagnostic-bundle`), one **admin-only** write (`POST .../trace/annotations`), and two
+> **owner-or-admin** client ingest endpoints (`POST /v1/sessions/{id}/trace/events`,
+> `POST /v1/sessions/{id}/trace/clock`) — plus their Authorization-table rows. **No existing
+> request/response shape, status code, or endpoint changes.** Reads return a **bounded window**
+> (default 5 min, clamp `[2,10]` min — "recent history", never the full series). The diagnostic
+> bundle assembles the existing `session_metrics` JSONB (normalized to a read-time taxonomy) joined
+> with the new `session_trace_events`/`session_trace_clock` tables (`schema.md`, migration `0016`)
+> plus a v0 **observational** classifier verdict (no automatic action). Backing DDL in `schema.md`.
+> **`agent-api.md`** gains one additive upstream message, `session_trace_event` (fire-and-forget,
+> no session-state authority). `signaling.md`, `input.md`, `native-client.md` are unchanged. See
+> `docs/session-trace/contract-amendment.md` and `docs/session-trace/trace-format.md`.
+
+> **Amendment — SPT-05 (Stream Perf Tuning Phase C), additive, requires sign-off.** Three pieces.
+> **(1)** Adds the §Host encoder certification section: six **admin-only** endpoints (a
+> script-orchestrated run lifecycle — open a run, launch/finalize one bench cell, poll/complete the
+> run — plus a read of the latest verdicts) and their Authorization-table rows, backed by the new
+> `host_encoder_certification` table (`schema.md`, migration `0018`). **(2)** A **behavioral**
+> scheduler decision rule (no wire-shape change): at launch, resolving the **default** profile on a
+> target host consults the latest certification row and will not default-start a profile whose
+> `encode_ms_p95 > 0.70 × budget_ms` (`verdict='unsafe'`) — capping to the next sustainable rung of
+> the same resolution family; an **explicit** profile/override request always bypasses the cap.
+> `POST /v1/sessions` and `GET /v1/me/profiles` are unchanged on the wire. **(3)** Adds one
+> **optional** request field to `POST /v1/sessions`: `client_type ∈ {"native","browser"}` (absent ⇒
+> `"browser"`, lenient parse — an unexpected value coerces to `"browser"`, never a `400`). Its only
+> effect is gating the Path-B H.264 profile lift (main/high) to a launch that **itself** declares
+> `client_type:"native"` **and** whose account's latest stored device probe is native-capable — this
+> fixes a bug where a stored native probe could otherwise poison a subsequent **browser** launch on
+> the same account with a profile Chrome cannot decode. The web SPA does not send the field (floor
+> by default); the native client (quasar-client, PB-3) must send it to receive the lift.
+> **Purely additive** — new endpoints + one new optional request field; no existing shape, status
+> code, or endpoint changes. SPT-07's probe-envelope consumption reads the **existing**
+> `user_devices.capabilities` JSONB — no schema/API change. `abr_mode` (`QUASAR_ABR_MODE`) is
+> node-agent config, not a contract change. **`agent-api.md` is unchanged** — certification composes
+> entirely from the existing session lifecycle + `session_metrics` upstream message. See
+> `docs/stream-perf/contract-amendment.md`.
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -187,6 +226,17 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/config/catalog` | **admin** | *(host-runtime-settings)* read the knob catalog |
 | `GET /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* read a host's resolved settings + overrides |
 | `PATCH /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* update per-host overrides |
+| `GET /v1/admin/sessions/{id}/trace`, `.../trace/window`, `.../trace/metrics`, `.../trace/events` | **admin** | *(ST-01)* the bounded recent session trace (samples + events + clock) |
+| `GET /v1/admin/sessions/{id}/diagnostic-bundle` | **admin** | *(ST-01/ST-06)* the assembled bundle — metadata + clock + aligned series + events + derived windows + classifier verdict |
+| `POST /v1/admin/sessions/{id}/trace/annotations` | **admin** | *(ST-01)* an operator annotation marker on the trace timeline |
+| `POST /v1/sessions/{id}/trace/events` | **owner or admin** | *(ST-01)* the client posts its own session's browser trace events — same ownership check as `POST .../stats`; `202` on accept |
+| `POST /v1/sessions/{id}/trace/clock` | **owner or admin** | *(ST-01/ST-05)* the client posts its own session's client↔host clock-offset estimate — same ownership check as `POST .../stats`; `202` on accept |
+| `GET /v1/admin/hosts/{id}/encoder-certification` | **admin** | *(SPT-05)* read a host's encoder-certification verdicts (latest per configuration) |
+| `POST /v1/admin/hosts/{id}/encoder-certification/runs` | **admin** | *(SPT-05)* open a certification run (reserve the per-host lock, return the cell plan) |
+| `POST /v1/admin/hosts/{id}/encoder-certification/cells` | **admin** | *(SPT-06)* launch one pinned bench cell |
+| `POST /v1/admin/hosts/{id}/encoder-certification/cells/{sid}/finalize` | **admin** | *(SPT-06)* derive the verdict from real agent metrics, upsert + teardown |
+| `POST /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}/complete` | **admin** | *(SPT-06)* close the run (release the per-host lock) |
+| `GET /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}` | **admin** | *(SPT-05)* poll a run's status/progress |
 | everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account |
 
 ### First-admin bootstrap (decision)
@@ -401,6 +451,22 @@ it to concrete `width`/`height`/`fps`/`bitrate_kbps`/`h264_profile`/`playout0_ms
 - The selected `profile_id` is **persisted on the session** and echoed in every session body
   (launch + `GET`); it is `null` for a legacy/tier/override launch. The resolved concrete values
   live in `stream`; full profile metadata is at `GET /v1/me/profiles` keyed by this id.
+
+#### `client_type` — Path-B identity binding (SPT-05)
+> *Additive amendment — one optional top-level string request field; changes no existing shape
+> (absent ⇒ today's behavior exactly). No schema column, no frozen `protocol/` contract touched
+> beyond this file.*
+
+`POST /v1/sessions` accepts an optional `"client_type": "native" | "browser"` field (absent ⇒
+`"browser"`; parsed **leniently** — any value other than the exact string `"native"` is treated as
+`"browser"`, never rejected). Its **only** effect is the SPT Path-B H.264 profile lift: the lift to
+a rung's preferred `main`/`high` profile fires only when the launch request itself declares
+`client_type:"native"` **and** the account's latest stored device probe is native and can decode
+that profile. A `"browser"`/absent declaration keeps the constrained-baseline floor regardless of
+what probe is stored — this binds the lift to the **launching client's own declaration** rather
+than the account's last-seen probe, so a native session can never poison a subsequent browser
+launch on the same account with a profile Chrome cannot decode. The web SPA does not send this
+field; a native client (Phase 9) must send `client_type:"native"` to receive the lift.
 
 ### Admission control (P2-01)
 > *Additive amendment — the rule the launch path enforces. Defines wire behaviour only; the
@@ -781,6 +847,241 @@ probe it is the conservative default (`1080p60`) and `confidence` is `low`.
   host-encoder and historical-failure inputs are not yet populated in AS10-02 (reserved for
   later issues) and are part of the contract from the start.
 - Debug/internal profiles (`720p30`) are **never** returned.
+
+---
+
+## Session trace (Observability v2, ST-01)
+> *Additive, admin-gated amendment. New endpoints; no change to any existing shape, status code,
+> or endpoint. Reads are admin-gated (`RequireAuth → RequireAdmin`, `403` before any resource
+> lookup); the two client ingest endpoints are owner-or-admin, identical to `POST .../stats`.
+> Telemetry is observability, never access control and never a session-state authority. Backing
+> DDL: `schema.md` §`session_trace_events` / §`session_trace_clock`, migration `0016`. Format
+> reference: `docs/session-trace/trace-format.md`.*
+
+A **trace** is the read-time union of everything already keyed by `session_id`: the existing
+`session_metrics` samples, the new discrete `session_trace_events`, and the optional
+`session_trace_clock` offset. There is no separate `trace_id` and no new retention mechanism —
+traces reuse the `session_metrics` rolling-window + terminal-prune + `ON DELETE CASCADE` model.
+Every read below is a **bounded window**: default the recent 5 min, clamped to `[2, 10]` min.
+
+### `POST /v1/sessions/{id}/trace/events` — client posts trace events
+The browser reports its own discrete events for **its** live session. Owner-or-admin (same
+ownership rule as `POST /v1/sessions/{id}/stats`; non-owner `403`, unknown id `404`). Returns
+**`202`** (accepted, no body). Untrusted input: body bounded to **≤ 64 events per request and
+≤ 32 KB**, and **rate-limited** (`429 rate_limited`); an event whose `type` is not in the
+`trace-format.md` §3.3 v1 allow-list is **dropped, not stored**.
+```json
+// request — a small batch of recent client events (client clock, ms)
+{ "client": "browser",   // optional: "browser" (default) | "native"
+  "events": [
+    { "ts_unix_ms": 1735689600100, "type": "playout.changed",
+      "payload": { "from_ms": 100, "to_ms": 67, "reason": "degrade" } },
+    { "ts_unix_ms": 1735689600250, "type": "client.visibility_changed",
+      "payload": { "hidden": true } }
+  ] }
+// 202 — accepted (no body); known-type events stored source='browser', unknown types dropped
+```
+Best-effort: a malformed event is dropped, not fataled. Accepting trace events never affects
+session state.
+
+### `POST /v1/sessions/{id}/trace/clock` — client posts a clock-offset estimate
+The browser reports its client↔host clock-offset estimate (from the deep-trace ping/pong sync)
+for **its** live session. Owner-or-admin (same ownership rule as the trace-events POST). Returns
+**`202`** (accepted, no body). A client with no stable estimate simply never posts here — absence
+of a `session_trace_clock` row means **unmeasured**, never a synthesized `client_offset_ms: 0`
+(`trace-format.md` §4, no false precision).
+```json
+// request
+{ "client_offset_ms": -3.2, "uncertainty_ms": 1.8 }
+// 202 — accepted (no body); upserts the session's session_trace_clock row
+```
+A malformed/non-finite (`NaN`/`Infinity`) value is dropped, not stored.
+
+### Trace reads (admin)
+All admin reads accept `?limit=&cursor=` pagination (existing convention) and the window above.
+
+- **`GET /v1/admin/sessions/{id}/trace`** — the bounded recent trace: clock + the taxonomy series
+  + events. `404` for an unknown session (to an admin).
+  ```json
+  // 200
+  { "session_id": "<uuid>", "window": { "from_ms": 1735689300000, "to_ms": 1735689600000 },
+    "clock": { "client_offset_ms": -3.2, "uncertainty_ms": 1.8, "measured_at": "..." },
+    "series": { "encoder.encode_ms": [ { "ts_unix_ms": 1735689600000, "v": 4.6 } ],
+                "client.present_interval_sd_ms": [ { "ts_unix_ms": 1735689600100, "v": 2.9 } ] },
+    "events": [ { "source": "agent", "ts_unix_ms": 1735689600000, "type": "abr.retarget",
+                  "payload": { "from_kbps": 14000, "to_kbps": 11000, "reason": "gcc_downshift" } } ] }
+  ```
+- **`GET /v1/admin/sessions/{id}/trace/window?from=&to=`** — same shape, explicit window
+  (`from`/`to` are `ts_unix_ms`); clamped to the 10-min max.
+- **`GET /v1/admin/sessions/{id}/trace/metrics?names=encoder.encode_ms,abr.setpoint_kbps`** — only
+  the requested taxonomy series (`{ "series": { … } }`); unknown names omitted.
+- **`GET /v1/admin/sessions/{id}/trace/events?types=abr.retarget,playout.changed`** — only the
+  requested event types (`{ "events": [ … ] }`); all types if `?types=` omitted.
+- `clock` is **either** `{client_offset_ms, uncertainty_ms, measured_at}` **or**
+  `{"unmeasured": true}` — never an offset-0 default.
+- `series` values are normalized-at-read from existing `session_metrics` JSONB (taxonomy v1,
+  `trace-format.md` §2); no new sample write path.
+
+### `POST /v1/admin/sessions/{id}/trace/annotations` — operator annotation (admin)
+Admin-only. Records an operator marker on the trace timeline (e.g. "flipped
+`QUASAR_ABR_FLOOR_KBPS` here" during an A/B). Returns `201`. Stored as a `session_trace_events`
+row with a reserved type (`operator.annotation`), so it appears inline on the timeline.
+```json
+// request
+{ "ts_unix_ms": 1735689600500, "label": "flipped abr floor to 4000", "tags": ["ab-test"] }
+// 201 — { "id": "<uuid>" }
+```
+
+### `GET /v1/admin/sessions/{id}/diagnostic-bundle` — the money endpoint (admin)
+Admin-only (`403` before lookup; `404` unknown session). Assembles, for a bounded window (default
+5 min, clamp `[2,10]` min), everything needed to answer "network, encoder, or client?" in one
+call. Built by joining the existing `session_metrics` JSONB (normalized to taxonomy v1) +
+`session_trace_events` + `session_trace_clock`. Includes a v0 **observational** classifier verdict
+(no automatic action).
+```json
+// 200
+{
+  "trace": { "session_id": "<uuid>", "host_id": "<uuid>", "profile_id": "1080p60",
+             "started_at": "2026-06-26T12:00:00Z", "ended_at": null },
+  "window": { "from_ms": 1735689300000, "to_ms": 1735689600000 },
+  "clock": { "client_offset_ms": -3.2, "uncertainty_ms": 1.8, "measured_at": "..." },
+  "series": {
+    "encoder.encode_ms":   [ { "ts_unix_ms": 1735689600000, "v": 4.6 } ],
+    "encoder.fps":         [ { "ts_unix_ms": 1735689600000, "v": 59.8 } ],
+    "abr.setpoint_kbps":   [ { "ts_unix_ms": 1735689600000, "v": 11000 } ],
+    "transport.rtt_ms":    [ { "ts_unix_ms": 1735689600100, "v": 28 } ],
+    "transport.packets_lost": [ { "ts_unix_ms": 1735689600100, "v": 14 } ],
+    "client.present_interval_sd_ms": [ { "ts_unix_ms": 1735689600100, "v": 12.4 } ],
+    "client.glass_to_glass_ms":      [ { "ts_unix_ms": 1735689600100, "v": 71 } ]
+  },
+  "events": [
+    { "source": "agent",   "ts_unix_ms": 1735689600000, "type": "abr.retarget",
+      "payload": { "from_kbps": 14000, "to_kbps": 11000, "reason": "gcc_downshift" } },
+    { "source": "browser", "ts_unix_ms": 1735689600100, "type": "playout.changed",
+      "payload": { "from_ms": 50, "to_ms": 75, "reason": "degrade" } }
+  ],
+  "derived_windows": {
+    "hitches":                   [ { "from_ms": 1735689600050, "to_ms": 1735689600120, "present_interval_sd_ms": 18.6 } ],
+    "abr_downshifts":            [ { "ts_unix_ms": 1735689600000, "from_kbps": 14000, "to_kbps": 11000 } ],
+    "encoder_saturation":        [ { "from_ms": 1735689600000, "to_ms": 1735689600200, "encode_ms_p95": 20.1 } ],
+    "likely_network_congestion": [ { "from_ms": 1735689600050, "to_ms": 1735689600200, "packets_lost_delta": 14, "rtt_ms_p95": 60 } ]
+  },
+  "classifier": {
+    "verdict": "likely_network_congestion",
+    "evidence": [ "gcc downshift coincident with packets_lost rise and rtt p95 60ms",
+                  "encode_ms p95 below encoder ceiling; host fps steady",
+                  "client tab not hidden during the window" ]
+  }
+}
+```
+- `classifier.verdict` is **observational only** — one of `likely_encoder_saturation` /
+  `likely_network_congestion` / `likely_client_presentation_limit` / `nominal` /
+  `indeterminate_client_hidden` / `unknown`, with its `evidence` logged. **No automatic action.**
+  `nominal` = healthy session (no negative signal AND the tab was not hidden);
+  `indeterminate_client_hidden` fires when the *only* reason no verdict was reached is the
+  `client.is_hidden` guard; `unknown` is reserved for genuine insufficient-data windows.
+
+---
+
+## Host encoder certification (Stream Perf Tuning Phase C, SPT-05)
+> *Additive, admin-gated amendment. New endpoints; no change to any existing shape, status code,
+> or endpoint. `403` before any resource lookup; `404` for an unknown host/run to an admin;
+> `409 conflict` if a run is already in flight on that host, or the host is not `online`. Backing
+> DDL: `schema.md` §`host_encoder_certification`, migration `0018`. `agent-api.md` is unchanged —
+> certification composes entirely from the existing session lifecycle + `session_metrics` upstream
+> message. See `docs/stream-perf/contract-amendment.md` §B.*
+
+Records the measured, sustainable encode envelope of a concrete (host, GPU, encoder, profile,
+bench-bitrate) configuration, so the scheduler can avoid default-starting a profile a host cannot
+hold in real time. **As-built (SPT-06): script-orchestrated, not control-plane-autonomous** — a
+bench session needs a real WebRTC peer to drive frame flow, so the harness
+(`deploy/run-spt06-certify.sh`) supplies a Chrome-for-Testing peer and drives the loop: open a run
+→ per-cell (launch → CFT peer drives → finalize) → complete. The control plane still owns the
+measurement-to-verdict logic (read `session_metrics` → derive verdict → upsert); it does not spawn
+a browser itself.
+
+### `GET /v1/admin/hosts/{id}/encoder-certification` — read verdicts (admin)
+Returns the **latest** `host_encoder_certification` row per configuration for the host (the
+upsert-latest table means "latest" is just "the row"). Optional filters
+`?gpu_index=&encoder=&profile_id=` narrow the set; `?max_age_s=` treats anything older as omitted
+(the staleness horizon below).
+```json
+// 200
+{ "host_id": "<uuid>",
+  "certifications": [
+    { "gpu_index": 0, "encoder": "va", "profile_id": "1080p60",
+      "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 8000,
+      "verdict": "unsafe",
+      "encode_ms_p50": 19.2, "encode_ms_p95": 20.1, "encode_ms_max": 24.8,
+      "output_fps": 45.3, "drop_rate": 0.0, "live_write_stable": true,
+      "sample_window_ms": 20000, "sample_count": 900, "agent_version": "0.6.0",
+      "measured_at": "2026-06-27T03:00:00Z", "updated_at": "2026-06-27T03:00:00Z" }
+  ] }
+```
+An uncertified host (no rows) returns `{ "host_id": "<uuid>", "certifications": [] }` — **not** a
+`404` (the host exists; it simply has no verdicts yet). The scheduler treats "no row" exactly as
+"uncertified" (no cap).
+
+### Run lifecycle (admin, script-orchestrated)
+**1. `POST .../runs` — open a run.** Body optionally scopes rungs/encoders/bitrates; absent ⇒ the
+host's default matrix. Reserves the per-host lock, returns the cell plan:
+```json
+// request (all fields optional)
+{ "gpu_index": 0, "encoder": "va", "profiles": ["1080p60","1080p45","720p60"],
+  "bitrates_kbps": [4000,6000,8000,12000] }
+// 202 — run opened
+{ "run_id": "<uuid>", "host_id": "<uuid>", "status": "running", "started_at": "...",
+  "cells": [ { "profile_id": "1080p60", "bitrate_kbps": 8000 } ] }
+```
+**2. `POST .../cells` — launch one cell.** Body `{run_id, profile_id, bitrate_kbps}`. Launches a
+Diagnostics session pinned to the target host/GPU and returns its `session_id` + signaling token
+so the harness can attach a CFT peer. Subject to normal admission control (a fully reserved GPU →
+`409`, not a stolen slot).
+
+**3. (harness) connects a CFT peer** to that session so frames flow + decode.
+
+**4. `POST .../cells/{sid}/finalize`** — reads the session's **real** agent metrics
+(warmup-skipped window), computes the verdict, **upserts** `host_encoder_certification`, and tears
+the session down. **If zero agent samples survived, returns `422` and writes NO row** — it never
+fabricates a false `unsafe`.
+
+**5. `POST .../runs/{run_id}/complete`** — closes the run, releases the per-host lock.
+
+### `GET /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}` — poll a run (admin)
+```json
+// 200 — in progress
+{ "run_id": "<uuid>", "host_id": "<uuid>", "status": "running",
+  "started_at": "2026-06-27T03:00:00Z", "progress": { "completed": 6, "total": 12 } }
+// 200 — done
+{ "run_id": "<uuid>", "host_id": "<uuid>", "status": "completed",
+  "started_at": "2026-06-27T03:00:00Z", "ended_at": "2026-06-27T03:04:30Z",
+  "certified_count": 12, "summary": { "ok": 7, "capped": 2, "unsafe": 3 } }
+// 200 — failed (e.g. host went offline mid-run)
+{ "run_id": "<uuid>", "host_id": "<uuid>", "status": "failed",
+  "error_message": "host_lost during bench" }
+```
+`status ∈ {running, completed, failed}`.
+
+### Scheduler decision rule — certification-aware session-start cap
+> *Behavioral rule in the scheduler / profile-resolution path. Changes **no** request/response
+> shape — `POST /v1/sessions` and `GET /v1/me/profiles` are unchanged on the wire.*
+
+At session start, resolving the **default** profile for a launch on a target host (host + GPU +
+active encoder already chosen by placement):
+1. Look up the latest `host_encoder_certification` row for `(host_id, gpu_index, encoder,
+   profile_id)`. A row older than a staleness horizon (default 7 days, tunable) counts as
+   **uncertified**.
+2. **The cap:** do not default-start a profile whose certified `encode_ms_p95 > 0.70 ×
+   budget_ms` (`budget_ms = 1000.0 / fps`) on the target host — equivalently, `verdict='unsafe'`
+   is not a default start.
+3. **Cap to the next sustainable rung** of the same resolution family, preferring an fps downshift
+   over a resolution drop. `sessions.profile_id` still records the **served** rung.
+4. **`capped` verdict** ⇒ start the rung but not at the top of its bitrate band, only if
+   `live_write_stable = true`; if `false`, treat `capped` as `unsafe` for default-start.
+5. **Uncertified / stale / unknown encoder** ⇒ no cap — today's tier-default behavior. The cap only
+   ever *lowers* a default, never raises one.
+6. **Explicit override wins.** An explicit `profile_id`/width/height/fps on `POST /v1/sessions`, or
+   an admin force flag, bypasses the cap entirely.
 
 ---
 

@@ -41,6 +41,35 @@
 > constraint changes. The migration itself **lands in P9-07** (the native producer), not the
 > contract ticket. See `docs/phase9/P9-01-contract-prelude.md`.
 
+> **Amendment — ST-01 (Observability v2 — session trace), additive, requires sign-off.** Adds two
+> new append/one-row-per-session tables via **migration 0016**: `session_trace_events` (discrete
+> per-session markers — ABR retarget, source swap, encoder drop, webrtc state, playout change,
+> freeze, visibility — `source ∈ {agent, browser}`) and `session_trace_clock` (one optional row per
+> session carrying `client_offset_ms` + `uncertainty_ms`; **absence of the row means unmeasured,
+> never offset 0**). It complements the periodic `session_metrics` samples (migration 0003): the
+> diagnostic bundle reads `session_metrics` JSONB **joined with** these events — **no new samples
+> table, no second sample write path**. Plain Postgres only (no `CREATE EXTENSION`, no
+> `create_hypertable`); bounded by the same retention model as `session_metrics` (rolling per-session
+> window + terminal prune; FK `ON DELETE CASCADE` reaps on session delete). **Purely additive** — no
+> existing table, column, type, constraint, or the session state machine changes. Telemetry is
+> observability, never access control and never a session-state authority. See
+> `docs/session-trace/contract-amendment.md` §A and `docs/session-trace/trace-format.md`.
+
+> **Amendment — SPT-05 (Stream Perf Tuning Phase C — encoder certification), additive, requires
+> sign-off.** Adds one new table via **migration 0018**: `host_encoder_certification` — the measured
+> sustainable encode envelope per `(host, GPU, encoder, profile, bench-bitrate)` (`encode_ms`
+> percentiles, `output_fps`, `drop_rate`, `live_write_stable`, and a `verdict ∈ {ok, capped, unsafe}`)
+> so the scheduler can avoid default-starting a profile a host cannot hold in real time (e.g. Renoir
+> `1080p60` → `unsafe`). It is **scheduling input, not telemetry**: **upsert-latest** (one current
+> verdict per configuration, `UNIQUE (host_id, gpu_index, encoder, profile_id, bitrate_kbps)`), **not**
+> append-only, and **not** on the `session_metrics` retention prune — a durable capability fact that
+> survives across sessions. **Purely additive** — no existing table, column, type, constraint, or the
+> session state machine changes; never access control, never a session-state authority. Two related
+> pieces need **no schema change**: SPT-07 consumes the existing `user_devices.capabilities` JSONB as a
+> session envelope, and `abr_mode` (`QUASAR_ABR_MODE`) is node-agent config, not a schema column. Also
+> records the pre-existing **migration 0017** (`stream_profile_policy.updated_by → ON DELETE SET NULL`,
+> the #154 admin-delete follow-up). See `docs/stream-perf/contract-amendment.md` §A.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
@@ -408,6 +437,70 @@ user's devices (the Phase-7 surface).
 
 ---
 
+## `session_trace_events` (Observability v2, ST-01)
+> *Additive, observability amendment (migration 0016). A new append-only table; it changes no
+> existing table, column, type, or the session state machine. Discrete per-session markers
+> (events) that complement the periodic `session_metrics` samples; the diagnostic bundle
+> (`control-api.md`) reads existing `session_metrics` JSONB **joined with** this events table —
+> there is no new samples table and no second sample write path. Telemetry is a cache of
+> reporter truth for troubleshooting — never the access control, never a session-state
+> authority.*
+
+Per-session discrete events, append-only, **one row per event per source**. Two reporters write
+here: the **agent** (`agent-api.md` `session_trace_event`, host-side markers — ABR retarget,
+source swap, encoder drop, webrtc state) and the **browser** (`control-api.md` trace-events
+ingest — playout change, freeze, visibility, client webrtc state). The `source` column keeps
+them distinct so the admin surface can reconcile a host→browser timeline (the same pattern as
+`session_metrics.source`).
+
+| column | type | notes |
+|---|---|---|
+| `id` | `UUID` PK | `gen_random_uuid()` |
+| `session_id` | `UUID` NOT NULL → `sessions(id)` ON DELETE CASCADE | the session this event belongs to; cascade so a deleted session takes its events with it (identical to `session_metrics`). |
+| `source` | `TEXT` NOT NULL | `CHECK (source IN ('agent','browser'))`. Which reporter produced the event. (No `'native'` value in v1 — the native client rides the browser ingest as `source='browser'`; widening, if ever wanted, is a later migration, mirroring how `session_metrics.source` widened in 0014.) |
+| `ts_unix_ms` | `BIGINT` NOT NULL | reporter wall-clock at the event (ms since epoch), same convention as `session_metrics.ts_unix_ms` / `agent-api.md` `heartbeat.ts_unix_ms`. |
+| `type` | `TEXT` NOT NULL | the event type from the `trace-format.md` §3 v1 allow-list (`abr.retarget`, `pipeline.source_swapped`, `encoder.drop_detected`, `webrtc.state_changed`, `playout.changed`, `client.freeze_detected`, `client.visibility_changed`; plus the reserved `operator.annotation`). Browser-source unknown types are dropped at ingest (never stored). |
+| `payload` | `JSONB` NOT NULL DEFAULT `'{}'` | the per-type payload (`trace-format.md` §3). JSONB (not frozen columns) so a new event field is not a migration. |
+| `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | **server-only** ingestion time (distinct from `ts_unix_ms`, the reporter's clock); used by the retention prune. |
+
+Indexes:
+- `(session_id, ts_unix_ms DESC)` — serves "recent events for a session" (the trace/bundle read)
+  and per-session ordering, mirroring `session_metrics_session_ts_idx`.
+- `(session_id, type, ts_unix_ms DESC)` — serves the typed read (`.../trace/events?types=`) and
+  the bundle's per-type derived windows.
+
+**Plain Postgres only — no `CREATE EXTENSION`, no `create_hypertable`.** A plain relational table
+on the existing retention/prune model (`trace-format.md` §6): rolling per-session window
+(`metricsRetentionWindow`) + terminal prune + FK cascade.
+
+> **Retention.** Same posture as `session_metrics`: a rolling recent window per session while it
+> runs, a short post-terminal TTL, then delete (or immediate cascade on session-row reap). No
+> event write is on the session hot path.
+
+## `session_trace_clock` (Observability v2, ST-01)
+> *Additive, observability amendment (migration 0016, same migration as `session_trace_events`).
+> One optional row per session carrying the client↔host clock-offset estimate **and its
+> uncertainty**, so the browser-clock series can be aligned against the host-clock series
+> honestly. Absence of a row means the clock is **unmeasured** — never interpreted as offset 0.*
+
+| column | type | notes |
+|---|---|---|
+| `session_id` | `UUID` PRIMARY KEY → `sessions(id)` ON DELETE CASCADE | the session this clock estimate belongs to. PK so there is exactly one row per session. Cascade-reaps with the session. |
+| `client_offset_ms` | `DOUBLE PRECISION` NOT NULL | estimated client-clock − host-clock offset (ms); add to a browser `ts_unix_ms` to express it on the host clock. From the deep-trace ping/pong sync (ST-05). |
+| `uncertainty_ms` | `DOUBLE PRECISION` NOT NULL | the spread of the offset estimate (e.g. min-RTT-derived) — the honest error bar carried on every cross-clock alignment. |
+| `measured_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | when the offset was measured. |
+| `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | last write (a re-measure refinement updates this). |
+
+**Unmeasured is the absence of the row.** A session for which clock sync never succeeded has
+**no** `session_trace_clock` row; the bundle reports `clock: { "unmeasured": true }`. There is no
+sentinel `client_offset_ms = 0` — offset 0 is a measured value, not a default (`trace-format.md`
+§4, no false precision). v1 stores **one** offset per session.
+
+Migration `0016_session_trace`: creates both tables + the two `session_trace_events` indexes in
+one `BEGIN; … COMMIT;` block. The down migration drops them in reverse order.
+
+---
+
 ## `host_settings` (native-client-spike-186 / host-runtime-settings-admin)
 > *Additive amendment (migration 0010). A new table; it changes no existing table, column,
 > type, or constraint. Stores per-host sparse overrides for the server-side knob catalog;
@@ -474,6 +567,77 @@ Index: `(user_id)` (per-user usage summation); `(gc_after)` partial `WHERE gc_af
 >   is nothing to reap and nobody to confirm. The control-plane **janitor** hard-deletes these
 >   rows directly after grace (a row-only delete — the pre-#175 status quo, when the janitor
 >   deleted every past-grace row regardless).
+
+---
+
+## `host_encoder_certification` (Stream Perf Tuning Phase C, SPT-05)
+> *Additive, scheduling-support amendment (migration 0018). A new table; it changes no existing
+> table, column, type, or constraint, and it does **not** touch the session state machine. It
+> records the measured, sustainable performance envelope of a concrete encode configuration on a
+> concrete GPU — the per-(host, GPU, encoder, profile) answer to "can this box hold this rung in
+> real time?". It is **scheduling input, not telemetry**: unlike `session_metrics` (a rolling
+> per-session cache the retention prune reaps), a certification row is a durable capability fact
+> about the host that the scheduler reads at launch and that survives across sessions. It is
+> never access control and never a session-state authority.*
+
+One row per **certified configuration**: a (host, GPU, encoder, profile/resolution+fps) tuple
+plus the bitrate the bench was run at. Produced by the SPT-06 certification routine, which runs a
+short bench encode at the candidate rung and records how the encoder behaved against the frame
+budget. The scheduler reads the **latest** row per tuple to decide whether a profile is safe to
+default-start on that host.
+
+| column | type | notes |
+|---|---|---|
+| `id` | `UUID` PK | `gen_random_uuid()`. |
+| `host_id` | `UUID` NOT NULL → `hosts(id)` ON DELETE CASCADE | the host the bench ran on; cascade so forgetting a host reaps its certifications (identical posture to `gpus`/`session_metrics`). |
+| `gpu_index` | `INT` NOT NULL | the GPU index on that host (matches `gpus.index`; **not** an FK to `gpus.id` — certification is keyed by the stable host+index the agent reports, so a GPU row re-creation does not orphan a still-valid measurement). |
+| `encoder` | `TEXT` NOT NULL | the encode element family the verdict is for — `CHECK (encoder IN ('va','nvenc','openh264'))`. Matches the `QUASAR_ENCODER` selector. Widening (e.g. an AV1 element) is a later migration, mirroring how `session_metrics.source` widened in 0014. |
+| `profile_id` | `TEXT` NOT NULL | the AS10-01 stream-profile id the bench targeted (e.g. `'1080p60'`). Same id space as `sessions.profile_id`; **not** FK-constrained (the profile catalog is in-code, not a DB table). |
+| `width` | `INT` NOT NULL | resolved bench resolution (self-describing even if the profile catalog later re-tunes a rung). |
+| `height` | `INT` NOT NULL | |
+| `fps` | `INT` NOT NULL | the bench target fps — the frame budget is `1000.0 / fps` ms. |
+| `bitrate_kbps` | `INT` NOT NULL | the CBR/ceiling bitrate the bench ran at (one row per (rung, bitrate) point). |
+| `verdict` | `TEXT` NOT NULL | `CHECK (verdict IN ('ok','capped','unsafe'))`. `ok` = sustainable at this rung; `capped` = sustainable only with a live downshift / not at full fps; `unsafe` = cannot hold the frame budget (the Renoir-1080p60 motivating case). |
+| `encode_ms_p50` | `DOUBLE PRECISION` NOT NULL | measured encode-time p50 over the bench window (agent `encode_ms` series). |
+| `encode_ms_p95` | `DOUBLE PRECISION` NOT NULL | encode-time p95 — **the headline number the scheduler rule keys on**. |
+| `encode_ms_max` | `DOUBLE PRECISION` NOT NULL | worst observed encode time in the window. |
+| `output_fps` | `DOUBLE PRECISION` NOT NULL | the actual sustained encoder output fps during the bench (distinguishes "asked for 60, delivered 45"). |
+| `drop_rate` | `DOUBLE PRECISION` NOT NULL | encoder-side dropped-frame fraction over the window, `[0.0, 1.0]`. |
+| `live_write_stable` | `BOOLEAN` NOT NULL | whether live bitrate/CPB property writes applied cleanly on this encoder during the bench (the same writability probe ABR uses to arm). `false` ⇒ ABR cannot live-adapt this encoder, so the scheduler/ABR must treat the rung as static CBR. |
+| `sample_window_ms` | `INT` NOT NULL | the bench measurement window length (ms) the percentiles were computed over. |
+| `sample_count` | `INT` NOT NULL | number of `encode_ms` samples in the window (no false precision off a short run). |
+| `agent_version` | `TEXT` NULL | `hosts.agent_version` at measurement time. |
+| `measured_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | when the bench ran. The scheduler may treat a row older than a staleness horizon as "uncertified". |
+| `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | last write (an upsert refresh bumps this). |
+
+**Upsert-latest, not append-only.** Unlike `session_metrics`, this table holds the **current
+capability verdict** per configuration. A re-certification of the same (host, gpu_index, encoder,
+profile_id, bitrate_kbps) tuple **replaces** the prior row (upsert on the unique key below,
+bumping `updated_at`/`measured_at`). Uniqueness:
+
+```
+UNIQUE (host_id, gpu_index, encoder, profile_id, bitrate_kbps)
+```
+
+Index: `(host_id, gpu_index, encoder, profile_id)` — serves the scheduler's per-launch lookup
+across all bench bitrates, and the admin per-host read.
+
+**Plain Postgres only — no `CREATE EXTENSION`, no `create_hypertable`.** There is no time-series
+growth concern because it is upsert-latest (bounded by hosts × GPUs × encoders × rungs × bench
+bitrates).
+
+**The `verdict` enum (sustainability classification).** Derived from the bench window against
+`budget_ms = 1000.0 / fps`: **`ok`** — `encode_ms_p95 ≤ 0.70 × budget_ms` **and** `output_fps ≥
+0.97 × fps` **and** negligible `drop_rate`; **`capped`** — `encode_ms_p95 ∈ (0.70, 1.0] ×
+budget_ms`, or `output_fps` short of target while drops stay low; **`unsafe`** —
+`encode_ms_p95 > budget_ms`, or `output_fps` materially below target, or a non-trivial
+`drop_rate`. The `0.70 × budget` threshold is the same constant the scheduler's session-start cap
+uses (`control-api.md` §Host encoder certification) — the enum values and the `0.70`-budget
+boundary are the contract; the exact epsilon/`output_fps` cutoffs are SPT-06 implementation
+tuning.
+
+Migration `0018_host_encoder_certification`: creates the table + the lookup index in one
+`BEGIN; … COMMIT;` block. The down migration drops the table.
 
 ## Session state machine (shared contract)
 This is the canonical lifecycle. `agent-api.md` and `control-api.md` use exactly these
@@ -557,6 +721,13 @@ control-plane/migrations/
   0009_user_homes_orphans.up.sql -- (P5-05 erratum) user_homes.user_id/app_id NULLable + ON DELETE SET NULL
   0010_host_settings.up.sql      -- (#212) CREATE host_settings (per-host runtime config overrides)
   0011_session_profile.up.sql    -- (AS10-03) ADD sessions.profile_id (selected AS10-01 stream profile)
+  0012_stream_health.up.sql      -- stream-perf support (per-host stream-health)
+  0013_user_device_profile_history.up.sql -- (AS10-08) per-device profile history
+  0014_app_host_delete_cascade.up.sql -- (admin-delete) sessions.app_id/host_id → CASCADE, user_homes.host_id → SET NULL; widens session_metrics.source to include 'native' (P9-01)
+  0015_profile_preferences.up.sql -- (CP-01) stream_profile_policy singleton + updated_by
+  0016_session_trace.up.sql      -- (ST-01) CREATE session_trace_events + session_trace_clock + indexes
+  0017_policy_updated_by_set_null.up.sql -- (#154 follow-up) stream_profile_policy.updated_by → ON DELETE SET NULL
+  0018_host_encoder_certification.up.sql -- (SPT-05) CREATE host_encoder_certification (upsert-latest) + lookup index
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`
