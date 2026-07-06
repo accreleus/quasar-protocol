@@ -217,12 +217,19 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `POST /v1/sessions/{id}/stats` | **owner or admin** | *(P4-01)* the client posts its own session's browser telemetry — same ownership check as `DELETE` |
 | `GET /v1/admin/sessions/{id}/metrics` | **admin** | *(P4-01)* per-session telemetry read (oversight) |
 | `POST /v1/me/devices` | user (self) | *(P4-01)* upsert the caller's own device capability; owner is the bearer identity, never a body field |
-| `GET /v1/me/devices` | user (self) | *(AS10-08)* read the caller's own latest device capability record; owner is the bearer identity |
+| `GET /v1/me/devices` | user (self) | *(AS10-08; **LP-SEC-01**)* read the caller's own devices — **now the full list** (was AS10-08 latest-only); owner is the bearer identity |
 | `GET /v1/me/profiles` | user (self) | *(AS10-02)* stream profile eligibility + recommendation for the caller's device; advisory, owner is the bearer identity |
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `GET /v1/me/storage` | user (self) | *(P5-01)* the caller's own per-app storage usage |
 | `POST /v1/me/password` | user (self) | *(CP-01)* change the caller's own password; subject is the bearer identity, never a body field. Revokes all active tokens on success — client must re-authenticate |
+| `GET /v1/admin/settings` | **admin** | *(LP-SEC-01)* read instance settings (`registration_mode`, …) |
+| `PATCH /v1/admin/settings` | **admin** | *(LP-SEC-01)* update instance settings — how invites are enabled/disabled from the UI |
+| `POST /v1/admin/invites` | **admin** | *(LP-SEC-01)* mint an invite; plaintext code + magic link returned once |
+| `GET /v1/admin/invites` | **admin** | *(LP-SEC-01)* list minted invites (never plaintext) |
+| `DELETE /v1/admin/invites/{id}` | **admin** | *(LP-SEC-01)* revoke an invite |
+| `PATCH /v1/me/devices/{id}` | user (self) | *(LP-SEC-01)* rename / set trust; owner-scoped, `403` on others' |
+| `DELETE /v1/me/devices/{id}` | user (self) | *(LP-SEC-01)* revoke — expires that device's tokens; owner-scoped |
 | `GET /v1/admin/config/catalog` | **admin** | *(host-runtime-settings)* read the knob catalog |
 | `GET /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* read a host's resolved settings + overrides |
 | `PATCH /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* update per-host overrides |
@@ -261,20 +268,38 @@ seeded); a partial set is an operator error.
 
 ### `POST /v1/auth/register`
 ```json
-// request
-{ "email": "a@b.com", "username": "ada", "password": "<plaintext, TLS only>" }
-// 201
+// request — invite_code REQUIRED when registration_mode = invite_only (LP-SEC-01)
+{ "email": "a@b.com", "username": "ada", "password": "<plaintext, TLS only>",
+  "invite_code": "<opaque, from the magic link>" }
+// 201 — role always comes from the invite (or 'user'), never a request field
 { "user": { "id": "<uuid>", "email": "a@b.com", "username": "ada", "role": "user", "created_at": "..." } }
 ```
 Password hashed with **argon2id** (P1-2). `409 conflict` on duplicate email/username. No token is
 returned — the client logs in next (keeps register/login flows independent).
+
+> *(LP-SEC-01, additive) The endpoint is gated by the persisted `instance_settings.registration_mode`
+> (`schema.md`; set via `PATCH /v1/admin/settings`):*
+> - *`closed` **(default on a fresh install)** — register is refused (`403 registration_closed`); the
+>   invitation system is off until an admin turns it on.*
+> - *`invite_only` — `invite_code` is **required**; it is validated + atomically consumed against
+>   `invites` (`schema.md`, single-use `UPDATE … RETURNING`). The created account's `role` is the
+>   invite's `role` — **never claimable from the register wire**. The `used_count` bump is rolled back
+>   on a `409` duplicate so a `409` never burns a single-use invite.*
+> - *`open` — today's behaviour; `invite_code` ignored if present.*
+>
+> *Errors: generic **`400 invalid_invite`** for all of missing/unknown/expired/exhausted/revoked (no
+> oracle); `403 registration_closed` when `closed`. Redemption is **rate-limited** (reuse the login
+> limiter). The web form reads the code from the magic link's `?invite=<code>` query param — a user
+> never types it. The bootstrap-admin path is unaffected by `registration_mode`.*
 
 ### `POST /v1/auth/login`
 ```json
 // request
 { "email": "a@b.com", "password": "<plaintext, TLS only>",
   // optional, native client only (P9-01); web/legacy clients omit them:
-  "client_version": "1.2.0", "contract_version": "p9-01" }
+  "client_version": "1.2.0", "contract_version": "p9-01",
+  // optional (LP-SEC-01); when present, binds the minted token to this device:
+  "device_key": "<client-generated localStorage UUID>" }
 // 200
 {
   "access_token": "<opaque bearer>",
@@ -296,6 +321,13 @@ distinction, to avoid user enumeration).
 > `latest_client_version` soft-warned — but the **enforcement rule is defined in P9-08
 > (#236)**; this amendment only specifies the fields. `client_version` is a semver string the
 > client owns; `contract_version` is the `protocol/` version tag the client built against.*
+
+> *(LP-SEC-01, additive) `device_key` is an **optional** request field. When present, the server
+> upserts the `(user_id, device_key)` `user_devices` row and **stamps the minted
+> `auth_tokens.device_id`** so the token is revocable per-device (`schema.md`). When absent
+> (legacy/native clients), behaviour is exactly as today: the token is minted with `device_id =
+> NULL` and is not device-revocable until a device-declaring re-login. The response shape is
+> unchanged.*
 
 ### `POST /v1/auth/logout`
 Revokes the presented bearer token (`auth_tokens.revoked_at = now()`). `204`. Idempotent.
@@ -324,6 +356,103 @@ the new password (the bearer used for this call is invalid immediately after the
 fails the password-strength rule (the same length bounds as `/v1/auth/register`). No new field on
 any existing shape; reuses the login password-verify path, the registration strength rule, and the
 existing token-revocation path. Gated by `RequireAuth` like the other `/v1/me` routes.
+
+---
+
+## Account security — invites + device management (LP-SEC-01)
+
+> **Amendment — LP-SEC-01 (W1 security wave), additive, requires sign-off.** Adds the admin
+> **instance-settings** surface (`GET/PATCH /v1/admin/settings`) exposing `registration_mode`
+> (`closed` **default** | `invite_only` | `open`) so the invitation system is **off by default
+> and turned on by an admin in the UI** (persisted in `schema.md` `instance_settings`; the
+> `REGISTRATION_MODE` env only seeds first boot); the admin **invite** surface
+> (`POST/GET /v1/admin/invites`, `DELETE /v1/admin/invites/{id}`) whose mint returns a **magic
+> one-time link**; the register redemption gate + login `device_key` binding (documented inline
+> at `POST /v1/auth/register` / `POST /v1/auth/login`); and the owner-self **device
+> management** surface (`GET /v1/me/devices` now a **list**, `PATCH`/`DELETE
+> /v1/me/devices/{id}`). Enforcement is server-side (role gate + token binding + persisted
+> mode), **never UI-gated**. The bootstrap-admin path is unaffected — an admin always exists to
+> turn the system on. See `docs/w1-security/LP-SEC-01-contract.md`.
+
+### `GET` / `PATCH /v1/admin/settings` — the enable/disable control (admin)
+`RequireAuth → RequireAdmin`. The UI toggle that turns the invitation system on/off.
+```json
+// GET /v1/admin/settings — 200
+{ "settings": { "registration_mode": "closed", "updated_by": "<uuid|null>", "updated_at": "..." } }
+// PATCH /v1/admin/settings — request (partial)
+{ "registration_mode": "invite_only" }
+// 200 — same shape as GET, with updated_by stamped to the acting admin
+```
+`registration_mode` validated against `{closed, invite_only, open}` (`400 validation_failed`
+otherwise); persisted to the `instance_settings` singleton (`schema.md`). Takes effect
+immediately — no redeploy. `403` for non-admin (precedes any lookup).
+
+### `POST /v1/admin/invites` — mint a magic one-time link (admin)
+`RequireAuth → RequireAdmin`.
+```json
+// request — all fields optional; a bare {} mints a single-use user invite
+{ "role": "user", "max_uses": 1, "expires_at": "2026-08-01T00:00:00Z", "note": "for Bob" }
+// 201 — plaintext code + ready-to-send link, returned EXACTLY ONCE (never retrievable again)
+{ "invite": { "id": "<uuid>", "code": "<opaque ≥128-bit>",
+              "invite_url": "https://<instance>/register?invite=<code>",
+              "role": "user", "max_uses": 1, "used_count": 0,
+              "expires_at": "...", "created_at": "..." } }
+```
+- `code` generated server-side (≥128-bit), returned plaintext **once**, stored **hashed**
+  (`invites.code_hash`). `role` defaults `'user'`; `role:"admin"` mints an admin-provisioning
+  invite (admin-only — the only path a wire-redeemed account becomes admin).
+- **Magic link:** mint → copy link → send to recipient → they open it → the register form is
+  pre-filled from `?invite=<code>` → they set email/username/password. Default `max_uses:1` ⇒
+  one-time. `invite_url` is composed server-side if a public base URL is configured, else
+  omitted and the admin UI composes it from `code` + `window.location.origin`. The link carries
+  only the opaque code — no PII, no role in the URL.
+- `403` for non-admin.
+
+### `GET /v1/admin/invites` · `DELETE /v1/admin/invites/{id}` (admin)
+- `GET` — list minted invites; **never** the plaintext code (show `id`, `role`, `max_uses`,
+  `used_count`, `expires_at`, `revoked_at`, `note`, `created_at`).
+- `DELETE {id}` — revoke (`revoked_at = now()`), `204`, idempotent; stops redeeming immediately.
+
+### Device management — owner-self surface
+`RequireAuth`; owner is the **bearer identity**, never a body field. `403` (not `404`) if the
+device id belongs to another user (no existence leak).
+
+**`GET /v1/me/devices` — the full list** *(LP-SEC-01 supersedes the AS10-08 latest-only shape)*:
+```json
+// 200 — newest-first by last_seen_at
+{ "devices": [
+    { "id": "<uuid>", "device_key": "<opaque id>", "name": "Living-room PC", "trusted": false,
+      "first_seen_at": "...", "last_seen_at": "...",
+      "current": true,                    // the device the bearer token is bound to
+      "active_session_id": "<uuid|null>", // from sessions.device_id, if any live session
+      "capabilities": { "...": "sanitized blob, verbatim" } }
+  ] }
+```
+> *The AS10-08 single-latest consumer moves to `devices[0]` / the `current` device. This is the
+> one non-additive shape change in LP-SEC-01 (signed off). `POST /v1/me/devices` (P4-01 upsert)
+> is unchanged.*
+
+**`PATCH /v1/me/devices/{id}`** — rename / set trust:
+```json
+// request (either/both)
+{ "name": "Living-room PC", "trusted": true }
+// 200 — updated device (same item shape as the list)
+```
+
+**`DELETE /v1/me/devices/{id}` — revoke** (the load-bearing endpoint):
+```json
+// 204 — device revoked
+```
+- **Real revocation, not a row delete.** The server **expires every `auth_tokens` row where
+  `device_id = {id}`** (`revoked_at = now()`) → that device's next request `401`s. Optionally
+  (policy) it also ends that device's live session via the existing `DELETE /v1/sessions/{id}`
+  teardown if `sessions.device_id = {id}` — **no agent-wire change**.
+- Because `auth_tokens.device_id`/`sessions.device_id` are `ON DELETE SET NULL`, deleting the
+  device row never cascades a token/session away — revocation is the explicit token-expire
+  above, done **before** any row delete.
+- **Re-register defense:** a revoked `device_key` that logs in again gets a *fresh* device row +
+  fresh token; it does not silently reclaim the revoked token. Access is regained only by a full
+  authenticated login (owner-scope + credentials).
 
 ---
 

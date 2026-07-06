@@ -70,6 +70,28 @@
 > records the pre-existing **migration 0017** (`stream_profile_policy.updated_by → ON DELETE SET NULL`,
 > the #154 admin-delete follow-up). See `docs/stream-perf/contract-amendment.md` §A.
 
+> **Amendment — LP-SEC-01 (W1 security wave — invites + device binding), additive, requires
+> sign-off.** Adds, via **migration 0020**: (0) one new **singleton** table `instance_settings`
+> holding the global `registration_mode` (`closed` **default** | `invite_only` | `open`) — the
+> invitation system is **off by default** and is turned on by an admin at runtime (persisted,
+> UI-settable via `control-api.md` `PATCH /v1/admin/settings`; the `REGISTRATION_MODE` env only
+> **seeds** the row on first boot, thereafter the persisted value is authoritative); (1) one new
+> table `invites` — admin-minted, single-or-multi-use redemption codes stored **hashed**
+> (SHA-256 hex, like `auth_tokens`), never plaintext-at-rest, delivered as **magic one-time
+> links**; (2) two additive columns on `user_devices` — `name TEXT NULL` (user-set display
+> label) and `trusted BOOLEAN NOT NULL DEFAULT false` (advisory trust posture, **not** an
+> authorization input in W1); (3) one additive column `auth_tokens.device_id UUID NULL →
+> user_devices(id) ON DELETE SET NULL` — the **token↔device binding** that makes device
+> revocation real (a token minted before the migration, or a login that declares no
+> `device_key`, keeps `device_id = NULL`; backfill NULL, stamped at login going forward); (4)
+> one optional additive column `sessions.device_id UUID NULL → user_devices(id) ON DELETE SET
+> NULL` so a device's **live** session can be shown/ended (reuses P2 teardown, **no agent-wire
+> change**). **Purely additive** — no existing table, column, type, constraint, or the session
+> state machine changes; the frozen `0001`–`0019` migrations are untouched. Invites are
+> **account provisioning, never session authority**; device rows are **owner-scoped**, never an
+> access-control flag (enforcement is the token binding + the server role gate + the persisted
+> `registration_mode`, never a UI field). See `docs/w1-security/LP-SEC-01-contract.md`.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
@@ -168,10 +190,59 @@ exactly once at mint time.
 | `revoked_at` | `TIMESTAMPTZ` NULL | set by `/auth/logout`; non-null = invalid. |
 | `last_used_at` | `TIMESTAMPTZ` NULL | touched on use (best-effort; not on the hot path's critical section). |
 | `user_agent` | `TEXT` NULL | for the user's "active sessions" view later. |
+| `device_id` | `UUID` NULL → `user_devices(id)` ON DELETE SET NULL | *(LP-SEC-01, migration 0020)* the device this token was minted for — the **token↔device binding** that makes device revocation real. **NULL** for tokens minted before 0020 and for logins that declare no `device_key` (legacy/native): those are not device-revocable until re-login (backfill caveat). Stamped at login from the caller's declared `device_key` (`control-api.md` `POST /v1/auth/login`). `ON DELETE SET NULL` so deleting a device row never orphans/cascades a token — revocation is an explicit token expire/revoke, not a row delete. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
-Index: `(user_id)` for listing/revoking a user's tokens.
+Index: `(user_id)` for listing/revoking a user's tokens; `(device_id) WHERE device_id IS NOT NULL` for revoke-by-device *(LP-SEC-01)*.
 A token is valid iff `revoked_at IS NULL AND expires_at > now()`.
+
+## `instance_settings` (LP-SEC-01)
+> *Additive amendment (migration 0020). A new **singleton** table (one global row) holding
+> instance-wide, admin-settable config — the home for `registration_mode` and future global
+> settings. Follows the `stream_profile_policy` singleton precedent (migration 0015). It changes
+> no existing table. Enforcement reads this row, never a client flag.*
+
+| column | type | notes |
+|---|---|---|
+| `id` | `BOOLEAN` PK DEFAULT `true` | `CHECK (id)` — the singleton idiom (only one row can exist). |
+| `registration_mode` | `TEXT` NOT NULL DEFAULT `'closed'` | `CHECK (registration_mode IN ('closed','invite_only','open'))`. **Default `closed`** — the invitation system is **off** on a fresh install; nobody self-registers until an admin turns it on (`control-api.md` `PATCH /v1/admin/settings`). |
+| `updated_by` | `UUID` NULL → `users(id)` ON DELETE SET NULL | last admin who changed it. |
+| `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
+
+**Seeding.** On first boot the control plane inserts the singleton, taking `registration_mode`
+from the `REGISTRATION_MODE` env var **if set**, else `'closed'` — a one-time seed (idempotent,
+like bootstrap-admin). **After** the row exists the admin UI / `PATCH /v1/admin/settings` is
+authoritative and the env var is ignored. This is what makes "enable invites in the UI" a
+persisted runtime change, not a redeploy.
+
+## `invites` (LP-SEC-01)
+> *Additive amendment (migration 0020). A new table; it changes no existing table. Codes are
+> stored **hashed** (never plaintext-at-rest), admin-minted, delivered as **magic one-time
+> links**. Invites are account provisioning, never session authority.*
+
+One row per minted invite code. Redemption is atomic single-use (or bounded multi-use).
+
+| column | type | notes |
+|---|---|---|
+| `id` | `UUID` PK | `gen_random_uuid()` |
+| `code_hash` | `TEXT` NOT NULL UNIQUE | SHA-256 (hex) of the opaque code (≥128-bit entropy). Lookup key. **Plaintext is shown to the admin exactly once at mint, never stored** — same custody model as `auth_tokens.token_hash`. |
+| `created_by` | `UUID` NOT NULL → `users(id)` ON DELETE CASCADE | the admin who minted it. |
+| `role` | `TEXT` NOT NULL DEFAULT `'user'` | `CHECK (role IN ('user','admin'))`. The role the redeemed account is created with. **Admin-minted only** — the role is *never* claimable from the register wire; it rides the (admin-created) invite. |
+| `max_uses` | `INT` NOT NULL DEFAULT `1` | `CHECK (max_uses >= 1)`. `1` = single-use (the magic-link default). |
+| `used_count` | `INT` NOT NULL DEFAULT `0` | `CHECK (used_count >= 0 AND used_count <= max_uses)`. Bumped atomically on redemption. |
+| `expires_at` | `TIMESTAMPTZ` NULL | NULL = no expiry. Redemption refused when `now() >= expires_at`. |
+| `revoked_at` | `TIMESTAMPTZ` NULL | admin-revoked; non-null = unusable. |
+| `note` | `TEXT` NULL | admin free-text ("for Bob"). |
+| `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
+
+An invite is **redeemable** iff `revoked_at IS NULL AND used_count < max_uses AND (expires_at
+IS NULL OR expires_at > now())`. **Atomic single-use consumption** (prevents two accounts on
+one code under a race): `UPDATE invites SET used_count = used_count + 1 WHERE code_hash = $1 AND
+revoked_at IS NULL AND used_count < max_uses AND (expires_at IS NULL OR expires_at > now())
+RETURNING id, role` — zero rows ⇒ invalid/exhausted/expired/revoked, all indistinguishable to
+the caller (`control-api.md` generic `400 invalid_invite`, no oracle). The `used_count` bump is
+rolled back if the subsequent account create hits a `409` duplicate (so a `409` never burns a
+single-use invite). Index: `(created_by)` for the admin list view.
 
 ## `apps`
 The library. **Replaces Wolf's per-app TOML.** An app is a launchable container plus the
@@ -287,6 +358,7 @@ signaling (P1-D).
 |---|---|---|
 | `id` | `UUID` PK | session id, used across all four contracts. |
 | `user_id` | `UUID` NOT NULL → `users(id)` | owner. |
+| `device_id` | `UUID` NULL → `user_devices(id)` ON DELETE SET NULL | *(LP-SEC-01, migration 0020, optional)* the device that launched the session, so the account UI can show/end a device's live session. NULL = unknown (legacy / no `device_key` declared). **Read-only linkage; does not change scheduling, the session state machine, or the agent wire.** Ending it is the existing `DELETE /v1/sessions/{id}` (owner-or-admin). |
 | `app_id` | `UUID` NOT NULL → `apps(id)` **ON DELETE CASCADE** | what's launched. *(admin-delete erratum, migration 0014: was no-cascade.* Deleting an app — refused while any non-terminal session references it — cascades that app's **terminal** session history away.) |
 | `host_id` | `UUID` NULL → `hosts(id)` **ON DELETE CASCADE** | set on assign; NULL while `pending`. *(admin-delete erratum, migration 0014: was no-cascade.* Forgetting a host — refused while online or holding a non-terminal session — cascades that host's terminal session history away; NULL rows unaffected.)* |
 | `gpu_id` | `UUID` NULL → `gpus(id)` | set on assign; the reserved GPU. |
@@ -430,6 +502,8 @@ settings (FPS tiering, codec selection); **Phase 4 produces it, no optimizer con
 | `capabilities` | `JSONB` NOT NULL DEFAULT `'{}'` | the probe result: `{ "codecs": {"h264":true,"hevc":false,"av1":false,"vp9":true}, "max_decode_height": 2160, "bandwidth_kbps": 48000, "rtt_ms": 12, "measured_at": "<rfc3339>" }`. JSONB so the probe can grow without a migration. `measured_at` is **server-stamped** at upsert (not client-supplied, so a client cannot backdate). **Note:** browsers do not directly expose *hardware*-decode support; `codecs` is a best-effort heuristic (codec acceptance via `RTCRtpReceiver.getCapabilities` + a resolution probe) and is documented as such in `P4-08`. |
 | `first_seen_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | first login from this device. |
 | `last_seen_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | updated on each capability upsert. |
+| `name` | `TEXT` NULL | *(LP-SEC-01, migration 0020)* user-set display label ("Living-room PC"). NULL = unnamed; the UI falls back to UA/first-seen. |
+| `trusted` | `BOOLEAN` NOT NULL DEFAULT `false` | *(LP-SEC-01, migration 0020)* user trust posture. **Advisory metadata for the account UI — not an authorization input in W1.** Any future step-up/skip behaviour keyed on it is a separate, sign-off-gated change. |
 
 Constraints: `UNIQUE (user_id, device_key)` — the upsert key (insert on first sight, update
 `capabilities`/`last_seen_at`/`user_agent` thereafter). Index `(user_id)` for listing a
@@ -728,6 +802,8 @@ control-plane/migrations/
   0016_session_trace.up.sql      -- (ST-01) CREATE session_trace_events + session_trace_clock + indexes
   0017_policy_updated_by_set_null.up.sql -- (#154 follow-up) stream_profile_policy.updated_by → ON DELETE SET NULL
   0018_host_encoder_certification.up.sql -- (SPT-05) CREATE host_encoder_certification (upsert-latest) + lookup index
+  0019_encoder_cert_vulkan.up.sql -- (Vulkan adoption) encoder-certification vulkan encoder support
+  0020_invites_device_binding.up.sql -- (LP-SEC-01) CREATE instance_settings (singleton) + invites; user_devices +name/+trusted; auth_tokens.device_id + index; sessions.device_id
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`
