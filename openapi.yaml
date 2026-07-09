@@ -9,11 +9,13 @@
 # server registers must appear here (and vice-versa). Do not hand-remove a path
 # to make that test pass — reconcile against the running router.
 #
-# Authoring note (2026-07-10): several registered routes are NOT yet described in
-# control-api.md prose (admin/apps, admin/profile-policy, admin/stream-profiles,
-# hosts/{id}/gpus, me/profile-preferences, users, users/{id}). They are modelled
-# here structurally (method/path/params/auth) with best-effort bodies and flagged
-# in the accompanying contract-drift report for prose formalization + sign-off.
+# Authoring note (2026-07-10): several registered routes are NOT yet in control-api.md
+# prose (admin/apps, admin/profile-policy, admin/stream-profiles, hosts/{id}/gpus,
+# me/profile-preferences, users, users/{id}). Their bodies here were transcribed from
+# the web client's typed contract (web/src/api/types.ts) and validated live by the
+# conformance harness (deploy/run-apitest.sh) — but the prose contract still needs the
+# amendment + sign-off (see docs/design/plans/openapi-contract-drift-report.md). A few
+# admin trace/storage/cert routes remain loosely typed (type: object) pending shapes.
 openapi: 3.1.0
 info:
   title: Quasar Control-Plane API
@@ -25,8 +27,12 @@ info:
     `x-required-role: admin`) reject a valid non-admin token with 403 — the gate
     is server-enforced (`RequireAuth → RequireAdmin`), never UI-gated.
 servers:
-  - url: http://{host}:{port}/v1
-    description: A Quasar control-plane instance (e.g. hermes :8080, tower :18080).
+  - url: http://{host}:{port}
+    description: |
+      A Quasar control-plane instance (e.g. hermes :8080, tower :18080). The server
+      base carries NO path prefix — every path below is absolute from the origin and
+      begins with /v1 (this matches the Go router's registered patterns, which the
+      drift test compares against).
     variables:
       host: { default: "localhost" }
       port: { default: "8080" }
@@ -201,7 +207,7 @@ paths:
       tags: [me]
       summary: Stream-profile eligibility + recommendation for the caller's device.
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/ProfilesResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/me/storage:
     get:
@@ -215,16 +221,16 @@ paths:
       tags: [me]
       summary: "Read the caller's stream-profile preferences. (Not yet in control-api.md prose.)"
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/ProfilePreferencesResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
     patch:
       tags: [me]
       summary: "Update the caller's stream-profile preferences. (Not yet in control-api.md prose.)"
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/ProfilePreferencesResponse" } } }
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/ProfilePreferencesResponse" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
@@ -260,12 +266,17 @@ paths:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     get:
       tags: [apps]
-      summary: A single app (public).
-      security: []
+      summary: A single app (requires auth; response is wrapped in {app}).
       responses:
         "200":
           description: OK.
-          content: { application/json: { schema: { $ref: "#/components/schemas/App" } } }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  app: { $ref: "#/components/schemas/App" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
     patch:
       tags: [apps]
@@ -300,7 +311,7 @@ paths:
       responses:
         "200":
           description: OK.
-          content: { application/json: { schema: { $ref: "#/components/schemas/AppList" } } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/AdminAppsResponse" } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
@@ -364,7 +375,7 @@ paths:
       summary: "List a host's GPUs + capacity. (Not yet in control-api.md prose.)"
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/GPUsResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -391,6 +402,7 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/LaunchResponse" } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "503": { $ref: "#/components/responses/Unavailable" }
   /v1/sessions/{id}:
@@ -476,7 +488,7 @@ paths:
       summary: "List users (admin). (Not yet in control-api.md prose.)"
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/AdminUsersResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /v1/users/{id}:
@@ -487,9 +499,9 @@ paths:
       x-required-role: admin
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/AdminUserUpdate" } } }
       responses:
-        "200": { description: Updated. , content: { application/json: { schema: { $ref: "#/components/schemas/User" } } } }
+        "200": { description: Updated. , content: { application/json: { schema: { $ref: "#/components/schemas/AdminUser" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -599,7 +611,7 @@ paths:
       summary: Read the host-settings knob catalog.
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/ConfigCatalogResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /v1/admin/hosts/{id}/settings:
@@ -637,7 +649,7 @@ paths:
       summary: "Read the global stream-profile policy. (Not yet in control-api.md prose.)"
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/ProfilePolicyResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
     patch:
@@ -646,9 +658,9 @@ paths:
       x-required-role: admin
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/ProfilePolicyResponse" } } }
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/ProfilePolicyResponse" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -658,7 +670,7 @@ paths:
       summary: "List stream profiles (the AS10-01 ladder). (Not yet in control-api.md prose.)"
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/AdminStreamProfilesResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /v1/admin/stream-profiles/{id}:
@@ -669,9 +681,9 @@ paths:
       x-required-role: admin
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/StreamProfile" } } }
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/StreamProfile" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -684,7 +696,7 @@ paths:
       summary: List all sessions (oversight).
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SessionList" } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/AdminSessionsResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /v1/admin/sessions/{id}/metrics:
@@ -694,7 +706,7 @@ paths:
       summary: Read per-session telemetry.
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/MetricsResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -705,7 +717,7 @@ paths:
       summary: The assembled diagnostic bundle (metadata + clock + series + events + verdict).
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/DiagnosticBundle" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -1029,7 +1041,7 @@ components:
         id: { type: string, format: uuid }
         name: { type: string }
         description: { type: string }
-        cover_url: { type: string }
+        cover_url: { type: [string, "null"] }
         default_width: { type: integer }
         default_height: { type: integer }
         default_fps: { type: integer }
@@ -1037,6 +1049,7 @@ components:
         default_profile_id: { type: [string, "null"] }
         profile_policy: { type: string }
         display_stream: { $ref: "#/components/schemas/Stream" }
+        enabled: { type: boolean }
     AppList:
       type: object
       properties:
@@ -1063,7 +1076,7 @@ components:
       properties:
         name: { type: string }
         description: { type: string }
-        cover_url: { type: string }
+        cover_url: { type: [string, "null"] }
         enabled: { type: boolean }
         default_width: { type: integer }
         default_height: { type: integer }
@@ -1076,6 +1089,7 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
         app_id: { type: string, format: uuid }
         host_id: { type: [string, "null"], format: uuid }
         state: { $ref: "#/components/schemas/SessionState" }
@@ -1083,6 +1097,11 @@ components:
         error_message: { type: [string, "null"] }
         profile_id: { type: [string, "null"] }
         stream: { $ref: "#/components/schemas/Stream" }
+        health_state:
+          type: string
+          description: "AS10-06: computed stream-health classification; present only when the session is running/unsustainable."
+          enum: [healthy, network_degrading, abr_at_floor, client_decode_degrading, client_presentation_degrading, unsustainable, failed]
+        health_reason: { type: string, description: "AS10-06: optional human explanation accompanying a degraded health state." }
         created_at: { type: string, format: date-time }
         started_at: { type: [string, "null"], format: date-time }
         ended_at: { type: [string, "null"], format: date-time }
@@ -1173,6 +1192,7 @@ components:
       description: "List shape — never carries the plaintext code."
       properties:
         id: { type: string, format: uuid }
+        code_prefix: { type: string, description: "First 8 hex of code_hash — a stable non-secret handle." }
         role: { $ref: "#/components/schemas/Role" }
         max_uses: { type: integer }
         used_count: { type: integer }
@@ -1181,9 +1201,347 @@ components:
         note: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
     InviteMinted:
+      type: object
+      description: "POST /v1/admin/invites 201 body's `invite` — the plaintext code + magic link, ONCE. Distinct shape from the Invite list row (no code_prefix/revoked_at/note)."
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, description: "Plaintext, returned once, never retrievable again." }
+        invite_url: { type: string, description: "Present only when the server has a configured public base URL." }
+        role: { $ref: "#/components/schemas/Role" }
+        max_uses: { type: integer }
+        used_count: { type: integer }
+        expires_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+
+    # ─── admin: apps ──────────────────────────────────────────────────────────
+    AdminApp:
       allOf:
-        - { $ref: "#/components/schemas/Invite" }
+        - { $ref: "#/components/schemas/App" }
+        - type: object
+          description: "Admin-visible app shape: includes runtime_spec + resource/storage defaults (P2-08, P5-01)."
+          properties:
+            default_vram_mb: { type: integer }
+            default_encode_slots: { type: integer }
+            runtime_spec: { type: object, additionalProperties: true }
+            managed_home: { type: boolean, description: "P5-01: whether this app provisions a per-user managed home directory." }
+            home_container_path: { type: string, description: "P5-01: container path where the home is mounted (default /home/quasar)." }
+    AdminAppsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AdminApp" }
+        next_cursor: { type: [string, "null"] }
+
+    # ─── hosts: GPU availability ────────────────────────────────────────────────
+    GPUAvailability:
+      type: object
+      description: "One GPU's capacity from GET /v1/hosts/{id}/gpus."
+      properties:
+        gpu_id: { type: string }
+        gpu_index: { type: integer }
+        vendor: { type: string }
+        model: { type: string }
+        vram_mb_total: { type: integer }
+        vram_mb_reserved: { type: integer }
+        slots_total: { type: integer }
+        slots_reserved: { type: integer }
+        active_sessions: { type: integer }
+    GPUsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/GPUAvailability" }
+
+    # ─── stream profiles / policy (AS10-01/02) ───────────────────────────────────
+    StreamProfile:
+      type: object
+      description: "A first-class stream profile (AS10-01). Codec-agnostic; H.264 is launchable today, HEVC/AV1 are placeholders."
+      properties:
+        id: { type: string }
+        display_name: { type: string }
+        width: { type: integer }
+        height: { type: integer }
+        fps: { type: integer }
+        codecs:
+          type: array
+          items:
+            type: object
+            properties:
+              codec: { type: string }
+              status: { type: string, enum: [launchable, future, unsupported] }
+        h264_profile: { type: string }
+        nominal_bitrate_kbps: { type: integer }
+        min_offer_bandwidth_kbps: { type: integer }
+        recommended_offer_bandwidth_kbps: { type: integer }
+        headroom_factor: { type: number }
+        abr_floor_kbps: { type: integer }
+        max_startup_rtt_ms: { type: integer }
+        min_decode_height: { type: integer }
+        high_refresh_display: { type: string, enum: [none, recommended, required] }
+        hardware_encoder_required: { type: boolean }
+        browser_client: { type: string, enum: [recommended, supported, risky] }
+        playout0_ms: { type: integer }
+        visibility: { type: string, enum: [user, debug, internal] }
+    AdminStreamProfilesResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/StreamProfile" }
+    ProfileReason:
+      type: object
+      description: "A stable reason code + message explaining an eligibility decision (AS10-02)."
+      properties:
+        code: { type: string }
+        message: { type: string }
+    ProfileEvaluation:
+      allOf:
+        - { $ref: "#/components/schemas/StreamProfile" }
+        - type: object
+          description: "Per-profile eligibility verdict from GET /v1/me/profiles (AS10-02)."
+          properties:
+            eligibility: { type: string, enum: [eligible, risky, ineligible] }
+            reasons:
+              type: array
+              items: { $ref: "#/components/schemas/ProfileReason" }
+    ProfilesResponse:
+      type: object
+      description: "GET /v1/me/profiles response (AS10-02): eligibility + recommendation."
+      properties:
+        recommended_id: { type: string }
+        confidence: { type: string, enum: [high, low] }
+        notes:
+          type: array
+          items: { $ref: "#/components/schemas/ProfileReason" }
+        profiles:
+          type: array
+          items: { $ref: "#/components/schemas/ProfileEvaluation" }
+    ProfilePolicyResponse:
+      type: object
+      properties:
+        global_default_profile_id: { type: [string, "null"] }
+        user_overrides_allowed: { type: boolean }
+    ProfilePreferencesResponse:
+      type: object
+      properties:
+        default_profile_id: { type: [string, "null"] }
+        global_default_profile_id: { type: [string, "null"] }
+        user_overrides_allowed: { type: boolean }
+
+    # ─── admin: users ─────────────────────────────────────────────────────────
+    AdminUser:
+      type: object
+      description: "User record from GET /v1/users (admin)."
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        username: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        disabled: { type: boolean }
+        max_concurrent_sessions: { type: integer }
+        created_at: { type: string, format: date-time }
+    AdminUsersResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AdminUser" }
+        next_cursor: { type: [string, "null"] }
+    AdminUserUpdate:
+      type: object
+      description: "PATCH /v1/users/{id} request body — role/quota/disable, all fields optional."
+      properties:
+        role: { $ref: "#/components/schemas/Role" }
+        disabled: { type: boolean }
+        max_concurrent_sessions: { type: integer }
+
+    # ─── admin: sessions + telemetry ─────────────────────────────────────────────
+    AgentMetrics:
+      type: object
+      description: "Metrics from the node-agent encode pipeline."
+      properties:
+        fps: { type: number }
+        bitrate_kbps: { type: integer }
+        encode_ms: { type: number }
+        frames_encoded: { type: integer }
+        frames_dropped: { type: integer }
+        encode_ms_p50: { type: number }
+        encode_ms_p95: { type: number }
+        encode_ms_max: { type: number }
+        overlay_frames: { type: integer }
+    BrowserMetrics:
+      type: object
+      description: "Metrics from the browser WebRTC client."
+      properties:
+        fps: { type: number }
+        bitrate_kbps: { type: integer }
+        rtt_ms: { type: number }
+        jitter_buffer_ms: { type: number }
+        decode_ms: { type: number }
+        packets_lost: { type: integer }
+        frames_dropped: { type: integer }
+        present_fps: { type: number }
+        present_interval_sd_ms: { type: number }
+        present_interval_p95_ms: { type: number }
+        playout_target_ms: { type: number }
+        glass_to_glass_ms: { type: number }
+        encode_ms: { type: number }
+        network_pacing_ms: { type: number }
+        decode_display_ms: { type: number }
+        is_hidden: { type: integer, description: "AS10-11: tab visibility at sample time (0/1)." }
+    MetricPoint:
+      type: object
+      description: "One row from GET /v1/admin/sessions/{id}/metrics."
+      properties:
+        source: { type: string, enum: [agent, browser] }
+        ts_unix_ms: { type: integer }
+        metrics:
+          oneOf:
+            - { $ref: "#/components/schemas/AgentMetrics" }
+            - { $ref: "#/components/schemas/BrowserMetrics" }
+    MetricsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/MetricPoint" }
+        next_cursor: { type: [string, "null"] }
+    LatestMetrics:
+      type: object
+      description: "latest_metrics on each session list item — present only when telemetry exists."
+      properties:
+        agent: { $ref: "#/components/schemas/MetricPoint" }
+        browser: { $ref: "#/components/schemas/MetricPoint" }
+    AdminSession:
+      allOf:
+        - { $ref: "#/components/schemas/Session" }
         - type: object
           properties:
-            code: { type: string, description: "Plaintext, returned once, never retrievable again." }
-            invite_url: { type: string }
+            latest_metrics: { $ref: "#/components/schemas/LatestMetrics" }
+    AdminSessionsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AdminSession" }
+        next_cursor: { type: [string, "null"] }
+
+    # ─── admin: host runtime config catalog ──────────────────────────────────────
+    ConfigKnob:
+      type: object
+      description: "One entry from GET /v1/admin/config/catalog."
+      properties:
+        key: { type: string }
+        type: { type: string, enum: [bool, int, float, enum, string] }
+        default: { type: [boolean, number, string, "null"] }
+        min: { type: number }
+        max: { type: number }
+        enum:
+          type: array
+          items: { type: string }
+        nullable: { type: boolean }
+        class: { type: string, enum: [live, restart] }
+        env_var: { type: string }
+    ConfigCatalogResponse:
+      type: object
+      properties:
+        knobs:
+          type: array
+          items: { $ref: "#/components/schemas/ConfigKnob" }
+
+    # ─── session trace / diagnostic bundle (ST-06/ST-07) ─────────────────────────
+    TraceSeriesPoint:
+      type: object
+      properties:
+        ts_unix_ms: { type: integer }
+        v: { type: number }
+    TraceEvent:
+      type: object
+      properties:
+        source: { type: string, enum: [agent, browser] }
+        ts_unix_ms: { type: integer }
+        type: { type: string }
+        payload: { type: object, additionalProperties: true }
+    DiagnosticBundle:
+      type: object
+      description: "GET /v1/admin/sessions/{id}/diagnostic-bundle response shape (ST-06/ST-07)."
+      properties:
+        trace:
+          type: object
+          properties:
+            session_id: { type: string, format: uuid }
+            host_id: { type: string, format: uuid }
+            profile_id: { type: string }
+            started_at: { type: string, format: date-time }
+            ended_at: { type: [string, "null"], format: date-time }
+        window:
+          type: object
+          properties:
+            from_ms: { type: integer }
+            to_ms: { type: integer }
+        clock:
+          oneOf:
+            - type: object
+              properties:
+                client_offset_ms: { type: number }
+                uncertainty_ms: { type: number }
+                measured_at: { type: string, format: date-time }
+            - type: object
+              properties:
+                unmeasured: { type: boolean, enum: [true] }
+        series:
+          type: object
+          description: "Named metric series; keys include encoder.encode_ms, encoder.fps, abr.setpoint_kbps, transport.rtt_ms, transport.packets_lost, client.present_interval_sd_ms, client.glass_to_glass_ms, plus arbitrary additional series names."
+          additionalProperties:
+            type: array
+            items: { $ref: "#/components/schemas/TraceSeriesPoint" }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/TraceEvent" }
+        derived_windows:
+          type: object
+          properties:
+            hitches:
+              type: array
+              items:
+                type: object
+                properties:
+                  from_ms: { type: integer }
+                  to_ms: { type: integer }
+                  present_interval_sd_ms: { type: number }
+            abr_downshifts:
+              type: array
+              items:
+                type: object
+                properties:
+                  ts_unix_ms: { type: integer }
+                  from_kbps: { type: integer }
+                  to_kbps: { type: integer }
+            encoder_saturation:
+              type: array
+              items:
+                type: object
+                properties:
+                  from_ms: { type: integer }
+                  to_ms: { type: integer }
+                  encode_ms_p95: { type: number }
+            likely_network_congestion:
+              type: array
+              items:
+                type: object
+                properties:
+                  from_ms: { type: integer }
+                  to_ms: { type: integer }
+                  packets_lost_delta: { type: integer }
+                  rtt_ms_p95: { type: number }
+        classifier:
+          type: object
+          properties:
+            verdict:
+              type: string
+              enum: [likely_encoder_saturation, likely_network_congestion, likely_client_presentation_limit, nominal, indeterminate_client_hidden, unknown]
+            evidence:
+              type: array
+              items: { type: string }
