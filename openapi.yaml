@@ -1,0 +1,1189 @@
+# Quasar control-plane API — OpenAPI 3.1 schema.
+#
+# FROZEN-INTERFACE ARTIFACT. This is a faithful machine rendering of the prose
+# contract in control-api.md; control-api.md stays authoritative. Changes follow
+# the same additive + Opus + human-sign-off rules as the prose contract.
+#
+# Kept honest by the route-coverage drift test in
+# control-plane/cmd/quasar-control/openapi_drift_test.go: every /v1 route the
+# server registers must appear here (and vice-versa). Do not hand-remove a path
+# to make that test pass — reconcile against the running router.
+#
+# Authoring note (2026-07-10): several registered routes are NOT yet described in
+# control-api.md prose (admin/apps, admin/profile-policy, admin/stream-profiles,
+# hosts/{id}/gpus, me/profile-preferences, users, users/{id}). They are modelled
+# here structurally (method/path/params/auth) with best-effort bodies and flagged
+# in the accompanying contract-drift report for prose formalization + sign-off.
+openapi: 3.1.0
+info:
+  title: Quasar Control-Plane API
+  version: "1.0.0"
+  description: |
+    The public/control API of the Quasar control plane (`/v1`). JSON in/out.
+    All endpoints except `/v1/auth/register` and `/v1/auth/login` require
+    `Authorization: Bearer <access_token>`. Admin endpoints (tagged
+    `x-required-role: admin`) reject a valid non-admin token with 403 — the gate
+    is server-enforced (`RequireAuth → RequireAdmin`), never UI-gated.
+servers:
+  - url: http://{host}:{port}/v1
+    description: A Quasar control-plane instance (e.g. hermes :8080, tower :18080).
+    variables:
+      host: { default: "localhost" }
+      port: { default: "8080" }
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: auth
+    description: Registration, login, logout, current-user.
+  - name: me
+    description: Caller-self surface (devices, profiles, storage, password).
+  - name: apps
+    description: The app library (public read; admin write).
+  - name: sessions
+    description: Session launch + lifecycle + client telemetry/trace.
+  - name: hosts
+    description: Host/GPU oversight + lifecycle (admin).
+  - name: admin
+    description: Admin oversight — settings, invites, storage, sessions, host config, certification.
+  - name: users
+    description: User administration (admin).
+  - name: agent
+    description: Node-agent ↔ control-plane internal endpoints (not operator-facing).
+  - name: signaling
+    description: WebRTC signaling (WebSocket; not a REST body — see signaling.md).
+
+paths:
+  # ─── auth ────────────────────────────────────────────────────────────────
+  /v1/auth/register:
+    post:
+      tags: [auth]
+      summary: Register a new account (role always 'user'; invite-gated per instance settings).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterRequest" }
+      responses:
+        "201":
+          description: Account created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "403": { description: "registration_closed — the invitation system is off (default)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Log in; returns the opaque bearer access_token (field is access_token, not token).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke the presented bearer token (idempotent).
+      responses:
+        "204": { description: Token revoked. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/me:
+    get:
+      tags: [auth]
+      summary: The current user.
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/me/password:
+    post:
+      tags: [me]
+      summary: Change own password (revokes all tokens; must re-authenticate).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string }
+      responses:
+        "204": { description: Password rotated; all tokens revoked. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ─── me (devices / profiles / storage) ───────────────────────────────────
+  /v1/me/devices:
+    get:
+      tags: [me]
+      summary: List the caller's devices (newest-first).
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  devices:
+                    type: array
+                    items: { $ref: "#/components/schemas/Device" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [me]
+      summary: Upsert the caller's device capability probe.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceUpsert" }
+      responses:
+        "200":
+          description: Device recorded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/me/devices/{id}:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    patch:
+      tags: [me]
+      summary: Rename / set trust on an owned device.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                trusted: { type: boolean }
+      responses:
+        "200":
+          description: Updated device.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Device" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      tags: [me]
+      summary: Revoke an owned device (expires its tokens).
+      responses:
+        "204": { description: Device revoked. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/me/profiles:
+    get:
+      tags: [me]
+      summary: Stream-profile eligibility + recommendation for the caller's device.
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/me/storage:
+    get:
+      tags: [me]
+      summary: The caller's own per-app storage usage.
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/me/profile-preferences:
+    get:
+      tags: [me]
+      summary: "Read the caller's stream-profile preferences. (Not yet in control-api.md prose.)"
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      tags: [me]
+      summary: "Update the caller's stream-profile preferences. (Not yet in control-api.md prose.)"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ─── apps ────────────────────────────────────────────────────────────────
+  /v1/apps:
+    get:
+      tags: [apps]
+      summary: List enabled apps (public library).
+      security: []
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppList" }
+    post:
+      tags: [apps]
+      summary: Create an app.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppWrite" }
+      responses:
+        "201":
+          description: App created.
+          content: { application/json: { schema: { $ref: "#/components/schemas/App" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/apps/{id}:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [apps]
+      summary: A single app (public).
+      security: []
+      responses:
+        "200":
+          description: OK.
+          content: { application/json: { schema: { $ref: "#/components/schemas/App" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [apps]
+      summary: Edit an app.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AppWrite" } } }
+      responses:
+        "200":
+          description: Updated.
+          content: { application/json: { schema: { $ref: "#/components/schemas/App" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [apps]
+      summary: Remove an app from the catalog (refuse-if-in-use).
+      x-required-role: admin
+      responses:
+        "204": { description: App removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/admin/apps:
+    get:
+      tags: [admin, apps]
+      summary: "List all apps incl. disabled + admin fields. (Not yet in control-api.md prose.)"
+      x-required-role: admin
+      responses:
+        "200":
+          description: OK.
+          content: { application/json: { schema: { $ref: "#/components/schemas/AppList" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ─── hosts ───────────────────────────────────────────────────────────────
+  /v1/hosts:
+    get:
+      tags: [hosts]
+      summary: List hosts + capacity (admin).
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/HostList" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/hosts/{id}:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [hosts]
+      summary: A single host (admin).
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [hosts]
+      summary: Forget an offline host (refuse-if-online-or-in-use).
+      x-required-role: admin
+      responses:
+        "204": { description: Host forgotten. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/hosts/{id}/drain:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [hosts]
+      summary: Cordon a host out of service.
+      x-required-role: admin
+      responses:
+        "200": { description: Draining. , content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/hosts/{id}/uncordon:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [hosts]
+      summary: Return a host to service.
+      x-required-role: admin
+      responses:
+        "200": { description: In service. , content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/hosts/{id}/gpus:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [hosts]
+      summary: "List a host's GPUs + capacity. (Not yet in control-api.md prose.)"
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ─── sessions ────────────────────────────────────────────────────────────
+  /v1/sessions:
+    get:
+      tags: [sessions]
+      summary: The caller's sessions (newest-first, owner-scoped).
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SessionList" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [sessions]
+      summary: Launch a session; returns signaling coordinates.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LaunchRequest" }
+      responses:
+        "201":
+          description: Session assigned.
+          content: { application/json: { schema: { $ref: "#/components/schemas/LaunchResponse" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /v1/sessions/{id}:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [sessions]
+      summary: Poll a session's lifecycle (owner or admin).
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SessionEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [sessions]
+      summary: Stop a session (owner or admin; idempotent).
+      responses:
+        "202": { description: Teardown requested. , content: { application/json: { schema: { $ref: "#/components/schemas/SessionEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/stats:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [sessions]
+      summary: Client posts its session telemetry (owner or admin).
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "202": { description: Accepted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /v1/sessions/{id}/swap:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [sessions]
+      summary: Swap the running app without WebRTC teardown (owner or admin).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [app_id]
+              properties:
+                app_id: { type: string, format: uuid }
+      responses:
+        "200": { description: Swapped. , content: { application/json: { schema: { $ref: "#/components/schemas/SessionEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/sessions/{id}/trace/clock:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [sessions]
+      summary: Client posts a client↔host clock-offset estimate (owner or admin).
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "202": { description: Accepted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/sessions/{id}/trace/events:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [sessions]
+      summary: Client posts its session's browser trace events (owner or admin).
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "202": { description: Accepted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ─── users (admin) ───────────────────────────────────────────────────────
+  /v1/users:
+    get:
+      tags: [users]
+      summary: "List users (admin). (Not yet in control-api.md prose.)"
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/users/{id}:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    patch:
+      tags: [users]
+      summary: "Update a user (role/quota/disable). (Not yet in control-api.md prose.)"
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "200": { description: Updated. , content: { application/json: { schema: { $ref: "#/components/schemas/User" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [users]
+      summary: "Delete a user (admin). (Not yet in control-api.md prose.)"
+      x-required-role: admin
+      responses:
+        "204": { description: User deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ─── admin: settings / invites ───────────────────────────────────────────
+  /v1/admin/settings:
+    get:
+      tags: [admin]
+      summary: Read instance settings (registration_mode, …).
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SettingsEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      tags: [admin]
+      summary: Update instance settings.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                registration_mode: { $ref: "#/components/schemas/RegistrationMode" }
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SettingsEnvelope" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/invites:
+    get:
+      tags: [admin]
+      summary: List minted invites (never the plaintext code).
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object, properties: { invites: { type: array, items: { $ref: "#/components/schemas/Invite" } } } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [admin]
+      summary: Mint a magic one-time invite link (code returned once).
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { $ref: "#/components/schemas/Role" }
+                max_uses: { type: integer, default: 1 }
+                expires_at: { type: string, format: date-time }
+                note: { type: string }
+      responses:
+        "201": { description: Invite minted. , content: { application/json: { schema: { type: object, properties: { invite: { $ref: "#/components/schemas/InviteMinted" } } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/invites/{id}:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    delete:
+      tags: [admin]
+      summary: Revoke an invite (idempotent).
+      x-required-role: admin
+      responses:
+        "204": { description: Revoked. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ─── admin: storage ──────────────────────────────────────────────────────
+  /v1/admin/storage/homes:
+    get:
+      tags: [admin]
+      summary: List managed homes (storage oversight).
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/storage/homes/{id}:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    delete:
+      tags: [admin]
+      summary: Tombstone a managed home for GC.
+      x-required-role: admin
+      responses:
+        "204": { description: Tombstoned. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ─── admin: host runtime config ──────────────────────────────────────────
+  /v1/admin/config/catalog:
+    get:
+      tags: [admin]
+      summary: Read the host-settings knob catalog.
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/hosts/{id}/settings:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin]
+      summary: Read a host's resolved settings + overrides.
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/HostSettings" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: Update per-host overrides (body is {overrides, restart_confirm} — 'settings' is ignored).
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostSettingsPatch" }
+      responses:
+        "200": { description: New effective state. , content: { application/json: { schema: { $ref: "#/components/schemas/HostSettings" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "restart_required — a restart-class knob changed with live sessions and restart_confirm != true (body carries live_sessions)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+
+  # ─── admin: stream profiles / policy (not yet in prose) ──────────────────
+  /v1/admin/profile-policy:
+    get:
+      tags: [admin]
+      summary: "Read the global stream-profile policy. (Not yet in control-api.md prose.)"
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      tags: [admin]
+      summary: "Update the global stream-profile policy. (Not yet in control-api.md prose.)"
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/stream-profiles:
+    get:
+      tags: [admin]
+      summary: "List stream profiles (the AS10-01 ladder). (Not yet in control-api.md prose.)"
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/stream-profiles/{id}:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    patch:
+      tags: [admin]
+      summary: "Edit a stream profile. (Not yet in control-api.md prose.)"
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ─── admin: session oversight + trace ────────────────────────────────────
+  /v1/admin/sessions:
+    get:
+      tags: [admin]
+      summary: List all sessions (oversight).
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SessionList" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/sessions/{id}/metrics:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin]
+      summary: Read per-session telemetry.
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/sessions/{id}/diagnostic-bundle:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin]
+      summary: The assembled diagnostic bundle (metadata + clock + series + events + verdict).
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/sessions/{id}/trace:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin]
+      summary: The bounded recent session trace (samples + events + clock).
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/sessions/{id}/trace/window:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - { name: from, in: query, schema: { type: string, format: date-time } }
+      - { name: to, in: query, schema: { type: string, format: date-time } }
+    get:
+      tags: [admin]
+      summary: A time-windowed slice of the trace.
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/sessions/{id}/trace/metrics:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - { name: names, in: query, schema: { type: string }, description: "Comma-separated metric names." }
+    get:
+      tags: [admin]
+      summary: Named metric series from the trace.
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/sessions/{id}/trace/events:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - { name: types, in: query, schema: { type: string }, description: "Comma-separated event types." }
+    get:
+      tags: [admin]
+      summary: Filtered trace events.
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/sessions/{id}/trace/annotations:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [admin]
+      summary: Add an operator annotation marker to the trace.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "201": { description: Annotation added. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ─── admin: encoder certification ────────────────────────────────────────
+  /v1/admin/hosts/{id}/encoder-certification:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin]
+      summary: Read a host's encoder-certification verdicts (latest per configuration).
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/hosts/{id}/encoder-certification/runs:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [admin]
+      summary: Open a certification run (reserve per-host lock; return the cell plan).
+      x-required-role: admin
+      requestBody:
+        required: false
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "201": { description: Run opened. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - { name: run_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [admin]
+      summary: Poll a certification run's status/progress.
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}/complete:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - { name: run_id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [admin]
+      summary: Close the run (release the per-host lock).
+      x-required-role: admin
+      responses:
+        "200": { description: Run closed. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/hosts/{id}/encoder-certification/cells:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [admin]
+      summary: Launch one pinned bench cell.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "201": { description: Cell launched. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/hosts/{id}/encoder-certification/cells/{session_id}/finalize:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - { name: session_id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [admin]
+      summary: Derive the verdict from agent metrics, upsert + teardown the cell.
+      x-required-role: admin
+      responses:
+        "200": { description: Verdict derived. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ─── agent-internal ──────────────────────────────────────────────────────
+  /v1/agent/storage/gc-pending:
+    get:
+      tags: [agent]
+      summary: "Node-agent internal: list homes pending GC. (Not operator-facing.)"
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/agent/storage/gc-confirm:
+    post:
+      tags: [agent]
+      summary: "Node-agent internal: confirm GC of reaped homes. (Not operator-facing.)"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ─── signaling (WebSocket) ───────────────────────────────────────────────
+  /v1/signal:
+    get:
+      tags: [signaling]
+      summary: WebRTC signaling channel (WebSocket upgrade; not a REST body).
+      description: |
+        Upgrades to a WebSocket carrying the signaling protocol (offer/answer/ICE).
+        Authenticated by the single-use `?token=<...>` minted in the launch response,
+        NOT a bearer header. The frame protocol is defined in protocol/signaling.md;
+        OpenAPI cannot model it — this stub exists only for route-coverage completeness.
+      security: []
+      x-websocket: true
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string }, description: "Single-use signaling token from the launch response." }
+      responses:
+        "101": { description: Switching Protocols (WebSocket). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "The opaque access_token from POST /v1/auth/login (Authorization: Bearer <access_token>)."
+
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    Unauthorized:
+      description: Missing/invalid/expired/revoked token.
+      content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+    Forbidden:
+      description: Authenticated but insufficient role / not the owner (precedes resource lookup).
+      content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+    NotFound:
+      description: No such resource.
+      content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+    Conflict:
+      description: Conflict (duplicate, in-use, quota, non-swappable, home-in-use, …).
+      content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+    ValidationFailed:
+      description: Malformed or invalid request.
+      content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+    RateLimited:
+      description: Too many requests.
+      content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+    Unavailable:
+      description: "no_host_available / capacity_exhausted — well-formed but no room to place now (retryable)."
+      content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+
+  schemas:
+    Role:
+      type: string
+      enum: [user, admin]
+    RegistrationMode:
+      type: string
+      enum: [closed, invite_only, open]
+    Encoder:
+      type: string
+      enum: [openh264, va, nvenc, vulkan]
+    H264Profile:
+      type: string
+      enum: [constrained-baseline, baseline, main, high]
+    SessionState:
+      type: string
+      enum: [pending, assigned, starting, running, stopping, stopped, failed]
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, description: "e.g. validation_failed, unauthorized, forbidden, not_found, conflict, session_quota_exceeded, no_host_available, capacity_exhausted, restart_required, rate_limited, internal." }
+        message: { type: string }
+        live_sessions: { type: integer, description: "Present on restart_required." }
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error: { $ref: "#/components/schemas/Error" }
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        username: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        created_at: { type: string, format: date-time }
+
+    RegisterRequest:
+      type: object
+      required: [email, username, password]
+      properties:
+        email: { type: string, format: email }
+        username: { type: string }
+        password: { type: string }
+        invite_code: { type: string, description: "Required when registration_mode = invite_only." }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+        device_key: { type: string, description: "Optional; binds the minted token to this device (LP-SEC-01)." }
+        client_version: { type: string, description: "Optional; native client (P9-01)." }
+        contract_version: { type: string, description: "Optional; native client (P9-01)." }
+    LoginResponse:
+      type: object
+      required: [access_token, token_type, user]
+      properties:
+        access_token: { type: string, description: "The opaque bearer token — the field is access_token, NOT token." }
+        token_type: { type: string, enum: [Bearer] }
+        expires_at: { type: string, format: date-time }
+        user: { $ref: "#/components/schemas/User" }
+        min_client_version: { type: string }
+        latest_client_version: { type: string }
+
+    Device:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        device_key: { type: string }
+        name: { type: string }
+        trusted: { type: boolean }
+        first_seen_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        current: { type: boolean }
+        active_session_id: { type: [string, "null"], format: uuid }
+        capabilities: { type: object, additionalProperties: true }
+    DeviceUpsert:
+      type: object
+      properties:
+        device_key: { type: string }
+        capabilities: { type: object, additionalProperties: true }
+
+    Stream:
+      type: object
+      properties:
+        width: { type: integer }
+        height: { type: integer }
+        fps: { type: integer }
+        bitrate_kbps: { type: integer }
+        h264_profile: { $ref: "#/components/schemas/H264Profile" }
+    AppListItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        cover_url: { type: string }
+        default_width: { type: integer }
+        default_height: { type: integer }
+        default_fps: { type: integer }
+        default_bitrate_kbps: { type: integer }
+        default_profile_id: { type: [string, "null"] }
+        profile_policy: { type: string }
+        display_stream: { $ref: "#/components/schemas/Stream" }
+    AppList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AppListItem" }
+        next_cursor: { type: [string, "null"] }
+    App:
+      allOf:
+        - { $ref: "#/components/schemas/AppListItem" }
+    RuntimeSpec:
+      type: object
+      description: "Agent-internal container spec (not exposed on public read shapes)."
+      properties:
+        image: { type: string }
+        args: { type: array, items: { type: string } }
+        env: { type: object, additionalProperties: { type: string } }
+        mounts: { type: array, items: { type: string } }
+        gpu: { type: boolean }
+    AppWrite:
+      type: object
+      required: [name]
+      description: "Admin create/edit shape. runtime_spec + resource defaults are admin/scheduler-internal."
+      properties:
+        name: { type: string }
+        description: { type: string }
+        cover_url: { type: string }
+        enabled: { type: boolean }
+        default_width: { type: integer }
+        default_height: { type: integer }
+        default_fps: { type: integer }
+        default_bitrate_kbps: { type: integer }
+        default_profile_id: { type: [string, "null"] }
+        runtime_spec: { $ref: "#/components/schemas/RuntimeSpec" }
+
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        app_id: { type: string, format: uuid }
+        host_id: { type: [string, "null"], format: uuid }
+        state: { $ref: "#/components/schemas/SessionState" }
+        state_detail: { type: [string, "null"] }
+        error_message: { type: [string, "null"] }
+        profile_id: { type: [string, "null"] }
+        stream: { $ref: "#/components/schemas/Stream" }
+        created_at: { type: string, format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        ended_at: { type: [string, "null"], format: date-time }
+    SessionEnvelope:
+      type: object
+      properties:
+        session: { $ref: "#/components/schemas/Session" }
+    SessionList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Session" }
+        next_cursor: { type: [string, "null"] }
+    LaunchRequest:
+      type: object
+      required: [app_id]
+      properties:
+        app_id: { type: string, format: uuid }
+        profile_id: { type: string, description: "User-facing selector (AS10-03)." }
+        client_type: { type: string, enum: [browser, native], description: "Absent ⇒ browser." }
+        stream:
+          type: object
+          description: "Admin/debug/back-compat override; beats profile_id field-by-field."
+          properties:
+            width: { type: integer }
+            height: { type: integer }
+            fps: { type: integer }
+            bitrate_kbps: { type: integer }
+            h264_profile: { $ref: "#/components/schemas/H264Profile" }
+    LaunchResponse:
+      type: object
+      properties:
+        session: { $ref: "#/components/schemas/Session" }
+        signaling:
+          type: object
+          properties:
+            url: { type: string, description: "wss://<host>/v1/signal" }
+            token: { type: string, description: "Single-use, short-TTL, plaintext this response only." }
+            expires_at: { type: string, format: date-time }
+
+    Host:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [online, offline, draining] }
+        pending_restart: { type: boolean }
+    HostList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Host" }
+        next_cursor: { type: [string, "null"] }
+    HostSettings:
+      type: object
+      description: "GET returns pending_restart; PATCH returns restart_triggered — otherwise same shape."
+      properties:
+        resolved: { type: object, additionalProperties: true }
+        overrides: { type: object, additionalProperties: true }
+        pending_restart: { type: boolean }
+        restart_triggered: { type: boolean }
+    HostSettingsPatch:
+      type: object
+      required: [overrides]
+      description: "The field is 'overrides' — a top-level 'settings' key is silently ignored. A null value clears an override."
+      properties:
+        overrides:
+          type: object
+          additionalProperties: true
+        restart_confirm:
+          type: boolean
+          description: "Required true to apply a restart-class knob while the host has live sessions."
+
+    SettingsEnvelope:
+      type: object
+      properties:
+        settings:
+          type: object
+          properties:
+            registration_mode: { $ref: "#/components/schemas/RegistrationMode" }
+            updated_by: { type: [string, "null"], format: uuid }
+            updated_at: { type: string, format: date-time }
+
+    Invite:
+      type: object
+      description: "List shape — never carries the plaintext code."
+      properties:
+        id: { type: string, format: uuid }
+        role: { $ref: "#/components/schemas/Role" }
+        max_uses: { type: integer }
+        used_count: { type: integer }
+        expires_at: { type: [string, "null"], format: date-time }
+        revoked_at: { type: [string, "null"], format: date-time }
+        note: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    InviteMinted:
+      allOf:
+        - { $ref: "#/components/schemas/Invite" }
+        - type: object
+          properties:
+            code: { type: string, description: "Plaintext, returned once, never retrievable again." }
+            invite_url: { type: string }
