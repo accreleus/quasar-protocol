@@ -214,7 +214,7 @@ paths:
       tags: [me]
       summary: The caller's own per-app storage usage.
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/MyStorageResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/me/profile-preferences:
     get:
@@ -258,7 +258,13 @@ paths:
       responses:
         "201":
           description: App created.
-          content: { application/json: { schema: { $ref: "#/components/schemas/App" } } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [app]
+                properties:
+                  app: { $ref: "#/components/schemas/App" }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -288,7 +294,13 @@ paths:
       responses:
         "200":
           description: Updated.
-          content: { application/json: { schema: { $ref: "#/components/schemas/App" } } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [app]
+                properties:
+                  app: { $ref: "#/components/schemas/App" }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -430,7 +442,7 @@ paths:
       summary: Client posts its session telemetry (owner or admin).
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/StatsRequest" } } }
       responses:
         "202": { description: Accepted. }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -463,7 +475,7 @@ paths:
       summary: Client posts a client↔host clock-offset estimate (owner or admin).
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/TraceClockRequest" } } }
       responses:
         "202": { description: Accepted. }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -475,7 +487,7 @@ paths:
       summary: Client posts its session's browser trace events (owner or admin).
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/TraceEventsRequest" } } }
       responses:
         "202": { description: Accepted. }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -589,7 +601,7 @@ paths:
       summary: List managed homes (storage oversight).
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/AdminHomesResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /v1/admin/storage/homes/{id}:
@@ -728,7 +740,7 @@ paths:
       summary: The bounded recent session trace (samples + events + clock).
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/TraceResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -742,7 +754,7 @@ paths:
       summary: A time-windowed slice of the trace.
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/TraceResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -755,7 +767,7 @@ paths:
       summary: Named metric series from the trace.
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/TraceMetricsResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -768,7 +780,7 @@ paths:
       summary: Filtered trace events.
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/TraceEventsResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -780,9 +792,9 @@ paths:
       x-required-role: admin
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/TraceAnnotationRequest" } } }
       responses:
-        "201": { description: Annotation added. , content: { application/json: { schema: { type: object } } } }
+        "201": { description: Annotation added. , content: { application/json: { schema: { $ref: "#/components/schemas/TraceAnnotationCreated" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -795,7 +807,7 @@ paths:
       summary: Read a host's encoder-certification verdicts (latest per configuration).
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/CertVerdicts" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -807,9 +819,9 @@ paths:
       x-required-role: admin
       requestBody:
         required: false
-        content: { application/json: { schema: { type: object } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/CertRunRequest" } } }
       responses:
-        "201": { description: Run opened. , content: { application/json: { schema: { type: object } } } }
+        "201": { description: Run opened. , content: { application/json: { schema: { $ref: "#/components/schemas/CertRun" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -823,7 +835,7 @@ paths:
       summary: Poll a certification run's status/progress.
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/CertRunStatus" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -836,7 +848,7 @@ paths:
       summary: Close the run (release the per-host lock).
       x-required-role: admin
       responses:
-        "200": { description: Run closed. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: Run closed. , content: { application/json: { schema: { $ref: "#/components/schemas/CertRunStatus" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -848,9 +860,9 @@ paths:
       x-required-role: admin
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/CertCellRequest" } } }
       responses:
-        "201": { description: Cell launched. , content: { application/json: { schema: { type: object } } } }
+        "201": { description: Cell launched. , content: { application/json: { schema: { $ref: "#/components/schemas/CertCell" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -863,7 +875,7 @@ paths:
       summary: Derive the verdict from agent metrics, upsert + teardown the cell.
       x-required-role: admin
       responses:
-        "200": { description: Verdict derived. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: Verdict derived. , content: { application/json: { schema: { $ref: "#/components/schemas/CertFinalize" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -874,7 +886,7 @@ paths:
       tags: [agent]
       summary: "Node-agent internal: list homes pending GC. (Not operator-facing.)"
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/GCPendingResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/agent/storage/gc-confirm:
     post:
@@ -882,9 +894,9 @@ paths:
       summary: "Node-agent internal: confirm GC of reaped homes. (Not operator-facing.)"
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/GCConfirmRequest" } } }
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { type: object } } } }
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/GCConfirmResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   # ─── signaling (WebSocket) ───────────────────────────────────────────────
@@ -974,12 +986,13 @@ components:
 
     User:
       type: object
+      required: [id, email, username, role]
       properties:
         id: { type: string, format: uuid }
         email: { type: string, format: email }
         username: { type: string }
         role: { $ref: "#/components/schemas/Role" }
-        created_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time, description: "Present on /v1/me + register; omitted from the login user." }
 
     RegisterRequest:
       type: object
@@ -1011,6 +1024,9 @@ components:
 
     Device:
       type: object
+      # Shared by the list (full shape) + the upsert response (id/first_seen_at/last_seen_at
+      # only), so `required` is the intersection always present in every response.
+      required: [id, first_seen_at, last_seen_at]
       properties:
         id: { type: string, format: uuid }
         device_key: { type: string }
@@ -1029,14 +1045,20 @@ components:
 
     Stream:
       type: object
+      # Shared shape: session.stream carries h264_profile + playout0_ms; an app's
+      # display_stream carries only width/height/fps/bitrate_kbps. `required` is the
+      # intersection present in both contexts.
+      required: [width, height, fps, bitrate_kbps]
       properties:
         width: { type: integer }
         height: { type: integer }
         fps: { type: integer }
         bitrate_kbps: { type: integer }
         h264_profile: { $ref: "#/components/schemas/H264Profile" }
+        playout0_ms: { type: integer, description: "AS-02: tier-selected initial receiver playout target (ms) on session.stream; absent on an app's display_stream." }
     AppListItem:
       type: object
+      required: [id, name, description, cover_url, default_width, default_height, default_fps, default_bitrate_kbps, default_profile_id, profile_policy, enabled]
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
@@ -1047,11 +1069,12 @@ components:
         default_fps: { type: integer }
         default_bitrate_kbps: { type: integer }
         default_profile_id: { type: [string, "null"] }
-        profile_policy: { type: string }
+        profile_policy: { type: string, enum: [inherit, prefer, force, custom] }
         display_stream: { $ref: "#/components/schemas/Stream" }
         enabled: { type: boolean }
     AppList:
       type: object
+      required: [items, next_cursor]
       properties:
         items:
           type: array
@@ -1087,6 +1110,9 @@ components:
 
     Session:
       type: object
+      # health_state/health_reason are additive (present only when running/unsustainable);
+      # every other key is always serialized (nullable ones present-but-null).
+      required: [id, user_id, app_id, host_id, state, state_detail, error_message, profile_id, stream, created_at, started_at, ended_at]
       properties:
         id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
@@ -1107,10 +1133,12 @@ components:
         ended_at: { type: [string, "null"], format: date-time }
     SessionEnvelope:
       type: object
+      required: [session]
       properties:
         session: { $ref: "#/components/schemas/Session" }
     SessionList:
       type: object
+      required: [items, next_cursor]
       properties:
         items:
           type: array
@@ -1134,10 +1162,12 @@ components:
             h264_profile: { $ref: "#/components/schemas/H264Profile" }
     LaunchResponse:
       type: object
+      required: [session, signaling]
       properties:
         session: { $ref: "#/components/schemas/Session" }
         signaling:
           type: object
+          required: [url, token, expires_at]
           properties:
             url: { type: string, description: "wss://<host>/v1/signal" }
             token: { type: string, description: "Single-use, short-TTL, plaintext this response only." }
@@ -1145,13 +1175,20 @@ components:
 
     Host:
       type: object
+      # crud/handler.go hostResp — every key is always serialized (nullable ones present-but-null).
+      required: [id, node_name, status, agent_version, cpu_cores, mem_mb, last_registered_at, last_heartbeat_at]
       properties:
         id: { type: string, format: uuid }
-        name: { type: string }
+        node_name: { type: string }
         status: { type: string, enum: [online, offline, draining] }
-        pending_restart: { type: boolean }
+        agent_version: { type: [string, "null"] }
+        cpu_cores: { type: [integer, "null"] }
+        mem_mb: { type: [integer, "null"] }
+        last_registered_at: { type: [string, "null"], format: date-time }
+        last_heartbeat_at: { type: [string, "null"], format: date-time }
     HostList:
       type: object
+      required: [items, next_cursor]
       properties:
         items:
           type: array
@@ -1179,9 +1216,11 @@ components:
 
     SettingsEnvelope:
       type: object
+      required: [settings]
       properties:
         settings:
           type: object
+          required: [registration_mode, updated_by, updated_at]
           properties:
             registration_mode: { $ref: "#/components/schemas/RegistrationMode" }
             updated_by: { type: [string, "null"], format: uuid }
@@ -1190,6 +1229,7 @@ components:
     Invite:
       type: object
       description: "List shape — never carries the plaintext code."
+      required: [id, code_prefix, role, max_uses, used_count, expires_at, revoked_at, note, created_at]
       properties:
         id: { type: string, format: uuid }
         code_prefix: { type: string, description: "First 8 hex of code_hash — a stable non-secret handle." }
@@ -1203,6 +1243,7 @@ components:
     InviteMinted:
       type: object
       description: "POST /v1/admin/invites 201 body's `invite` — the plaintext code + magic link, ONCE. Distinct shape from the Invite list row (no code_prefix/revoked_at/note)."
+      required: [id, code, role, max_uses, used_count, expires_at, created_at]
       properties:
         id: { type: string, format: uuid }
         code: { type: string, description: "Plaintext, returned once, never retrievable again." }
@@ -1219,6 +1260,7 @@ components:
         - { $ref: "#/components/schemas/App" }
         - type: object
           description: "Admin-visible app shape: includes runtime_spec + resource/storage defaults (P2-08, P5-01)."
+          required: [default_vram_mb, default_encode_slots, runtime_spec, managed_home, home_container_path]
           properties:
             default_vram_mb: { type: integer }
             default_encode_slots: { type: integer }
@@ -1227,6 +1269,7 @@ components:
             home_container_path: { type: string, description: "P5-01: container path where the home is mounted (default /home/quasar)." }
     AdminAppsResponse:
       type: object
+      required: [items, next_cursor]
       properties:
         items:
           type: array
@@ -1237,6 +1280,7 @@ components:
     GPUAvailability:
       type: object
       description: "One GPU's capacity from GET /v1/hosts/{id}/gpus."
+      required: [gpu_id, gpu_index, vendor, model, vram_mb_total, vram_mb_reserved, slots_total, slots_reserved, active_sessions]
       properties:
         gpu_id: { type: string }
         gpu_index: { type: integer }
@@ -1249,6 +1293,7 @@ components:
         active_sessions: { type: integer }
     GPUsResponse:
       type: object
+      required: [items]
       properties:
         items:
           type: array
@@ -1258,6 +1303,7 @@ components:
     StreamProfile:
       type: object
       description: "A first-class stream profile (AS10-01). Codec-agnostic; H.264 is launchable today, HEVC/AV1 are placeholders."
+      required: [id, display_name, width, height, fps, codecs, h264_profile, nominal_bitrate_kbps, min_offer_bandwidth_kbps, recommended_offer_bandwidth_kbps, headroom_factor, abr_floor_kbps, max_startup_rtt_ms, min_decode_height, high_refresh_display, hardware_encoder_required, browser_client, playout0_ms, visibility]
       properties:
         id: { type: string }
         display_name: { type: string }
@@ -1268,6 +1314,7 @@ components:
           type: array
           items:
             type: object
+            required: [codec, status]
             properties:
               codec: { type: string }
               status: { type: string, enum: [launchable, future, unsupported] }
@@ -1286,6 +1333,7 @@ components:
         visibility: { type: string, enum: [user, debug, internal] }
     AdminStreamProfilesResponse:
       type: object
+      required: [items]
       properties:
         items:
           type: array
@@ -1293,6 +1341,7 @@ components:
     ProfileReason:
       type: object
       description: "A stable reason code + message explaining an eligibility decision (AS10-02)."
+      required: [code, message]
       properties:
         code: { type: string }
         message: { type: string }
@@ -1301,6 +1350,7 @@ components:
         - { $ref: "#/components/schemas/StreamProfile" }
         - type: object
           description: "Per-profile eligibility verdict from GET /v1/me/profiles (AS10-02)."
+          required: [eligibility, reasons]
           properties:
             eligibility: { type: string, enum: [eligible, risky, ineligible] }
             reasons:
@@ -1309,6 +1359,7 @@ components:
     ProfilesResponse:
       type: object
       description: "GET /v1/me/profiles response (AS10-02): eligibility + recommendation."
+      required: [recommended_id, confidence, notes, profiles]
       properties:
         recommended_id: { type: string }
         confidence: { type: string, enum: [high, low] }
@@ -1334,6 +1385,7 @@ components:
     AdminUser:
       type: object
       description: "User record from GET /v1/users (admin)."
+      required: [id, email, username, role, disabled, max_concurrent_sessions, created_at]
       properties:
         id: { type: string, format: uuid }
         email: { type: string, format: email }
@@ -1344,6 +1396,7 @@ components:
         created_at: { type: string, format: date-time }
     AdminUsersResponse:
       type: object
+      required: [items, next_cursor]
       properties:
         items:
           type: array
@@ -1394,6 +1447,7 @@ components:
     MetricPoint:
       type: object
       description: "One row from GET /v1/admin/sessions/{id}/metrics."
+      required: [source, ts_unix_ms, metrics]
       properties:
         source: { type: string, enum: [agent, browser] }
         ts_unix_ms: { type: integer }
@@ -1403,6 +1457,7 @@ components:
             - { $ref: "#/components/schemas/BrowserMetrics" }
     MetricsResponse:
       type: object
+      required: [items, next_cursor]
       properties:
         items:
           type: array
@@ -1432,6 +1487,8 @@ components:
     ConfigKnob:
       type: object
       description: "One entry from GET /v1/admin/config/catalog."
+      # min/max/enum are omitempty in hostcfg.Knob — present only for knobs that carry them.
+      required: [key, type, default, nullable, class, env_var]
       properties:
         key: { type: string }
         type: { type: string, enum: [bool, int, float, enum, string] }
@@ -1446,6 +1503,7 @@ components:
         env_var: { type: string }
     ConfigCatalogResponse:
       type: object
+      required: [knobs]
       properties:
         knobs:
           type: array
@@ -1545,3 +1603,309 @@ components:
             evidence:
               type: array
               items: { type: string }
+
+    # ─── storage (P5-05) ─────────────────────────────────────────────────────────
+    AdminHome:
+      type: object
+      description: "One managed-home row from GET /v1/admin/storage/homes (storage/handler.go homeResp)."
+      required: [id, user_id, app_id, host_id, provider, ref, bytes_used, created_at, last_used_at, gc_after]
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: [string, "null"], format: uuid, description: "Null when the user was deleted and the row is orphaned pending GC." }
+        app_id: { type: [string, "null"], format: uuid, description: "Null when the app was deleted and the row is orphaned pending GC." }
+        host_id: { type: [string, "null"], format: uuid }
+        provider: { type: string }
+        ref: { type: string }
+        bytes_used: { type: integer }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+        gc_after: { type: [string, "null"], format: date-time, description: "Non-null means a GC tombstone has been set." }
+    AdminHomesResponse:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AdminHome" }
+        next_cursor: { type: [string, "null"] }
+    MyStorageItem:
+      type: object
+      description: "One row from GET /v1/me/storage (storage.MyStorageItem)."
+      required: [app_id, app_name, bytes_used, last_used_at]
+      properties:
+        app_id: { type: string, format: uuid }
+        app_name: { type: string }
+        bytes_used: { type: integer }
+        last_used_at: { type: [string, "null"], format: date-time }
+    MyStorageResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/MyStorageItem" }
+
+    # ─── session telemetry / trace ingest (request bodies) ───────────────────────
+    StatsRequest:
+      type: object
+      description: "POST /v1/sessions/{id}/stats body (metrics_handler.go). `metrics` is filtered to the BrowserMetrics dictionary at ingest."
+      required: [samples]
+      properties:
+        client:
+          type: string
+          enum: [browser, native]
+          description: "Optional reporter discriminator (P9-07). Absent ⇒ browser. Any other value is rejected, not coerced."
+        samples:
+          type: array
+          items:
+            type: object
+            required: [ts_unix_ms, metrics]
+            properties:
+              ts_unix_ms: { type: integer }
+              metrics: { $ref: "#/components/schemas/BrowserMetrics" }
+              client_health:
+                type: string
+                enum: [smooth, decode_degrading, presentation_degrading, backgrounded_or_hidden, client_unsupported]
+                description: "AS10-11: browser-classified client health (sibling of the numeric metrics dict)."
+              client_health_reason: { type: string }
+              device_key: { type: string }
+    TraceEventsRequest:
+      type: object
+      description: "POST /v1/sessions/{id}/trace/events body (ST-04). Events with unknown types are dropped at ingest."
+      required: [events]
+      properties:
+        client: { type: string, enum: [browser, native], description: "Optional reporter discriminator (P9-01). Absent ⇒ browser." }
+        events:
+          type: array
+          maxItems: 64
+          items:
+            type: object
+            required: [ts_unix_ms, type]
+            properties:
+              ts_unix_ms: { type: integer }
+              type: { type: string, enum: [playout.changed, client.freeze_detected, client.visibility_changed, webrtc.state_changed] }
+              payload: { type: object, additionalProperties: true }
+    TraceClockRequest:
+      type: object
+      description: "POST /v1/sessions/{id}/trace/clock body (ST-05). Both values required + finite; uncertainty non-negative."
+      required: [client_offset_ms, uncertainty_ms]
+      properties:
+        client_offset_ms: { type: number }
+        uncertainty_ms: { type: number }
+
+    # ─── admin trace reads (response bodies) ─────────────────────────────────────
+    TraceWindow:
+      type: object
+      required: [from_ms, to_ms]
+      properties:
+        from_ms: { type: integer }
+        to_ms: { type: integer }
+    TraceClock:
+      description: "Either the measured client↔host clock offset, or {unmeasured:true} — never an offset-0 default (trace-format.md §4)."
+      oneOf:
+        - type: object
+          required: [client_offset_ms, uncertainty_ms, measured_at]
+          properties:
+            client_offset_ms: { type: number }
+            uncertainty_ms: { type: number }
+            measured_at: { type: string, format: date-time }
+        - type: object
+          required: [unmeasured]
+          properties:
+            unmeasured: { type: boolean, enum: [true] }
+    TraceSeries:
+      type: object
+      description: "Named metric series keyed by taxonomy name; each value is an array of {ts_unix_ms, v} points."
+      additionalProperties:
+        type: array
+        items: { $ref: "#/components/schemas/TraceSeriesPoint" }
+    TraceResponse:
+      type: object
+      description: "GET /v1/admin/sessions/{id}/trace and /trace/window (diagnostic_handler.go handleAdminTrace)."
+      required: [session_id, window, clock, series, events]
+      properties:
+        session_id: { type: string, format: uuid }
+        window: { $ref: "#/components/schemas/TraceWindow" }
+        clock: { $ref: "#/components/schemas/TraceClock" }
+        series: { $ref: "#/components/schemas/TraceSeries" }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/TraceEvent" }
+    TraceMetricsResponse:
+      type: object
+      description: "GET /v1/admin/sessions/{id}/trace/metrics — only the requested named series."
+      required: [window, series]
+      properties:
+        window: { $ref: "#/components/schemas/TraceWindow" }
+        series: { $ref: "#/components/schemas/TraceSeries" }
+    TraceEventsResponse:
+      type: object
+      description: "GET /v1/admin/sessions/{id}/trace/events — only the requested event types."
+      required: [window, events]
+      properties:
+        window: { $ref: "#/components/schemas/TraceWindow" }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/TraceEvent" }
+    TraceAnnotationRequest:
+      type: object
+      description: "POST /v1/admin/sessions/{id}/trace/annotations body (§B.4)."
+      required: [label]
+      properties:
+        ts_unix_ms: { type: integer, description: "Optional; defaults to now." }
+        label: { type: string }
+        tags: { type: array, items: { type: string } }
+    TraceAnnotationCreated:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string, format: uuid }
+
+    # ─── encoder certification (SPT-06 / cert_handler.go) ────────────────────────
+    CertRow:
+      type: object
+      description: "One certification verdict row (cert_handler.go certRowResp)."
+      required: [id, gpu_index, encoder, profile_id, width, height, fps, bitrate_kbps, verdict, encode_ms_p50, encode_ms_p95, encode_ms_max, output_fps, drop_rate, live_write_stable, sample_window_ms, sample_count, measured_at]
+      properties:
+        id: { type: string, format: uuid }
+        gpu_index: { type: integer }
+        encoder: { type: string }
+        profile_id: { type: string }
+        width: { type: integer }
+        height: { type: integer }
+        fps: { type: integer }
+        bitrate_kbps: { type: integer }
+        verdict: { type: string }
+        encode_ms_p50: { type: number }
+        encode_ms_p95: { type: number }
+        encode_ms_max: { type: number }
+        output_fps: { type: number }
+        drop_rate: { type: number }
+        live_write_stable: { type: boolean }
+        sample_window_ms: { type: integer }
+        sample_count: { type: integer }
+        agent_version: { type: string }
+        measured_at: { type: string, format: date-time }
+    CertVerdicts:
+      type: object
+      description: "GET /v1/admin/hosts/{id}/encoder-certification (cert_handler.go certResp)."
+      required: [host_id, certifications]
+      properties:
+        host_id: { type: string, format: uuid }
+        certifications:
+          type: array
+          items: { $ref: "#/components/schemas/CertRow" }
+    CertRunRequest:
+      type: object
+      description: "POST .../encoder-certification/runs body (cert_handler.go certRunReq)."
+      properties:
+        gpu_index: { type: integer }
+        encoder: { type: string }
+        profiles: { type: array, items: { type: string } }
+        bitrates_kbps: { type: array, items: { type: integer } }
+    CertCellPlan:
+      type: object
+      required: [profile_id, bitrate_kbps]
+      properties:
+        profile_id: { type: string }
+        bitrate_kbps: { type: integer }
+    CertRun:
+      type: object
+      description: "POST .../encoder-certification/runs response (cert_handler.go certRunResp)."
+      required: [run_id, host_id, status, started_at, total_pts, encoder, gpu_index, cells]
+      properties:
+        run_id: { type: string, format: uuid }
+        host_id: { type: string, format: uuid }
+        status: { type: string }
+        started_at: { type: string, format: date-time }
+        total_pts: { type: integer }
+        encoder: { type: string }
+        gpu_index: { type: integer }
+        cells:
+          type: array
+          items: { $ref: "#/components/schemas/CertCellPlan" }
+    CertRunStatus:
+      type: object
+      description: "GET .../runs/{run_id} + POST .../runs/{run_id}/complete (cert_handler.go certRunStatusResp)."
+      required: [run_id, host_id, status, started_at, completed_pts, total_pts, summary_ok, summary_capped, summary_unsafe]
+      properties:
+        run_id: { type: string, format: uuid }
+        host_id: { type: string, format: uuid }
+        status: { type: string }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: [string, "null"], format: date-time }
+        error_message: { type: [string, "null"] }
+        completed_pts: { type: integer }
+        total_pts: { type: integer }
+        summary_ok: { type: integer }
+        summary_capped: { type: integer }
+        summary_unsafe: { type: integer }
+    CertCellRequest:
+      type: object
+      description: "POST .../encoder-certification/cells body (cert_handler.go certCellReq)."
+      required: [gpu_index, encoder, profile_id, bitrate_kbps]
+      properties:
+        gpu_index: { type: integer }
+        encoder: { type: string }
+        profile_id: { type: string }
+        bitrate_kbps: { type: integer }
+    CertCell:
+      type: object
+      description: "POST .../encoder-certification/cells response (cert_handler.go certCellResp)."
+      required: [session_id, host_id, profile_id, bitrate_kbps, width, height, fps, budget_ms, signaling_url, signaling_token]
+      properties:
+        session_id: { type: string, format: uuid }
+        host_id: { type: string, format: uuid }
+        profile_id: { type: string }
+        bitrate_kbps: { type: integer }
+        width: { type: integer }
+        height: { type: integer }
+        fps: { type: integer }
+        budget_ms: { type: number }
+        signaling_url: { type: string }
+        signaling_token: { type: string }
+    CertFinalize:
+      type: object
+      description: "POST .../encoder-certification/cells/{session_id}/finalize (cert_handler.go certFinalizeResp)."
+      required: [session_id, profile_id, bitrate_kbps, verdict, encode_ms_p50, encode_ms_p95, encode_ms_max, output_fps, drop_rate, live_write_stable, sample_count]
+      properties:
+        session_id: { type: string, format: uuid }
+        profile_id: { type: string }
+        bitrate_kbps: { type: integer }
+        verdict: { type: string }
+        encode_ms_p50: { type: number }
+        encode_ms_p95: { type: number }
+        encode_ms_max: { type: number }
+        output_fps: { type: number }
+        drop_rate: { type: number }
+        live_write_stable: { type: boolean }
+        sample_count: { type: integer }
+
+    # ─── agent-internal storage GC (storage/agent_gc.go) ─────────────────────────
+    PendingHome:
+      type: object
+      description: "One reapable backing store scoped to the calling agent's host (storage.PendingHome)."
+      required: [id, provider, ref]
+      properties:
+        id: { type: string, format: uuid }
+        provider: { type: string, description: "'volume' | 'local'." }
+        ref: { type: string, description: "Docker volume name or absolute host path." }
+    GCPendingResponse:
+      type: object
+      required: [homes]
+      properties:
+        homes:
+          type: array
+          items: { $ref: "#/components/schemas/PendingHome" }
+    GCConfirmRequest:
+      type: object
+      required: [home_ids]
+      properties:
+        home_ids:
+          type: array
+          items: { type: string, format: uuid }
+    GCConfirmResponse:
+      type: object
+      required: [deleted]
+      properties:
+        deleted: { type: integer, description: "Count of hard-deleted home rows." }
