@@ -233,6 +233,8 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/config/catalog` | **admin** | *(host-runtime-settings)* read the knob catalog |
 | `GET /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* read a host's resolved settings + overrides |
 | `PATCH /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* update per-host overrides |
+| `GET /v1/admin/hosts/{id}/console-config` | **admin** | *(CM-01)* read a host's console-mode config + reported capabilities |
+| `PATCH /v1/admin/hosts/{id}/console-config` | **admin** | *(CM-01)* update a host's console-mode config |
 | `GET /v1/admin/sessions/{id}/trace`, `.../trace/window`, `.../trace/metrics`, `.../trace/events` | **admin** | *(ST-01)* the bounded recent session trace (samples + events + clock) |
 | `GET /v1/admin/sessions/{id}/diagnostic-bundle` | **admin** | *(ST-01/ST-06)* the assembled bundle — metadata + clock + aligned series + events + derived windows + classifier verdict |
 | `POST /v1/admin/sessions/{id}/trace/annotations` | **admin** | *(ST-01)* an operator annotation marker on the trace timeline |
@@ -1447,6 +1449,66 @@ as a `config_update` message (`agent-api.md`).
   reconnected with updated config).
 - **Errors:** `404 not_found` — no host with that id; `400 validation_failed` — bad knob key,
   wrong type, or out-of-range value; `409 restart_required` — as above.
+
+---
+
+## Console mode (CM-01)
+> **Amendment — CM-01 (console-mode), additive, requires sign-off.** Adds the admin
+> per-host **console-config** surface driving local display + local audio + local input
+> ("use the host like a console"). It changes no existing shape. Storage: `schema.md`
+> `console_config`. Delivery to the agent: `agent-api.md` `config_update.console_config`
+> (additive) + capability enumeration in `capacity.console_capabilities` (additive). The
+> node-agent reads this instead of the spike's `QUASAR_LOCAL_DISPLAY` env hardcode.
+
+### `GET /v1/admin/hosts/{id}/console-config` — read a host's console config + capabilities (admin)
+`RequireAuth → RequireAdmin`. Returns the resolved config (defaults applied) plus the host's
+latest reported capabilities so the UI can populate selectors.
+```json
+// 200
+{
+  "config": {
+    "enabled": false, "connector": "auto", "compositor": "weston",
+    "audio_output": null, "stream": false, "stream_audio": false,
+    "input_devices": "auto", "grab": true,
+    "auto_start_on_display": false, "auto_connect_controller": false,
+    "default_app": null, "fullscreen": true
+  },
+  "capabilities": {
+    "connectors": ["DP-4", "HDMI-A-1"],
+    "audio_sinks": [ { "id": "hw:1,3", "label": "GPU HDA (DP-4)" }, { "id": "hw:0,0", "label": "Motherboard" } ],
+    "input_devices": [ { "path": "/dev/input/event4", "label": "Keyboard" }, { "path": "/dev/input/event5", "label": "Mouse" } ]
+  }
+}
+```
+- **`config`** — the resolved console-config object (`schema.md`): every field with its
+  override-or-default value. Console-mode is **off** (`enabled:false`) and **local-only**
+  (`stream:false`) by default; **`audio_output` has no default** (`null` ⇒ no local audio
+  until an admin picks a sink — fail-safe/quiet).
+- **`capabilities`** — the host's latest `console_capabilities` report (`agent-api.md`
+  `capacity`); empty arrays if the agent hasn't reported (older/offline agent) — the UI then
+  offers only `auto`.
+- **Errors:** `404 not_found` — no such host; `403` for non-admin (precedes lookup).
+
+### `PATCH /v1/admin/hosts/{id}/console-config` — update a host's console config (admin)
+`RequireAuth → RequireAdmin`. Partial/sparse update; only present keys change; `null` clears a
+key to its default (except `audio_output`/`default_app`, where `null` is the meaningful
+"unset/quiet/no-app" value).
+```json
+// request — partial
+{ "enabled": true, "connector": "DP-4", "compositor": "cage",
+  "audio_output": "hw:1,3", "default_app": "<uuid>" }
+// 200 — same shape as GET (resolved config + capabilities)
+```
+- **Validation.** `compositor` ∈ `{weston, cage}`; `connector`/`audio_output`/`input_devices`
+  validated against the host's reported `console_capabilities` (unless `auto`/`null`);
+  `default_app` FK-checked against `apps(id)`. Bad value → `400 validation_failed`.
+  `enabled:true` with `audio_output:null` is valid (console runs quiet).
+- **Persist + push.** Upserts `console_config.config`, stamps `updated_by`, and **pushes the
+  resolved `console_config` to the agent immediately** via `config_update` (`agent-api.md`).
+  Takes effect on the next session build; the agent re-arms its hotplug watcher live. **No
+  `restart_confirm`** — console config is not restart-class (it is not `gst::init`-latched).
+- **Errors:** `404 not_found` — no such host; `400 validation_failed` — bad enum / unknown
+  device / unknown `default_app`; `403` for non-admin.
 
 ---
 

@@ -653,6 +653,32 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: "restart_required — a restart-class knob changed with live sessions and restart_confirm != true (body carries live_sessions)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /v1/admin/hosts/{id}/console-config:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin]
+      summary: Read a host's console-mode config + reported capabilities (CM-01).
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/ConsoleConfigEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: Update a host's console-mode config (partial; pushes config_update to the agent).
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConsoleConfig" }
+      responses:
+        "200": { description: New effective state. , content: { application/json: { schema: { $ref: "#/components/schemas/ConsoleConfigEnvelope" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   # ─── admin: stream profiles / policy (not yet in prose) ──────────────────
   /v1/admin/profile-policy:
@@ -1508,6 +1534,58 @@ components:
         knobs:
           type: array
           items: { $ref: "#/components/schemas/ConfigKnob" }
+
+    # ─── console mode (CM-01) ────────────────────────────────────────────────────
+    ConsoleConfig:
+      type: object
+      description: "Per-host console-mode config. On PATCH the body is partial (any subset); on GET it is the resolved object. Off + local-only by default; audio_output has no default (null = quiet)."
+      properties:
+        enabled: { type: boolean }
+        connector: { type: string, description: "'auto' or a DRM connector name (DP-4, HDMI-A-1, …)." }
+        compositor: { type: string, enum: [weston, cage] }
+        audio_output: { type: [string, "null"], description: "Local host sink id ('auto' | alsa hw id | hdmi | motherboard | usb:*), or null = no local audio." }
+        stream: { type: boolean, description: "Also stream over WebRTC (dual-output). Default false = local-only." }
+        stream_audio: { type: boolean }
+        input_devices:
+          description: "'auto' or an explicit list of /dev/input/event* paths."
+          oneOf:
+            - { type: string, enum: [auto] }
+            - { type: array, items: { type: string } }
+        grab: { type: boolean }
+        auto_start_on_display: { type: boolean }
+        auto_connect_controller: { type: boolean }
+        default_app: { type: [string, "null"], format: uuid }
+        fullscreen: { type: boolean }
+    ConsoleCapabilities:
+      type: object
+      description: "What the host can do in console mode (from agent-api capacity.console_capabilities). Empty arrays if unreported."
+      required: [connectors, audio_sinks, input_devices]
+      properties:
+        connectors:
+          type: array
+          items: { type: string }
+        audio_sinks:
+          type: array
+          items:
+            type: object
+            required: [id, label]
+            properties:
+              id: { type: string }
+              label: { type: string }
+        input_devices:
+          type: array
+          items:
+            type: object
+            required: [path, label]
+            properties:
+              path: { type: string }
+              label: { type: string }
+    ConsoleConfigEnvelope:
+      type: object
+      required: [config, capabilities]
+      properties:
+        config: { $ref: "#/components/schemas/ConsoleConfig" }
+        capabilities: { $ref: "#/components/schemas/ConsoleCapabilities" }
 
     # ─── session trace / diagnostic bundle (ST-06/ST-07) ─────────────────────────
     TraceSeriesPoint:

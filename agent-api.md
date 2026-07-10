@@ -133,9 +133,28 @@ the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
   "gpus": [
     { "index": 0, "vendor": "amd", "model": "Radeon Pro V520",
       "vram_mb_total": 16384, "encode_slots_total": 2 }
-  ]
+  ],
+  "console_capabilities": {
+    "connectors": ["DP-4", "HDMI-A-1"],
+    "audio_sinks": [
+      { "id": "hw:1,3", "label": "GPU HDA (DP-4)" },
+      { "id": "hw:0,0", "label": "Motherboard" }
+    ],
+    "input_devices": [
+      { "path": "/dev/input/event4", "label": "Keyboard" },
+      { "path": "/dev/input/event5", "label": "Mouse" }
+    ]
+  }
 }
 ```
+`console_capabilities` *(NEW, CM-01, optional, additive)* enumerates what the host can do in
+console mode — DRM display connectors, host audio sinks (ALSA/pipewire), and physical input
+devices — so the admin console-config UI can populate its selectors instead of guessing device
+paths. It rides `capacity` because these are **hardware/topology** facts: the agent re-sends
+`capacity` when topology changes (e.g. a display hotplug), keeping the UI's lists fresh. Absent
+⇒ the control plane reports empty capability arrays and the UI offers only `auto`. The control
+plane stores the latest report and returns it in `GET /v1/admin/hosts/{id}/console-config`.
+
 `encode_slots_total` is the concurrent encode-session cap (the NVENC/VCN limit — architecture
 §"Resource governance"). At N=1 this is one GPU with generous slots; the field is mandatory so
 the scheduler's reservation path is exercised from day one. The control plane upserts `gpus` by
@@ -396,9 +415,26 @@ The control plane sends `config_update`:
   "settings": {
     "encoder": "va",
     "gop": 120
+  },
+  "console_config": {
+    "enabled": true, "connector": "DP-4", "compositor": "weston",
+    "audio_output": "hw:1,3", "stream": false, "stream_audio": false,
+    "input_devices": "auto", "grab": true,
+    "auto_start_on_display": false, "auto_connect_controller": false,
+    "default_app": "<uuid|null>", "fullscreen": true
   }
 }
 ```
+- **`console_config`** *(NEW, CM-01, optional, additive)* is the host's resolved console-mode
+  configuration (`schema.md` `console_config`; `control-api.md`
+  `PATCH /v1/admin/hosts/{id}/console-config`). **Absent ⇒ console mode disabled** — an agent
+  that never receives it behaves exactly as today. The node-agent reads this block **instead of**
+  the spike's `QUASAR_LOCAL_DISPLAY` env hardcode (env retained as a dev/bootstrap fallback only).
+  Unlike `settings`, `console_config` is the **full resolved object** (not sparse) — the control
+  plane applies defaults before sending. It is **not restart-class**: it applies on the next
+  session build, and live changes to `auto_start_on_display`/`auto_connect_controller` re-arm the
+  agent's hotplug watcher on receipt — no agent restart. `stream:false` (local-only) means the
+  session's encode/`webrtcbin` leg is simply not built.
 - **`settings`** is the host's **sparse override map** — only admin-set knobs appear. Keys absent
   from the map are left at the agent's env baseline. A nullable knob that an admin clears is
   simply omitted (not sent as `null`). The agent recomputes `RuntimeSettings::baseline()` (env)

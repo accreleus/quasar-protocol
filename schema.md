@@ -604,6 +604,53 @@ Migration: `0010_host_settings.up.sql` — `CREATE TABLE host_settings (...)`. T
 
 ---
 
+## `console_config` (CM-01 / console-mode)
+> *Additive amendment (migration 0022). A new table; it changes no existing table, column,
+> type, or constraint. Stores per-host console-mode configuration (local display + local
+> audio + local input for "use the host like a console"). Mirrors the `host_settings`
+> pattern — per-host JSONB, validated server-side — but is a distinct structured surface
+> (lists, nested selectors) rather than the flat scalar knob catalog. Requires sign-off.*
+
+One row per host that has console mode configured. A host with no row = console disabled
+(the control plane resolves the all-default object). Delivered to the node-agent additively
+via `config_update.console_config` (`agent-api.md`); the agent reads it **instead of** the
+spike's `QUASAR_LOCAL_DISPLAY` env hardcode.
+
+| column | type | notes |
+|---|---|---|
+| `host_id` | `UUID` PRIMARY KEY → `hosts(id)` ON DELETE CASCADE | one row per host; cascades on host removal |
+| `config` | `JSONB` NOT NULL DEFAULT `'{}'` | the console-config object (below). Sparse — absent keys resolve to defaults at read time. **Validated server-side on every PATCH** (unknown keys / bad types / bad enum / non-reported device rejected), never trusted blindly — same discipline as `host_settings.overrides`. |
+| `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | app-maintained |
+| `updated_by` | `UUID` NULL → `users(id)` | last admin to write; no cascade (audit trail) |
+
+Migration: `0022_console_config.up.sql` — `CREATE TABLE console_config (...)`. Down drops it.
+
+**The `config` object (resolved shape + defaults).** Console-mode is **local-only by
+default** (`stream:false`) and **off by default** (`enabled:false`):
+```json
+{
+  "enabled": false,                 // master switch; false = no local leg (today's behavior)
+  "connector": "auto",              // "auto" | "DP-4" | "HDMI-A-1" | ...  (display output; validated vs reported connectors)
+  "compositor": "weston",           // "weston" | "cage"  (CM-04 may flip the default to cage)
+  "audio_output": null,             // LOCAL host sink; no default — null ⇒ quiet until an admin picks one. "auto"(GPU HDA of the active connector) | "<alsa hw id>" | "hdmi" | "motherboard" | "usb:<...>". Independent of `stream`.
+  "stream": false,                  // LOCAL-ONLY DEFAULT: also stream this session over WebRTC when true (dual-output)
+  "stream_audio": false,            // SEPARATE from audio_output: also run the WebRTC Opus leg (only meaningful when stream=true)
+  "input_devices": "auto",          // "auto"(enumerate connected) | ["/dev/input/eventN", ...] (validated vs reported input devices)
+  "grab": true,                     // EVIOCGRAB exclusive-grab the physical devices to the session
+  "auto_start_on_display": false,   // CM-06: auto-launch default_app when a display connects on `connector`
+  "auto_connect_controller": false, // CM-07: auto-attach+grab a hotplugged controller
+  "default_app": null,              // UUID of the app to auto-launch on the console, or null (FK-checked vs apps.id)
+  "fullscreen": true                // CM-04: fullscreen the console client
+}
+```
+Validation: `compositor` ∈ `{weston, cage}`; `connector`/`audio_output`/`input_devices`
+checked against the host's reported `console_capabilities` (`agent-api.md` `capacity`)
+unless `auto`/`null`; `default_app` FK-checked against `apps(id)`. `enabled:true` with
+`audio_output:null` is **valid** — the console runs with no local audio until a sink is
+picked (fail-safe/quiet). No volume/mute (out of scope — app/host mixer's concern).
+
+---
+
 ## `user_homes` (P5-01)
 > *Additive amendment (migration 0008). A new bookkeeping table; it changes no existing
 > table semantics. The table tracks managed homes — the **backing store** (a docker volume
