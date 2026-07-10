@@ -1471,7 +1471,7 @@ latest reported capabilities so the UI can populate selectors.
     "audio_output": null, "stream": false, "stream_audio": false,
     "input_devices": "auto", "grab": true,
     "auto_start_on_display": false, "auto_connect_controller": false,
-    "default_app": null, "fullscreen": true
+    "default_app": null, "default_user": null, "fullscreen": true
   },
   "capabilities": {
     "connectors": ["DP-4", "HDMI-A-1"],
@@ -1501,7 +1501,9 @@ key to its default (except `audio_output`/`default_app`, where `null` is the mea
 ```
 - **Validation.** `compositor` ∈ `{weston, cage}`; `connector`/`audio_output`/`input_devices`
   validated against the host's reported `console_capabilities` (unless `auto`/`null`);
-  `default_app` FK-checked against `apps(id)`. Bad value → `400 validation_failed`.
+  `default_app` FK-checked against `apps(id)`; `default_user` FK-checked against
+  `users(id)` (CM-06 — the owner of auto-started console sessions; required when
+  `auto_start_on_display` is true). Bad value → `400 validation_failed`.
   `enabled:true` with `audio_output:null` is valid (console runs quiet).
 - **Persist + push.** Upserts `console_config.config`, stamps `updated_by`, and **pushes the
   resolved `console_config` to the agent immediately** via `config_update` (`agent-api.md`).

@@ -1555,6 +1555,7 @@ components:
         auto_start_on_display: { type: boolean }
         auto_connect_controller: { type: boolean }
         default_app: { type: [string, "null"], format: uuid }
+        default_user: { type: [string, "null"], format: uuid, description: "CM-06: owner of auto-started console sessions (users.id). Required when auto_start_on_display=true." }
         fullscreen: { type: boolean }
     ConsoleCapabilities:
       type: object

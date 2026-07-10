@@ -640,12 +640,14 @@ default** (`stream:false`) and **off by default** (`enabled:false`):
   "auto_start_on_display": false,   // CM-06: auto-launch default_app when a display connects on `connector`
   "auto_connect_controller": false, // CM-07: auto-attach+grab a hotplugged controller
   "default_app": null,              // UUID of the app to auto-launch on the console, or null (FK-checked vs apps.id)
+  "default_user": null,             // CM-06: UUID → users.id — OWNER of auto-started console sessions (admin-set; FK-checked). Required when auto_start_on_display=true (else auto-start is skipped + logged). Future: a console user-selection screen supersedes this.
   "fullscreen": true                // CM-04: fullscreen the console client
 }
 ```
 Validation: `compositor` ∈ `{weston, cage}`; `connector`/`audio_output`/`input_devices`
 checked against the host's reported `console_capabilities` (`agent-api.md` `capacity`)
-unless `auto`/`null`; `default_app` FK-checked against `apps(id)`. `enabled:true` with
+unless `auto`/`null`; `default_app` FK-checked against `apps(id)`; `default_user`
+FK-checked against `users(id)`. `enabled:true` with
 `audio_output:null` is **valid** — the console runs with no local audio until a sink is
 picked (fail-safe/quiet). No volume/mute (out of scope — app/host mixer's concern).
 
