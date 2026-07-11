@@ -281,6 +281,8 @@ capacity (CPU/mem) lives here; GPU capacity is per-row in `gpus`.
 | `mem_mb` | `INT` NULL | last-reported host capacity. |
 | `last_registered_at` | `TIMESTAMPTZ` NULL | |
 | `last_heartbeat_at` | `TIMESTAMPTZ` NULL | liveness; `online` requires recent heartbeat. |
+| `storage` | `JSONB` NULL | *(host-observability, additive)* last-reported storage volumes (`agent-api.md` `capacity.host.storage`): array of `{label, path, total_mb, available_mb}`. |
+| `effective_settings` | `JSONB` NULL | *(host-observability, additive)* last-reported resolved runtime settings (`agent-api.md` `capacity.effective_settings`): string map, restart-class knobs latched. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
 ### Host status state machine (P3-01)

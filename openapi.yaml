@@ -1202,7 +1202,7 @@ components:
     Host:
       type: object
       # crud/handler.go hostResp — every key is always serialized (nullable ones present-but-null).
-      required: [id, node_name, status, agent_version, cpu_cores, mem_mb, last_registered_at, last_heartbeat_at]
+      required: [id, node_name, status, agent_version, cpu_cores, mem_mb, last_registered_at, last_heartbeat_at, storage]
       properties:
         id: { type: string, format: uuid }
         node_name: { type: string }
@@ -1212,6 +1212,19 @@ components:
         mem_mb: { type: [integer, "null"] }
         last_registered_at: { type: [string, "null"], format: date-time }
         last_heartbeat_at: { type: [string, "null"], format: date-time }
+        storage:
+          # host-observability amendment: agent-reported storage volumes (capacity report);
+          # null until an amendment-aware agent reports.
+          type: [array, "null"]
+          items: { $ref: "#/components/schemas/StorageVolume" }
+    StorageVolume:
+      type: object
+      required: [label, path, total_mb, available_mb]
+      properties:
+        label: { type: string }
+        path: { type: string }
+        total_mb: { type: integer }
+        available_mb: { type: integer }
     HostList:
       type: object
       required: [items, next_cursor]
@@ -1226,6 +1239,11 @@ components:
       properties:
         resolved: { type: object, additionalProperties: true }
         overrides: { type: object, additionalProperties: true }
+        # host-observability amendment: agent-reported env←overrides overlay from its latest
+        # capacity report (agent-api.md effective_settings); null when never reported.
+        effective:
+          type: [object, "null"]
+          additionalProperties: { type: string }
         pending_restart: { type: boolean }
         restart_triggered: { type: boolean }
     HostSettingsPatch:
