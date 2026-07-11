@@ -315,6 +315,18 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /v1/admin/activity:
+    get:
+      tags: [admin]
+      summary: Newest-first administrative activity history.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+        - { name: cursor, in: query, schema: { type: integer, minimum: 1 } }
+      responses:
+        "200": { description: OK., content: { application/json: { schema: { $ref: "#/components/schemas/AdminActivityList" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   /v1/admin/apps:
     get:
       tags: [admin, apps]
@@ -1233,6 +1245,23 @@ components:
       required: [signaling]
       properties:
         signaling: { $ref: "#/components/schemas/SignalingCoords" }
+    AdminActivity:
+      type: object
+      required: [id, actor_user_id, action, target_type, target_id, details, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        actor_user_id: { type: [string, "null"], format: uuid }
+        action: { type: string }
+        target_type: { type: string }
+        target_id: { type: [string, "null"] }
+        details: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+    AdminActivityList:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AdminActivity" } }
+        next_cursor: { type: [integer, "null"], format: int64 }
 
     Host:
       type: object

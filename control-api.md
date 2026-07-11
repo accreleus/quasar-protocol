@@ -576,6 +576,14 @@ reschedule it, or restart its container.
   produce independent tokens; consuming one does not invalidate another.
 - Normal authenticated API rate limits apply. Plaintext is returned once and never logged.
 
+### `GET /v1/admin/activity` — administrative activity log
+
+Admin-only, newest-first, cursor-paginated history of destructive and operational actions. Each
+item contains `id`, `actor_user_id`, `action`, `target_type`, optional `target_id`, bounded
+non-secret `details`, and `created_at`. Required actions include configuration changes, agent
+restart, host drain/uncordon, console changes, storage GC, and destructive app/host/user/session
+operations. Tokens, passwords, invite codes, and signaling payloads are never recorded.
+
 #### Launch by profile (AS10-03)
 > *Additive amendment — adds an optional `profile_id` request field and an optional
 > `profile_id` response field (persisted on the session, `schema.md`); changes no existing

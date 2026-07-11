@@ -410,6 +410,25 @@ Every token remains hashed, short-lived, and atomically single-use. Expired rows
 normal maintenance. The legacy three token columns on `sessions` are migrated into this table and
 then removed.
 
+## `admin_activity`
+
+Append-only administrative audit history. `actor_user_id` is nullable so deletion of a user does
+not erase history; the UUID value is retained without a foreign key. `details` is bounded sanitized
+JSONB and must never contain credentials or signaling payloads.
+
+```sql
+CREATE TABLE admin_activity (
+    id            BIGSERIAL PRIMARY KEY,
+    actor_user_id UUID,
+    action        TEXT NOT NULL,
+    target_type   TEXT NOT NULL,
+    target_id     TEXT,
+    details       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX admin_activity_created_idx ON admin_activity (created_at DESC, id DESC);
+```
+
 ---
 
 ## `session_metrics` (P4-01)
