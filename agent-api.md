@@ -176,8 +176,11 @@ delta). Absent ⇒ the control plane keeps its last stored value (or null if nev
 
 `effective_settings` *(NEW, host-observability, optional, additive)* is the agent's **resolved
 runtime settings** — the `env ← overrides` overlay it is actually running with (values
-stringified), after any path canonicalisation (e.g. a `/dev/dri/by-path/...` render node
-resolves to its `renderD*` target). The agent re-sends `capacity` after applying each
+stringified), reported **as configured** (verbatim overlay values). Path canonicalisation
+(e.g. a `/dev/dri/by-path/...` render node resolving to its `renderD*` target) is an
+agent-internal detail and is *not* reflected here — this keeps `effective` directly
+comparable with the admin API's `resolved`/`overrides` views (same value space), which is the
+field's purpose (host-observability-2 clarification). The agent re-sends `capacity` after applying each
 `config_update`, so the control plane always holds the current effective view. This closes the
 gap noted under `config_update` (the admin `resolved` field is a *display* view that cannot see
 the agent's env): the control plane stores the latest map and returns it as `effective` in
