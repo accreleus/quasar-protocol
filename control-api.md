@@ -1017,11 +1017,14 @@ probe it is the conservative default (`1080p60`) and `confidence` is `low`.
 ```
 - **Reason codes** (stable, append-only): `bandwidth_too_low`, `rtt_too_high`,
   `decode_height_too_low`, `codec_not_supported`, `host_encoder_not_supported`,
-  `display_refresh_unknown`, `browser_playout_unsupported`,
+  `display_refresh_unknown`, `display_refresh_too_low`, `browser_playout_unsupported`,
   `historical_client_performance_failed`, `probe_missing`, `probe_stale`.
   Network/decode/codec checks are skipped for an unmeasured probe field (unknown → allow);
   host-encoder and historical-failure inputs are not yet populated in AS10-02 (reserved for
   later issues) and are part of the contract from the start.
+  `display_refresh_too_low` is advisory: a measured display below 98% of a profile's
+  nominal frame rate makes that profile risky and prevents recommendation, but does not
+  make an otherwise eligible profile unlaunchable.
 - Debug/internal profiles (`720p30`) are **never** returned.
 
 ---
