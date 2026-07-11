@@ -707,6 +707,12 @@ the admin oversight surface. P3-01 adds the two **lifecycle** operations an oper
 host out of service for maintenance and bring it back. Both are **admin-only** (a valid non-admin
 bearer is `403`, before any host lookup, per §Authorization) and both return the updated host body.
 
+> **Amendment — host-observability, additive.** The host body (`GET /v1/hosts`,
+> `GET /v1/hosts/{id}`, and the host list) gains `storage` — the agent-reported storage
+> volumes from its latest `capacity` report (`agent-api.md` `host.storage`): an array of
+> `{ label, path, total_mb, available_mb }`, serialized always (`null` until an
+> amendment-aware agent reports). Canonical schema: `openapi.yaml` `Host` / `StorageVolume`.
+
 ### `POST /v1/hosts/{id}/drain` — cordon a host
 Marks an `online` host `draining`: the scheduler places **no new sessions** on it, while its
 existing sessions are allowed to finish (graceful) or are stopped now (force). The host stays
@@ -1389,11 +1395,23 @@ Returns the resolved (effective) knob values and the sparse override map for one
     "abr_enabled": true,
     "encoder": "va"
   },
+  "effective": {
+    "encoder": "va",
+    "render_node": "/dev/dri/renderD128"
+  },
   "pending_restart": false
 }
 ```
 - **`resolved`** — the full set of effective knob values for this host: for each catalog knob,
-  the override value if one exists, otherwise the catalog default.
+  the override value if one exists, otherwise the catalog default. **A display view**
+  (`catalog-default ← overrides`) — it cannot see the agent's env baseline; for what the agent
+  process is actually running with, read `effective`.
+- **`effective`** *(NEW, host-observability, additive)* — the agent-reported settings map from
+  its latest `capacity` report (`agent-api.md` `effective_settings`): the true
+  `env ← overrides` overlay, values stringified, restart-class knobs latched to the running
+  process. `null` when the agent has never reported one (pre-amendment agent). A mismatch
+  between `resolved` and `effective` on a restart-class knob means a restart is pending, or the
+  agent's env differs from the catalog default the display view assumes.
 - **`overrides`** — the sparse map of only the knobs that differ from their catalog defaults.
   Empty object when no overrides are set.
 - **`pending_restart`** — `true` when a restart-class knob was changed (or the `restart`

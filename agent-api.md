@@ -129,7 +129,14 @@ the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
 ```json
 {
   "type": "capacity",
-  "host": { "cpu_cores": 16, "mem_mb": 64000 },
+  "host": {
+    "cpu_cores": 16, "mem_mb": 64000,
+    "storage": [
+      { "label": "agent-data", "path": "/var/lib/quasar-agent",
+        "total_mb": 819200, "available_mb": 512000 }
+    ]
+  },
+  "effective_settings": { "encoder": "nvenc", "render_node": "/dev/dri/renderD128" },
   "gpus": [
     { "index": 0, "vendor": "amd", "model": "Radeon Pro V520",
       "vram_mb_total": 16384, "encode_slots_total": 2 }
@@ -154,6 +161,27 @@ paths. It rides `capacity` because these are **hardware/topology** facts: the ag
 `capacity` when topology changes (e.g. a display hotplug), keeping the UI's lists fresh. Absent
 ⇒ the control plane reports empty capability arrays and the UI offers only `auto`. The control
 plane stores the latest report and returns it in `GET /v1/admin/hosts/{id}/console-config`.
+
+`host.storage` *(NEW, host-observability, optional, additive)* reports the filesystem
+capacity/availability (statvfs) of the storage roots the agent can see — at minimum its data
+root (`/var/lib/quasar-agent`, which on the reference compose deployments is a named volume on
+the Docker data filesystem, so it reflects the space available to images/containers/homes), plus
+the managed-homes root when the `local` storage provider is configured. Each entry:
+`label` (stable short id, e.g. `"agent-data"`, `"homes"`), `path` (agent-side mount point),
+`total_mb`, `available_mb`. Because availability drifts, the agent re-sends `capacity` when a
+report would change materially (checked on a debounced ~60 s cadence, re-sent on ≥1 GB or ≥1%
+delta). Absent ⇒ the control plane keeps its last stored value (or null if never reported).
+
+`effective_settings` *(NEW, host-observability, optional, additive)* is the agent's **resolved
+runtime settings** — the `env ← overrides` overlay it is actually running with (values
+stringified), after any path canonicalisation (e.g. a `/dev/dri/by-path/...` render node
+resolves to its `renderD*` target). The agent re-sends `capacity` after applying each
+`config_update`, so the control plane always holds the current effective view. This closes the
+gap noted under `config_update` (the admin `resolved` field is a *display* view that cannot see
+the agent's env): the control plane stores the latest map and returns it as `effective` in
+`GET /v1/admin/hosts/{id}/settings` (`control-api.md`). Restart-class knobs are reported as
+**latched** (the values the process is actually using), so a pending-restart discrepancy is
+visible by comparing `effective` against `resolved`. Absent ⇒ `effective` is null.
 
 `encode_slots_total` is the concurrent encode-session cap (the NVENC/VCN limit — architecture
 §"Resource governance"). At N=1 this is one GPU with generous slots; the field is mandatory so
@@ -441,7 +469,9 @@ The control plane sends `config_update`:
   then overlays this map on each push, so the result is `env ← overrides`, not a full replace.
   The admin API's `resolved` response field still reports the *display* view
   (catalog-default ← overrides); it does not reflect the agent's env (the control plane does not
-  see it). Surfacing the agent's effective config in `/admin` is tracked as a follow-up.
+  see it). The agent's effective config is surfaced via the `capacity` message's
+  `effective_settings` field (host-observability amendment above) and returned as `effective`
+  in `GET /v1/admin/hosts/{id}/settings`.
 - **Live-class knobs** (`abr_enabled`, `gop`, `slices`, etc.) take effect on the **next session
   build**. Running sessions are never modified mid-life — the pipeline is static once built.
 - **Restart-class knobs** (`encoder`, `render_node`, `cuda_device`) are read at the agent's
