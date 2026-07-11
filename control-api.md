@@ -1514,7 +1514,7 @@ latest reported capabilities so the UI can populate selectors.
 {
   "config": {
     "enabled": false, "connector": "auto", "compositor": "weston",
-    "audio_output": null, "stream": false, "stream_audio": false,
+    "audio_output": null, "stream": true, "stream_audio": true,
     "input_devices": "auto", "grab": true,
     "auto_start_on_display": false, "auto_connect_controller": false,
     "default_app": null, "default_user": null, "fullscreen": true
@@ -1527,8 +1527,9 @@ latest reported capabilities so the UI can populate selectors.
 }
 ```
 - **`config`** — the resolved console-config object (`schema.md`): every field with its
-  override-or-default value. Console-mode is **off** (`enabled:false`) and **local-only**
-  (`stream:false`) by default; **`audio_output` has no default** (`null` ⇒ no local audio
+  override-or-default value. Console-mode is **off** (`enabled:false`) by default. When enabled,
+  the proven topology is fullscreen dual-output Weston with automatic connector selection and
+  WebRTC video/audio (`stream:true`, `stream_audio:true`); **`audio_output` has no default** (`null` ⇒ no local audio
   until an admin picks a sink — fail-safe/quiet).
 - **`capabilities`** — the host's latest `console_capabilities` report (`agent-api.md`
   `capacity`); empty arrays if the agent hasn't reported (older/offline agent) — the UI then
@@ -1541,12 +1542,15 @@ key to its default (except `audio_output`/`default_app`, where `null` is the mea
 "unset/quiet/no-app" value).
 ```json
 // request — partial
-{ "enabled": true, "connector": "DP-4", "compositor": "cage",
+{ "enabled": true, "connector": "auto", "compositor": "weston",
   "audio_output": "hw:1,3", "default_app": "<uuid>" }
 // 200 — same shape as GET (resolved config + capabilities)
 ```
-- **Validation.** `compositor` ∈ `{weston, cage}`; `connector`/`audio_output`/`input_devices`
-  validated against the host's reported `console_capabilities` (unless `auto`/`null`);
+- **Validation.** Until the alternate paths are implemented, only `compositor:"weston"`,
+  `connector:"auto"`, `stream:true`, `stream_audio:true`, and `fullscreen:true` are accepted.
+  Cage, direct-KMS selection, explicit connectors, windowed output, and local-only mode are
+  unsupported rather than silently substituted. `audio_output`/`input_devices` are validated
+  against the host's reported `console_capabilities` (unless `auto`/`null`);
   `default_app` FK-checked against `apps(id)`; `default_user` FK-checked against
   `users(id)` (CM-06 — the owner of auto-started console sessions; required when
   `auto_start_on_display` is true). Bad value → `400 validation_failed`.

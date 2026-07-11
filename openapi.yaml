@@ -1591,14 +1591,14 @@ components:
     # ─── console mode (CM-01) ────────────────────────────────────────────────────
     ConsoleConfig:
       type: object
-      description: "Per-host console-mode config. On PATCH the body is partial (any subset); on GET it is the resolved object. Off + local-only by default; audio_output has no default (null = quiet)."
+      description: "Per-host console-mode config. On PATCH the body is partial; on GET it is resolved. The currently supported topology is Weston DRM, automatic connector selection, fullscreen dual-output WebRTC video/audio. Unsupported topology values are rejected."
       properties:
         enabled: { type: boolean }
-        connector: { type: string, description: "'auto' or a DRM connector name (DP-4, HDMI-A-1, …)." }
-        compositor: { type: string, enum: [weston, cage] }
+        connector: { type: string, enum: [auto], description: "Automatic connector selection. Explicit selection is not supported yet." }
+        compositor: { type: string, enum: [weston] }
         audio_output: { type: [string, "null"], description: "Local host sink id ('auto' | alsa hw id | hdmi | motherboard | usb:*), or null = no local audio." }
-        stream: { type: boolean, description: "Also stream over WebRTC (dual-output). Default false = local-only." }
-        stream_audio: { type: boolean }
+        stream: { type: boolean, enum: [true], description: "WebRTC video leg is currently required for the proven dual-output topology." }
+        stream_audio: { type: boolean, enum: [true], description: "WebRTC audio leg is currently required for the proven dual-output topology." }
         input_devices:
           description: "'auto' or an explicit list of /dev/input/event* paths."
           oneOf:
@@ -1609,7 +1609,7 @@ components:
         auto_connect_controller: { type: boolean }
         default_app: { type: [string, "null"], format: uuid }
         default_user: { type: [string, "null"], format: uuid, description: "CM-06: owner of auto-started console sessions (users.id). Required when auto_start_on_display=true." }
-        fullscreen: { type: boolean }
+        fullscreen: { type: boolean, enum: [true], description: "Weston kiosk output is currently always fullscreen." }
     ConsoleCapabilities:
       type: object
       description: "What the host can do in console mode (from agent-api capacity.console_capabilities). Empty arrays if unreported."

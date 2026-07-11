@@ -632,16 +632,17 @@ spike's `QUASAR_LOCAL_DISPLAY` env hardcode.
 
 Migration: `0022_console_config.up.sql` — `CREATE TABLE console_config (...)`. Down drops it.
 
-**The `config` object (resolved shape + defaults).** Console-mode is **local-only by
-default** (`stream:false`) and **off by default** (`enabled:false`):
+**The `config` object (resolved shape + defaults).** Console-mode is **off by default**
+(`enabled:false`). When enabled, the currently proven topology is fixed to fullscreen,
+dual-output Weston with automatic connector selection:
 ```json
 {
   "enabled": false,                 // master switch; false = no local leg (today's behavior)
-  "connector": "auto",              // "auto" | "DP-4" | "HDMI-A-1" | ...  (display output; validated vs reported connectors)
-  "compositor": "weston",           // "weston" | "cage"  (CM-04 may flip the default to cage)
+  "connector": "auto",              // explicit connector selection is not supported yet
+  "compositor": "weston",           // Cage/direct-KMS selection is not supported yet
   "audio_output": null,             // LOCAL host sink; no default — null ⇒ quiet until an admin picks one. "auto"(GPU HDA of the active connector) | "<alsa hw id>" | "hdmi" | "motherboard" | "usb:<...>". Independent of `stream`.
-  "stream": false,                  // LOCAL-ONLY DEFAULT: also stream this session over WebRTC when true (dual-output)
-  "stream_audio": false,            // SEPARATE from audio_output: also run the WebRTC Opus leg (only meaningful when stream=true)
+  "stream": true,                   // required WebRTC video leg of the proven dual-output topology
+  "stream_audio": true,             // required WebRTC Opus leg; independent of local audio_output
   "input_devices": "auto",          // "auto"(enumerate connected) | ["/dev/input/eventN", ...] (validated vs reported input devices)
   "grab": true,                     // EVIOCGRAB exclusive-grab the physical devices to the session
   "auto_start_on_display": false,   // CM-06: auto-launch default_app when a display connects on `connector`
@@ -651,9 +652,10 @@ default** (`stream:false`) and **off by default** (`enabled:false`):
   "fullscreen": true                // CM-04: fullscreen the console client
 }
 ```
-Validation: `compositor` ∈ `{weston, cage}`; `connector`/`audio_output`/`input_devices`
-checked against the host's reported `console_capabilities` (`agent-api.md` `capacity`)
-unless `auto`/`null`; `default_app` FK-checked against `apps(id)`; `default_user`
+Validation: only `compositor:"weston"`, `connector:"auto"`, `stream:true`,
+`stream_audio:true`, and `fullscreen:true` are accepted until alternate topology paths are
+implemented. `audio_output`/`input_devices` are checked against the host's reported
+`console_capabilities` (`agent-api.md` `capacity`) unless `auto`/`null`; `default_app` FK-checked against `apps(id)`; `default_user`
 FK-checked against `users(id)`. `enabled:true` with
 `audio_output:null` is **valid** — the console runs with no local audio until a sink is
 picked (fail-safe/quiet). No volume/mute (out of scope — app/host mixer's concern).

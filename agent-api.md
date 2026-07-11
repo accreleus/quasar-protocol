@@ -467,8 +467,8 @@ The control plane sends `config_update`:
     "gop": 120
   },
   "console_config": {
-    "enabled": true, "connector": "DP-4", "compositor": "weston",
-    "audio_output": "hw:1,3", "stream": false, "stream_audio": false,
+    "enabled": true, "connector": "auto", "compositor": "weston",
+    "audio_output": "hw:1,3", "stream": true, "stream_audio": true,
     "input_devices": "auto", "grab": true,
     "auto_start_on_display": false, "auto_connect_controller": false,
     "default_app": "<uuid|null>", "fullscreen": true
@@ -480,6 +480,9 @@ The control plane sends `config_update`:
   `PATCH /v1/admin/hosts/{id}/console-config`). **Absent ⇒ console mode disabled** — an agent
   that never receives it behaves exactly as today. The node-agent reads this block **instead of**
   the spike's `QUASAR_LOCAL_DISPLAY` env hardcode (env retained as a dev/bootstrap fallback only).
+  The currently supported resolved topology is Weston DRM, automatic connector selection,
+  fullscreen local output, and WebRTC video/audio; unsupported alternatives are rejected by the
+  control plane rather than silently substituted by the agent.
   Unlike `settings`, `console_config` is the **full resolved object** (not sparse) — the control
   plane applies defaults before sending. It is **not restart-class**: it applies on the next
   session build, and live changes to `auto_start_on_display`/`auto_connect_controller` re-arm the
