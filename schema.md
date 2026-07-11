@@ -659,6 +659,8 @@ default** (`stream:false`) and **off by default** (`enabled:false`):
 {
   "enabled": false,                 // master switch; false = no local leg (today's behavior)
   "connector": "auto",              // "auto" | "DP-4" | "HDMI-A-1" | ...  (display output; validated vs reported connectors)
+  "output_id": null,                 // card-scoped id from console_capabilities.outputs
+  "mode": null,                      // {width,height,refresh_millihz}; exact reported mode for output_id
   "compositor": "weston",           // "weston" | "cage"  (CM-04 may flip the default to cage)
   "audio_output": null,             // LOCAL host sink; no default — null ⇒ quiet until an admin picks one. "auto"(GPU HDA of the active connector) | "<alsa hw id>" | "hdmi" | "motherboard" | "usb:<...>". Independent of `stream`.
   "stream": false,                  // LOCAL-ONLY DEFAULT: also stream this session over WebRTC when true (dual-output)

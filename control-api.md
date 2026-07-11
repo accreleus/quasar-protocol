@@ -1548,6 +1548,7 @@ latest reported capabilities so the UI can populate selectors.
 {
   "config": {
     "enabled": false, "connector": "auto", "compositor": "weston",
+    "output_id": null, "mode": null,
     "audio_output": null, "stream": false, "stream_audio": false,
     "input_devices": "auto", "grab": true,
     "auto_start_on_display": false, "auto_connect_controller": false,

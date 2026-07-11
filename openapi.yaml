@@ -1647,6 +1647,12 @@ components:
       properties:
         enabled: { type: boolean }
         connector: { type: string, description: "'auto' or a DRM connector name (DP-4, HDMI-A-1, …)." }
+        output_id: { type: [string, "null"], description: "Card-scoped DRM output id from capabilities.outputs; null selects automatic output." }
+        mode:
+          description: "Exact static physical mode for output_id; null selects the compositor preferred mode."
+          oneOf:
+            - { type: "null" }
+            - { $ref: "#/components/schemas/ConsoleModeSelection" }
         compositor: { type: string, enum: [weston, cage] }
         audio_output: { type: [string, "null"], description: "Local host sink id ('auto' | alsa hw id | hdmi | motherboard | usb:*), or null = no local audio." }
         stream: { type: boolean, description: "Also stream over WebRTC (dual-output). Default false = local-only." }
@@ -1662,6 +1668,13 @@ components:
         default_app: { type: [string, "null"], format: uuid }
         default_user: { type: [string, "null"], format: uuid, description: "CM-06: owner of auto-started console sessions (users.id). Required when auto_start_on_display=true." }
         fullscreen: { type: boolean }
+    ConsoleModeSelection:
+      type: object
+      required: [width, height, refresh_millihz]
+      properties:
+        width: { type: integer }
+        height: { type: integer }
+        refresh_millihz: { type: integer }
     ConsoleCapabilities:
       type: object
       description: "What the host can do in console mode (from agent-api capacity.console_capabilities). Empty arrays if unreported."

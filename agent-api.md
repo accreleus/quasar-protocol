@@ -473,6 +473,8 @@ The control plane sends `config_update`:
   },
   "console_config": {
     "enabled": true, "connector": "DP-4", "compositor": "weston",
+    "output_id": "card0:DP-4",
+    "mode": {"width": 3840, "height": 2160, "refresh_millihz": 119879},
     "audio_output": "hw:1,3", "stream": false, "stream_audio": false,
     "input_devices": "auto", "grab": true,
     "auto_start_on_display": false, "auto_connect_controller": false,
@@ -490,6 +492,8 @@ The control plane sends `config_update`:
   session build, and live changes to `auto_start_on_display`/`auto_connect_controller` re-arm the
   agent's hotplug watcher on receipt — no agent restart. `stream:false` (local-only) means the
   session's encode/`webrtcbin` leg is simply not built.
+  `output_id` and `mode` are configured together and must exactly match the latest typed DRM
+  inventory. The agent writes a session-owned Weston config selecting that connector and timing.
 - **`capacity.console_capabilities.outputs`** *(Wave 3.2, optional, additive)* is the typed DRM
   inventory. Each output is card-scoped (`id`, `card`, associated `render_node`, connector and
   connection state) and contains exact DRM mode timing identity (`width`, `height`, integer
