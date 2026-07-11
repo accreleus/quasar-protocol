@@ -281,6 +281,7 @@ capacity (CPU/mem) lives here; GPU capacity is per-row in `gpus`.
 | `mem_mb` | `INT` NULL | last-reported host capacity. |
 | `last_registered_at` | `TIMESTAMPTZ` NULL | |
 | `last_heartbeat_at` | `TIMESTAMPTZ` NULL | liveness; `online` requires recent heartbeat. |
+| `cpu_model` | `TEXT` NULL | *(host-observability-2, additive)* last-reported CPU marketing name. |
 | `storage` | `JSONB` NULL | *(host-observability, additive)* last-reported storage volumes (`agent-api.md` `capacity.host.storage`): array of `{label, path, total_mb, available_mb}`. |
 | `effective_settings` | `JSONB` NULL | *(host-observability, additive)* last-reported resolved runtime settings (`agent-api.md` `capacity.effective_settings`): string map, restart-class knobs latched. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
@@ -338,6 +339,7 @@ reservations held by active sessions), so reservations cannot drift from session
 | `model` | `TEXT` NULL | |
 | `vram_mb_total` | `INT` NOT NULL | reported capacity. |
 | `encode_slots_total` | `INT` NOT NULL | concurrent encode-session cap (NVENC/VCN limit). |
+| `render_node` | `TEXT` NULL | *(host-observability-2, additive)* stable by-path render-node device path (`agent-api.md` `gpus[].render_node`). |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | |
 
 **Availability (derived, not stored):**
