@@ -146,7 +146,7 @@ between the browser and the node's `webrtcbin` — they do **not** traverse the 
 relay. Only signaling does. (NAT traversal for the media path is STUN now, TURN in Phase 3, per
 the Phase 0 note above — unchanged.)
 
-## Token lifecycle (single-use)
+## Token lifecycle (single-use, repeatable per session)
 - **Mint:** `POST /v1/sessions` generates a cryptographically random token, stores its SHA-256 in
   `signaling_token_hash` with `signaling_token_expires_at = now() + TTL` (default **60 s**),
   returns the plaintext once in the launch response.
@@ -154,40 +154,29 @@ the Phase 0 note above — unchanged.)
   atomically). The signaling session lives as long as the WebSocket; closing the WS ends
   signaling but not the media session (that's the session lifecycle, `control-api.md` /
   `agent-api.md`).
+- **Reconnect mint:** an authenticated owner may call
+  `POST /v1/sessions/{id}/signaling-token` while the session is `assigned`, `starting`, or
+  `running`. Each call creates a new independently single-use token; it does not create, stop, or
+  reschedule the session.
 - **Reuse/expiry/invalid:** rejected with a WS close. One token ⇒ one signaling attempt; a
-  reconnect needs a fresh token (re-launch). Phase 1 keeps a single token per session row
-  (`schema.md`); a `session_tokens` child table is the documented extension if true reconnect is
-  added later.
+  reconnect obtains a fresh token for the same session.
 
-## Known limitation: mid-session reconnection (Phase 1)
-**A session cannot be transparently reconnected after a full WebRTC drop in Phase 1.** Two cases
-to distinguish:
-- **Transient network blip / ICE failure with the PeerConnection still alive.** Handled by WebRTC
-  itself (ICE restart over the *existing* PeerConnection). No new signaling token is needed and
-  this limitation does not apply.
-- **Full PeerConnection loss (the limitation).** If the PeerConnection dies (long outage, client
-  reload, tab close→reopen), re-establishing requires a fresh signaling handshake — which requires
-  a signaling token. But a token is minted **only** by `POST /v1/sessions` (launch) and is
-  single-use, and Phase 1 stores exactly one token per session row (`schema.md`). There is no
-  Phase-1 endpoint to mint a *new* token for an *existing* `running` session. So the client must
-  re-launch, which **creates a new session** (new `id`, fresh schedule/reserve) and **loses the
-  running app/game** attached to the old one.
+## Mid-session reconnection
+Two bounded recovery paths are defined:
 
-**Why accepted for Phase 1:** N=1, single session, LAN/early testing; transparent reconnection is
-a UX feature, not an architecture-blocker, and keeping one token per session row keeps the schema
-lean. The session lifecycle, relay, and message shapes are all already reconnect-ready — only
-token *issuance* is single-shot.
+- **Transient media-path loss, signaling still connected.** The answerer sends
+  `{ "type":"restart_ice", "pc":"video" }`. The host, as offerer, performs an ICE restart and
+  sends a new `offer` for that PC; the normal answer/trickle flow follows. Audio may be requested
+  independently with `pc:"audio"`. Duplicate requests are idempotent while negotiation is in
+  progress.
+- **Signaling or PeerConnection loss.** The authenticated client mints a replacement token for
+  the same session, opens a new signaling WebSocket, and recreates its peer connections. Client
+  attachment causes the still-running host pipeline to emit fresh offers. The session id,
+  scheduler reservation, container, and application remain unchanged.
 
-**Migration path (sketched, additive — no frozen-shape change):**
-1. Lift the three `signaling_token_*` columns off `sessions` into a `session_tokens(session_id, …)`
-   child table (DDL sketched in `schema.md`), so a session can own many single-use tokens over time.
-2. Add `POST /v1/sessions/{id}/signaling-token` to `control-api.md`: for a session the caller owns
-   that is `assigned`/`starting`/`running`, mint a fresh single-use token and return the same
-   `{ url, token, expires_at }` shape the launch response already uses.
-3. Signaling validation changes only its lookup (join `session_tokens` instead of reading the
-   session row); **the handshake, the relay envelope, the close codes, and every message shape on
-   this page stay identical.** The client gains a reconnect path: on PeerConnection loss, request a
-   new token for the same session and reconnect to `…/v1/signal?token=…`.
+Clients use bounded retry/backoff and expose cancellation. A terminal session returns `409
+session_not_reconnectable`; an unavailable host remains distinguishable through close code 4500.
+The `restart_ice` request is additive; all existing offer/answer/ICE shapes remain valid.
 
 ## WebSocket close codes (control plane → browser)
 Application close codes in the 4000–4999 range so the client can react precisely:

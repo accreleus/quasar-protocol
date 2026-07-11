@@ -540,12 +540,13 @@ session token, see `signaling.md`), and the control plane relays each signaling 
 the assigned node over *this* agent connection, tagged with `session_id`. The node never needs a
 public address — the control plane is the single ingress (essential for NAT/K8s).
 
-A `signaling` envelope wraps the **verbatim Phase-0 signaling message** (`offer`/`answer`/`ice`/
-`bye`/`error` — shapes unchanged):
+A `signaling` envelope wraps the signaling message (`offer`/`answer`/`ice`/`restart_ice`/
+`bye`/`error`):
 ```json
 // control -> node (client's answer / ICE, and a "client attached" notice)
 { "type": "signaling", "session_id": "<uuid>", "msg": { "type": "answer", "sdp": "..." } }
 { "type": "signaling", "session_id": "<uuid>", "msg": { "type": "ice", "candidate": { "candidate": "...", "sdpMid": "0", "sdpMLineIndex": 0 } } }
+{ "type": "signaling", "session_id": "<uuid>", "msg": { "type": "restart_ice", "pc": "video" } }
 
 // node -> control (host is the offerer; forwarded to the browser)
 { "type": "signaling", "session_id": "<uuid>", "msg": { "type": "offer", "sdp": "..." } }
@@ -554,6 +555,10 @@ A `signaling` envelope wraps the **verbatim Phase-0 signaling message** (`offer`
 The inner `msg` is exactly what `signaling.md` defines — the relay adds only the `session_id`
 routing tag. Input events and clock-sync (`input.md`) ride the WebRTC DataChannel directly
 peer-to-peer (browser ↔ node `webrtcbin`); they do **not** traverse this relay.
+
+When a replacement signaling WebSocket attaches to an already-running session, the control plane
+notifies the node through the existing session-scoped relay. The node emits fresh offers for its
+live video and audio peer connections; no container or media pipeline restart is implied.
 
 ## Reconnection & reconciliation
 - On agent reconnect, the control plane trusts the agent's `heartbeat.running_sessions` /

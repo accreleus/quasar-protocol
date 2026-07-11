@@ -553,6 +553,29 @@ is the single hinge to `signaling.md`.
 - `state` may already be `starting`/`running` by the time the client reads it — these are the
   `schema.md` states verbatim.
 
+### `POST /v1/sessions/{id}/signaling-token` — reconnect signaling
+
+Mints fresh signaling coordinates for an existing session owned by the authenticated caller.
+Allowed states are `assigned`, `starting`, and `running`. The operation does not create a session,
+reschedule it, or restart its container.
+
+**Response `201`:**
+```json
+{
+  "signaling": {
+    "url": "wss://quasar.example/v1/signal",
+    "token": "<single-use plaintext token>",
+    "expires_at": "2026-07-12T01:02:03Z"
+  }
+}
+```
+
+- `404 not_found`: the session does not exist or belongs to another user.
+- `409 session_not_reconnectable`: the session is terminal or stopping.
+- Each successful call inserts a new `session_tokens` row. Concurrent calls are allowed and
+  produce independent tokens; consuming one does not invalidate another.
+- Normal authenticated API rate limits apply. Plaintext is returned once and never logged.
+
 #### Launch by profile (AS10-03)
 > *Additive amendment — adds an optional `profile_id` request field and an optional
 > `profile_id` response field (persisted on the session, `schema.md`); changes no existing

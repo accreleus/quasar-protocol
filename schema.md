@@ -379,10 +379,6 @@ signaling (P1-D).
 | **reservation** | | what was reserved on assign. |
 | `reserved_vram_mb` | `INT` NOT NULL DEFAULT `0` | |
 | `reserved_encode_slots` | `INT` NOT NULL DEFAULT `0` | |
-| **signaling token (single-use)** | | one active token per session; see `signaling.md`. |
-| `signaling_token_hash` | `TEXT` NULL UNIQUE | SHA-256 of the single-use token minted at launch. |
-| `signaling_token_expires_at` | `TIMESTAMPTZ` NULL | short TTL (default 60 s). |
-| `signaling_token_consumed_at` | `TIMESTAMPTZ` NULL | set atomically on first valid signaling connect; non-null ⇒ already used ⇒ reject. **Single-use is enforced here.** |
 | **timestamps** | | |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 | `assigned_at` | `TIMESTAMPTZ` NULL | |
@@ -394,25 +390,25 @@ Indexes: `(user_id, created_at DESC)` for a user's session list; `(host_id)` and
 for the availability sums; partial index `(gpu_id) WHERE state IN ('assigned','starting','running')`
 to make the reservation sum cheap.
 
-> **Single-token-per-session note (known limitation — see `signaling.md`).** Phase 1 keeps one
-> active signaling token *on the session row*, which means a session cannot be re-signalled after
-> its token is consumed without re-launching (the mid-session WebRTC reconnection limitation
-> documented in `signaling.md`). The migration path is additive and deliberately deferred:
-> lift the three `signaling_token_*` columns into a child table
-> ```sql
-> CREATE TABLE session_tokens (
->     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
->     session_id   UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
->     token_hash   TEXT NOT NULL UNIQUE,
->     expires_at   TIMESTAMPTZ NOT NULL,
->     consumed_at  TIMESTAMPTZ,
->     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-> );
-> ```
-> Then a fresh single-use token can be minted for an already-`running` session (a reconnect),
-> and signaling validation joins `session_tokens` instead of reading the session row. Nothing
-> else in this schema changes; the message shapes and relay in `signaling.md`/`agent-api.md` are
-> untouched.
+## `session_tokens`
+Repeatable issuance with single-use consumption for launch and mid-session reconnection.
+
+```sql
+CREATE TABLE session_tokens (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id   UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    token_hash   TEXT NOT NULL UNIQUE,
+    expires_at   TIMESTAMPTZ NOT NULL,
+    consumed_at  TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX session_tokens_session_created_idx
+    ON session_tokens (session_id, created_at DESC);
+```
+
+Every token remains hashed, short-lived, and atomically single-use. Expired rows may be deleted by
+normal maintenance. The legacy three token columns on `sessions` are migrated into this table and
+then removed.
 
 ---
 
