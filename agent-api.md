@@ -317,9 +317,16 @@ samples; the control plane joins the two on one timeline for the diagnostic bund
 ```
 - **`type`** is the WS message discriminator (`"session_trace_event"`). **`event`** is the trace
   event type from the agent allow-list (`abr.retarget`, `pipeline.source_swapped`,
-  `encoder.drop_detected`, `webrtc.state_changed` — `trace-format.md` §3.2). **`payload`** is the
+  `encoder.drop_detected`, `webrtc.state_changed`, `session.effective_media` —
+  `trace-format.md` §3.2). **`payload`** is the
   per-type object (`trace-format.md` §3). `ts_unix_ms` is the agent wall-clock at the event (same
   convention as `session_metrics.ts_unix_ms`).
+- **`session.effective_media`** is a one-shot snapshot sent immediately after the live encoder
+  produces its first offer. Its payload separates `configured`, `resolved`, and `actual` facts;
+  `actual` includes the created encoder factory/device readback, negotiated source/encoder caps,
+  memory feature, rate-control/profile/bitrate/GOP/slices, game GPU realization, and stream/local
+  topology. It travels on the agent's reliable lifecycle lane and the control plane persists it
+  synchronously rather than through the droppable diagnostic queue.
 - **`webrtc.state_changed` — Connected/Completed both mean established.** ICE may jump
   `Checking → Completed`, skipping `Connected`; a reader treats both as transport-established.
 - The control plane writes a `session_trace_events` row with `source='agent'` (`schema.md`) after
