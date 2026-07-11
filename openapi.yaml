@@ -653,6 +653,23 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: "restart_required — a restart-class knob changed with live sessions and restart_confirm != true (body carries live_sessions)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /v1/admin/hosts/{id}/restart:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [admin]
+      summary: Restart the host's agent without changing overrides (host-observability-2).
+      x-required-role: admin
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostRestartRequest" }
+      responses:
+        "200": { description: Restart command sent. , content: { application/json: { schema: { $ref: "#/components/schemas/HostRestartResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "restart_required (live sessions, confirm != true — body carries live_sessions) or conflict (host offline)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
   /v1/admin/hosts/{id}/console-config:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     get:
@@ -1202,7 +1219,7 @@ components:
     Host:
       type: object
       # crud/handler.go hostResp — every key is always serialized (nullable ones present-but-null).
-      required: [id, node_name, status, agent_version, cpu_cores, mem_mb, last_registered_at, last_heartbeat_at, storage]
+      required: [id, node_name, status, agent_version, cpu_cores, mem_mb, cpu_model, last_registered_at, last_heartbeat_at, storage]
       properties:
         id: { type: string, format: uuid }
         node_name: { type: string }
@@ -1210,6 +1227,8 @@ components:
         agent_version: { type: [string, "null"] }
         cpu_cores: { type: [integer, "null"] }
         mem_mb: { type: [integer, "null"] }
+        # host-observability-2: agent-reported CPU marketing name; null until reported.
+        cpu_model: { type: [string, "null"] }
         last_registered_at: { type: [string, "null"], format: date-time }
         last_heartbeat_at: { type: [string, "null"], format: date-time }
         storage:
@@ -1245,6 +1264,17 @@ components:
           type: [object, "null"]
           additionalProperties: { type: string }
         pending_restart: { type: boolean }
+        restart_triggered: { type: boolean }
+    HostRestartRequest:
+      type: object
+      properties:
+        confirm:
+          type: boolean
+          description: "Required true to restart while the host has live sessions (mirrors HostSettingsPatch.restart_confirm)."
+    HostRestartResponse:
+      type: object
+      required: [restart_triggered]
+      properties:
         restart_triggered: { type: boolean }
     HostSettingsPatch:
       type: object
@@ -1324,7 +1354,7 @@ components:
     GPUAvailability:
       type: object
       description: "One GPU's capacity from GET /v1/hosts/{id}/gpus."
-      required: [gpu_id, gpu_index, vendor, model, vram_mb_total, vram_mb_reserved, slots_total, slots_reserved, active_sessions]
+      required: [gpu_id, gpu_index, vendor, model, vram_mb_total, vram_mb_reserved, slots_total, slots_reserved, active_sessions, render_node]
       properties:
         gpu_id: { type: string }
         gpu_index: { type: integer }
@@ -1335,6 +1365,9 @@ components:
         slots_total: { type: integer }
         slots_reserved: { type: integer }
         active_sessions: { type: integer }
+        # host-observability-2: stable by-path render-node device path for this GPU
+        # (valid as a render_node setting value); null until reported.
+        render_node: { type: [string, "null"] }
     GPUsResponse:
       type: object
       required: [items]

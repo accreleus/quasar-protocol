@@ -233,6 +233,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/config/catalog` | **admin** | *(host-runtime-settings)* read the knob catalog |
 | `GET /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* read a host's resolved settings + overrides |
 | `PATCH /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* update per-host overrides |
+| `POST /v1/admin/hosts/{id}/restart` | **admin** | *(host-observability-2)* restart the host's agent (apply pending restart-class config) |
 | `GET /v1/admin/hosts/{id}/console-config` | **admin** | *(CM-01)* read a host's console-mode config + reported capabilities |
 | `PATCH /v1/admin/hosts/{id}/console-config` | **admin** | *(CM-01)* update a host's console-mode config |
 | `GET /v1/admin/sessions/{id}/trace`, `.../trace/window`, `.../trace/metrics`, `.../trace/events` | **admin** | *(ST-01)* the bounded recent session trace (samples + events + clock) |
@@ -712,6 +713,13 @@ bearer is `403`, before any host lookup, per §Authorization) and both return th
 > volumes from its latest `capacity` report (`agent-api.md` `host.storage`): an array of
 > `{ label, path, total_mb, available_mb }`, serialized always (`null` until an
 > amendment-aware agent reports). Canonical schema: `openapi.yaml` `Host` / `StorageVolume`.
+
+> **Amendment — host-observability-2, additive.** The host body additionally gains
+> `cpu_model` (agent-reported CPU marketing name, `null` until reported). The GPU capacity
+> read (`GET /v1/hosts/{id}/gpus`) gains `render_node` per GPU — the stable by-path device
+> path from the capacity report (`agent-api.md` `gpus[].render_node`, `null` until reported);
+> the admin UI uses these to offer a render-node picker (`software` + one entry per reported
+> GPU) instead of a free-text field. Also adds `POST /v1/admin/hosts/{id}/restart` (below).
 
 ### `POST /v1/hosts/{id}/drain` — cordon a host
 Marks an `online` host `draining`: the scheduler places **no new sessions** on it, while its
@@ -1467,6 +1475,26 @@ as a `config_update` message (`agent-api.md`).
   reconnected with updated config).
 - **Errors:** `404 not_found` — no host with that id; `400 validation_failed` — bad knob key,
   wrong type, or out-of-range value; `409 restart_required` — as above.
+
+### `POST /v1/admin/hosts/{id}/restart` — restart a host's agent *(host-observability-2)*
+> *Additive, admin-gated. New endpoint; no change to any existing shape.*
+
+Sends the `restart` downstream command (`agent-api.md`) to the host's agent without changing
+any override — the standalone lever for applying an already-persisted restart-class change
+(e.g. `pending_restart: true`, or `effective` ≠ `resolved` because the env baseline changed).
+```json
+// request — confirm mirrors PATCH's restart_confirm and is required only with live sessions
+{ "confirm": false }
+// 200
+{ "restart_triggered": true }
+```
+- **Live-session guard.** Same semantics as the PATCH restart guard: with sessions in
+  `state ∈ {assigned, starting, running}` and `confirm` absent/`false` →
+  `409 restart_required` with `live_sessions: N`; with `confirm: true` the restart proceeds
+  (sessions are not forcibly stopped — drain first for a clean cut).
+- Sets `pending_restart` on the host row; it clears when the agent reconnects.
+- **Errors:** `404 not_found`; `409 conflict` — host `offline` (agent not connected, nothing
+  to restart); `409 restart_required` — as above.
 
 ---
 

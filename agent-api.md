@@ -131,6 +131,7 @@ the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
   "type": "capacity",
   "host": {
     "cpu_cores": 16, "mem_mb": 64000,
+    "cpu_model": "AMD Ryzen 9 7950X 16-Core Processor",
     "storage": [
       { "label": "agent-data", "path": "/var/lib/quasar-agent",
         "total_mb": 819200, "available_mb": 512000 }
@@ -139,7 +140,8 @@ the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
   "effective_settings": { "encoder": "nvenc", "render_node": "/dev/dri/renderD128" },
   "gpus": [
     { "index": 0, "vendor": "amd", "model": "Radeon Pro V520",
-      "vram_mb_total": 16384, "encode_slots_total": 2 }
+      "vram_mb_total": 16384, "encode_slots_total": 2,
+      "render_node": "/dev/dri/by-path/pci-0000:04:00.0-render" }
   ],
   "console_capabilities": {
     "connectors": ["DP-4", "HDMI-A-1"],
@@ -174,14 +176,26 @@ delta). Absent ⇒ the control plane keeps its last stored value (or null if nev
 
 `effective_settings` *(NEW, host-observability, optional, additive)* is the agent's **resolved
 runtime settings** — the `env ← overrides` overlay it is actually running with (values
-stringified), after any path canonicalisation (e.g. a `/dev/dri/by-path/...` render node
-resolves to its `renderD*` target). The agent re-sends `capacity` after applying each
+stringified), reported **as configured** (verbatim overlay values). Path canonicalisation
+(e.g. a `/dev/dri/by-path/...` render node resolving to its `renderD*` target) is an
+agent-internal detail and is *not* reflected here — this keeps `effective` directly
+comparable with the admin API's `resolved`/`overrides` views (same value space), which is the
+field's purpose (host-observability-2 clarification). The agent re-sends `capacity` after applying each
 `config_update`, so the control plane always holds the current effective view. This closes the
 gap noted under `config_update` (the admin `resolved` field is a *display* view that cannot see
 the agent's env): the control plane stores the latest map and returns it as `effective` in
 `GET /v1/admin/hosts/{id}/settings` (`control-api.md`). Restart-class knobs are reported as
 **latched** (the values the process is actually using), so a pending-restart discrepancy is
 visible by comparing `effective` against `resolved`. Absent ⇒ `effective` is null.
+
+`host.cpu_model` *(NEW, host-observability-2, optional, additive)* — the CPU marketing name
+(`/proc/cpuinfo` `model name`). `gpus[].render_node` *(NEW, host-observability-2, optional,
+additive)* — the **stable** render-node device path for this GPU, in the reboot-safe by-path
+form constructed from the device's PCI address
+(`/dev/dri/by-path/pci-<addr>-render`). This string is valid as a `render_node` setting value
+(the agent canonicalises by-path values, with a sysfs PCI-address fallback for containers that
+lack `/dev/dri/by-path`), so the admin UI can offer the reported values as a picker instead of
+free-text device paths. Absent ⇒ null on the API.
 
 `encode_slots_total` is the concurrent encode-session cap (the NVENC/VCN limit — architecture
 §"Resource governance"). At N=1 this is one GPU with generous slots; the field is mandatory so
