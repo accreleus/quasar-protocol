@@ -284,6 +284,8 @@ capacity (CPU/mem) lives here; GPU capacity is per-row in `gpus`.
 | `cpu_model` | `TEXT` NULL | *(host-observability-2, additive)* last-reported CPU marketing name. |
 | `storage` | `JSONB` NULL | *(host-observability, additive)* last-reported storage volumes (`agent-api.md` `capacity.host.storage`): array of `{label, path, total_mb, available_mb}`. |
 | `effective_settings` | `JSONB` NULL | *(host-observability, additive)* last-reported resolved runtime settings (`agent-api.md` `capacity.effective_settings`): string map, restart-class knobs latched. |
+| `capacity_detection` | `TEXT` NOT NULL DEFAULT `'unavailable'` | `ok \| unavailable \| failed`; scheduler requires `ok`. |
+| `capacity_reason` | `TEXT` NULL | bounded sanitized diagnostic for unavailable/failed detection. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
 ### Host status state machine (P3-01)
@@ -340,6 +342,7 @@ reservations held by active sessions), so reservations cannot drift from session
 | `vram_mb_total` | `INT` NOT NULL | reported capacity. |
 | `encode_slots_total` | `INT` NOT NULL | concurrent encode-session cap (NVENC/VCN limit). |
 | `render_node` | `TEXT` NULL | *(host-observability-2, additive)* stable by-path render-node device path (`agent-api.md` `gpus[].render_node`). |
+| `reported` | `BOOLEAN` NOT NULL DEFAULT `true` | false retains session history but is never schedulable or shown as current capacity. |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | |
 
 **Availability (derived, not stored):**

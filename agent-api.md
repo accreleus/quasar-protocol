@@ -138,6 +138,8 @@ the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
     ]
   },
   "effective_settings": { "encoder": "nvenc", "render_node": "/dev/dri/renderD128" },
+  "gpu_detection": "ok",
+  "gpu_detection_reason": null,
   "gpus": [
     { "index": 0, "vendor": "amd", "model": "Radeon Pro V520",
       "vram_mb_total": 16384, "encode_slots_total": 2,
@@ -156,6 +158,12 @@ the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
   }
 }
 ```
+`gpu_detection` *(optional, additive)* is `ok`, `unavailable`, or `failed`. Only `ok`
+capacity is schedulable. Unknown capacity is reported as `gpus: []`; it is never replaced with
+fabricated VRAM or encode slots. `gpu_detection_reason` is an optional sanitized diagnostic capped
+at 512 bytes. Older agents are compatible: a non-empty GPU list implies `ok`, while an empty list
+implies `unavailable`. Synthetic capacity is permitted only behind an explicit development flag.
+
 `console_capabilities` *(NEW, CM-01, optional, additive)* enumerates what the host can do in
 console mode — DRM display connectors, host audio sinks (ALSA/pipewire), and physical input
 devices — so the admin console-config UI can populate its selectors instead of guessing device

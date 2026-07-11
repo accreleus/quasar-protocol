@@ -1219,7 +1219,7 @@ components:
     Host:
       type: object
       # crud/handler.go hostResp — every key is always serialized (nullable ones present-but-null).
-      required: [id, node_name, status, agent_version, cpu_cores, mem_mb, cpu_model, last_registered_at, last_heartbeat_at, storage]
+      required: [id, node_name, status, agent_version, cpu_cores, mem_mb, cpu_model, capacity_detection, capacity_reason, last_registered_at, last_heartbeat_at, storage]
       properties:
         id: { type: string, format: uuid }
         node_name: { type: string }
@@ -1229,6 +1229,8 @@ components:
         mem_mb: { type: [integer, "null"] }
         # host-observability-2: agent-reported CPU marketing name; null until reported.
         cpu_model: { type: [string, "null"] }
+        capacity_detection: { type: string, enum: [ok, unavailable, failed], description: "Fresh GPU capacity detection state; only ok is schedulable." }
+        capacity_reason: { type: [string, "null"], maxLength: 512, description: "Bounded diagnostic when capacity is unavailable or failed." }
         last_registered_at: { type: [string, "null"], format: date-time }
         last_heartbeat_at: { type: [string, "null"], format: date-time }
         storage:
