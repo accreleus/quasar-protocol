@@ -350,13 +350,25 @@ reserve→prepare→go-live steps are real (P1-6), even though at N=1 `start` ma
     "width": 1920, "height": 1080, "fps": 60,
     "bitrate_kbps": 15000, "h264_profile": "constrained-baseline"
   },
-  "resources": { "vram_mb": 1024, "encode_slots": 1 }
+  "resources": { "vram_mb": 1024, "encode_slots": 1 },
+  "video_topology": "stream_only"
 }
 ```
 `app` mirrors `apps.runtime_spec`; `stream` mirrors the `sessions` launch-param columns;
 `resources` mirrors the reserved amounts. The agent must not exceed `resources` (it's the
 budget the control plane reserved). `gpu_index` maps to the agent's local GPU enumeration
 (same index it reported in `capacity`).
+
+`video_topology` is an additive per-session output plan:
+
+- `stream_only` (default when omitted): encode plus WebRTC; no local display output.
+- `local_only`: local display/audio/input only; the control plane reserves zero encode slots
+  and creates no signaling token, and the agent must not construct an encoder, RTP, WebRTC, or
+  streamed-audio pipeline.
+- `dual_output`: local display plus the normal WebRTC stream from the same source.
+
+The field is assignment-scoped. `console_config.enabled` advertises/configures host console
+capability but does not by itself mirror ordinary browser sessions to a physical display.
 
 > *(AS10-04, additive)* The `stream` block may carry an optional **`abr_floor_kbps`: int**
 > (kbit/s, omitted ⇒ `0`). When the session was launched from a stream profile (AS10-01) the
@@ -371,9 +383,10 @@ budget the control plane reserved). `gpu_index` maps to the agent's local GPU en
 ```json
 { "type": "session_start", "id": "<command-id>", "session_id": "<uuid>" }
 ```
-The agent builds compositor→encode→`webrtcbin` (the graduated P1-5 pipeline), then reports
+The agent realizes the assigned `video_topology`, then reports
 `session_state: starting` → `running`. Once `running`, the agent's `webrtcbin` is the offerer and
-the signaling relay (below) can carry the offer to the client.
+the signaling relay (below) can carry the offer to the client for `stream_only`/`dual_output`.
+For `local_only`, `running` means the local display pipeline reached PLAYING; no offer is emitted.
 
 ### `session_stop` — teardown + release
 ```json

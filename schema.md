@@ -644,6 +644,11 @@ spike's `QUASAR_LOCAL_DISPLAY` env hardcode.
 
 Migration: `0022_console_config.up.sql` — `CREATE TABLE console_config (...)`. Down drops it.
 
+Console capability is host-scoped, but output topology is session-scoped through
+`session_assign.video_topology` (`stream_only` | `local_only` | `dual_output`). This prevents an
+enabled console host from mirroring unrelated browser sessions. A local-only console launch has
+zero reserved encode slots and no signaling-token row; dual-output retains both reservations.
+
 **The `config` object (resolved shape + defaults).** Console-mode is **local-only by
 default** (`stream:false`) and **off by default** (`enabled:false`):
 ```json
