@@ -1705,13 +1705,18 @@ components:
               label: { type: string }
     DrmOutputCapability:
       type: object
-      required: [id, card, render_node, connector, connected, modes]
+      required: [id, card, render_node, connector, connected, active_mode, modes]
       properties:
         id: { type: string, description: "Stable card-scoped output id, e.g. card1:DP-4." }
         card: { type: string }
         render_node: { type: [string, "null"] }
         connector: { type: string }
         connected: { type: boolean }
+        active_mode:
+          description: "Mode currently programmed on the connector CRTC, or null when inactive."
+          oneOf:
+            - { $ref: "#/components/schemas/DrmModeCapability" }
+            - { type: "null" }
         modes: { type: array, items: { $ref: "#/components/schemas/DrmModeCapability" } }
     DrmModeCapability:
       type: object
