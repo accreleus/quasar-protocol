@@ -448,6 +448,18 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
+  /v1/sessions/{id}/signaling-token:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [sessions]
+      summary: Mint fresh signaling coordinates for the same live session.
+      responses:
+        "201":
+          description: Independent single-use token created.
+          content: { application/json: { schema: { $ref: "#/components/schemas/SignalingEnvelope" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /v1/sessions/{id}/swap:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
@@ -1208,13 +1220,19 @@ components:
       required: [session, signaling]
       properties:
         session: { $ref: "#/components/schemas/Session" }
-        signaling:
-          type: object
-          required: [url, token, expires_at]
-          properties:
-            url: { type: string, description: "wss://<host>/v1/signal" }
-            token: { type: string, description: "Single-use, short-TTL, plaintext this response only." }
-            expires_at: { type: string, format: date-time }
+        signaling: { $ref: "#/components/schemas/SignalingCoords" }
+    SignalingCoords:
+      type: object
+      required: [url, token, expires_at]
+      properties:
+        url: { type: string, description: "wss://<host>/v1/signal" }
+        token: { type: string, description: "Single-use, short-TTL, plaintext this response only." }
+        expires_at: { type: string, format: date-time }
+    SignalingEnvelope:
+      type: object
+      required: [signaling]
+      properties:
+        signaling: { $ref: "#/components/schemas/SignalingCoords" }
 
     Host:
       type: object
