@@ -1670,6 +1670,10 @@ components:
         connectors:
           type: array
           items: { type: string }
+        outputs:
+          type: array
+          description: "Typed per-card DRM connector and mode inventory. Additive; absent from older agents."
+          items: { $ref: "#/components/schemas/DrmOutputCapability" }
         audio_sinks:
           type: array
           items:
@@ -1686,6 +1690,29 @@ components:
             properties:
               path: { type: string }
               label: { type: string }
+    DrmOutputCapability:
+      type: object
+      required: [id, card, render_node, connector, connected, modes]
+      properties:
+        id: { type: string, description: "Stable card-scoped output id, e.g. card1:DP-4." }
+        card: { type: string }
+        render_node: { type: [string, "null"] }
+        connector: { type: string }
+        connected: { type: boolean }
+        modes: { type: array, items: { $ref: "#/components/schemas/DrmModeCapability" } }
+    DrmModeCapability:
+      type: object
+      required: [name, width, height, refresh_millihz, preferred, interlaced, clock_khz, htotal, vtotal]
+      properties:
+        name: { type: string }
+        width: { type: integer }
+        height: { type: integer }
+        refresh_millihz: { type: integer, description: "Millihertz derived from exact DRM timing totals." }
+        preferred: { type: boolean }
+        interlaced: { type: boolean }
+        clock_khz: { type: integer }
+        htotal: { type: integer }
+        vtotal: { type: integer }
     ConsoleConfigEnvelope:
       type: object
       required: [config, capabilities]

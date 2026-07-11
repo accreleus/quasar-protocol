@@ -649,6 +649,10 @@ Console capability is host-scoped, but output topology is session-scoped through
 enabled console host from mirroring unrelated browser sessions. A local-only console launch has
 zero reserved encode slots and no signaling-token row; dual-output retains both reservations.
 
+Wave 3.2 adds `console_capabilities.outputs`, a typed per-card DRM connector/mode inventory. It
+preserves card/render association and exact millihertz timing identity rather than flattening
+connector names. The existing `connectors` array remains an additive compatibility projection.
+
 **The `config` object (resolved shape + defaults).** Console-mode is **local-only by
 default** (`stream:false`) and **off by default** (`enabled:false`):
 ```json

@@ -490,6 +490,11 @@ The control plane sends `config_update`:
   session build, and live changes to `auto_start_on_display`/`auto_connect_controller` re-arm the
   agent's hotplug watcher on receipt — no agent restart. `stream:false` (local-only) means the
   session's encode/`webrtcbin` leg is simply not built.
+- **`capacity.console_capabilities.outputs`** *(Wave 3.2, optional, additive)* is the typed DRM
+  inventory. Each output is card-scoped (`id`, `card`, associated `render_node`, connector and
+  connection state) and contains exact DRM mode timing identity (`width`, `height`, integer
+  `refresh_millihz`, preferred/interlaced flags, pixel clock and totals). Legacy
+  `connectors: string[]` remains for hotplug and older-control-plane compatibility.
 - **`settings`** is the host's **sparse override map** — only admin-set knobs appear. Keys absent
   from the map are left at the agent's env baseline. A nullable knob that an admin clears is
   simply omitted (not sent as `null`). The agent recomputes `RuntimeSettings::baseline()` (env)
