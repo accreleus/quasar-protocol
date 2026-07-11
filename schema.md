@@ -342,6 +342,7 @@ reservations held by active sessions), so reservations cannot drift from session
 | `vram_mb_total` | `INT` NOT NULL | reported capacity. |
 | `encode_slots_total` | `INT` NOT NULL | concurrent encode-session cap (NVENC/VCN limit). |
 | `render_node` | `TEXT` NULL | *(host-observability-2, additive)* stable by-path render-node device path (`agent-api.md` `gpus[].render_node`). |
+| `device_path` | `TEXT` NULL | Additive kernel-node form for the same render identity (for example `/dev/dri/renderD128`). |
 | `reported` | `BOOLEAN` NOT NULL DEFAULT `true` | false retains session history but is never schedulable or shown as current capacity. |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | |
 

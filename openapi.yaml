@@ -1356,7 +1356,7 @@ components:
     GPUAvailability:
       type: object
       description: "One GPU's capacity from GET /v1/hosts/{id}/gpus."
-      required: [gpu_id, gpu_index, vendor, model, vram_mb_total, vram_mb_reserved, slots_total, slots_reserved, active_sessions, render_node]
+      required: [gpu_id, gpu_index, vendor, model, vram_mb_total, vram_mb_reserved, slots_total, slots_reserved, active_sessions, render_node, device_path]
       properties:
         gpu_id: { type: string }
         gpu_index: { type: integer }
@@ -1370,6 +1370,7 @@ components:
         # host-observability-2: stable by-path render-node device path for this GPU
         # (valid as a render_node setting value); null until reported.
         render_node: { type: [string, "null"] }
+        device_path: { type: [string, "null"], description: "Kernel device-node form matching render_node (for example /dev/dri/renderD128); null until reported." }
     GPUsResponse:
       type: object
       required: [items]

@@ -143,7 +143,8 @@ the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
   "gpus": [
     { "index": 0, "vendor": "amd", "model": "Radeon Pro V520",
       "vram_mb_total": 16384, "encode_slots_total": 2,
-      "render_node": "/dev/dri/by-path/pci-0000:04:00.0-render" }
+      "render_node": "/dev/dri/by-path/pci-0000:04:00.0-render",
+      "device_path": "/dev/dri/renderD128" }
   ],
   "console_capabilities": {
     "connectors": ["DP-4", "HDMI-A-1"],
@@ -204,6 +205,9 @@ form constructed from the device's PCI address
 (the agent canonicalises by-path values, with a sysfs PCI-address fallback for containers that
 lack `/dev/dri/by-path`), so the admin UI can offer the reported values as a picker instead of
 free-text device paths. Absent ⇒ null on the API.
+`gpus[].device_path` *(optional, additive)* is the kernel-node form for the same identity
+(for example `/dev/dri/renderD128`), allowing either accepted render-node configuration form
+to be matched without guessing from enumeration order.
 
 `encode_slots_total` is the concurrent encode-session cap (the NVENC/VCN limit — architecture
 §"Resource governance"). At N=1 this is one GPU with generous slots; the field is mandatory so
