@@ -1570,7 +1570,7 @@ components:
         present_interval_sd_ms: { type: number }
         present_interval_p95_ms: { type: number }
         playout_target_ms: { type: number }
-        rvfc_capture_time_available: { type: integer, description: "RVFC captureTime yielded a validated sample this session (0/1); not proof of abs-capture-time RTP negotiation." }
+        rvfc_capture_time_available: { type: integer, description: "RVFC captureTime has a current validated sample (0/1); stale no-frame periods reset it. Not proof of abs-capture-time RTP negotiation." }
         abs_capture_time_negotiated: { type: integer, description: "Strict abs-capture-time RTP-extension negotiation evidence (0 until SDP/RTP wire proof exists)." }
         glass_to_glass_ms: { type: number }
         encode_ms: { type: number }
@@ -1782,7 +1782,7 @@ components:
                 unmeasured: { type: boolean, enum: [true] }
         series:
           type: object
-          description: "Named metric series; keys include encoder.encode_ms, encoder.fps, abr.setpoint_kbps, transport.rtt_ms, transport.packets_lost, client.present_interval_sd_ms, client.glass_to_glass_ms, plus arbitrary additional series names."
+          description: "Named metric series; keys include encoder.encode_ms, encoder.fps, abr.setpoint_kbps, transport.rtt_ms, transport.packets_lost, client.present_interval_sd_ms, client.rvfc_capture_time_available, and qualified client.glass_to_glass_ms. Unmarked historical glass_to_glass values are omitted."
           additionalProperties:
             type: array
             items: { $ref: "#/components/schemas/TraceSeriesPoint" }
