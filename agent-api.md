@@ -264,6 +264,17 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   "fps": 59.8,
   "bitrate_kbps": 14820,
   "encode_ms": 4.6,
+  "encode_ms_p50": 4.4,
+  "encode_ms_p95": 5.2,
+  "source_fps": 60.0,
+  "compositor_pts_delta_p50_ms": 16.67,
+  "compositor_pts_delta_p95_ms": 16.72,
+  "interpipe_queue_level_max": 1,
+  "interpipe_queue_dwell_p50_ms": 0.08,
+  "interpipe_queue_dwell_p95_ms": 0.16,
+  "interpipe_queue_drops": 0,
+  "rtp_fps": 60.0,
+  "rtp_bitrate_kbps": 15040,
   "frames_encoded": 299,
   "frames_dropped": 1
 }
@@ -277,6 +288,10 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   The exact `metrics` JSONB keys are enumerated in `schema.md`'s field dictionary — implementers
   use those names verbatim. Glass-to-glass latency is measured **always-on, browser-side** via the
   abs-capture-time RTP header extension (`control-api.md`), not by a host-side overlay.
+- **Correlated stage-budget fields (Wave 4.1):** `source_fps` and compositor PTS-delta
+  p50/p95; maximum interpipe queue level, queue dwell p50/p95 and drop count; encode-time
+  p50/p95; and RTP access-unit fps plus wire bitrate. Optional percentile fields are omitted
+  in an empty window. Counters and maxima are per-window, bounded, and observational only.
 - The control plane writes a `session_metrics` row with `source='agent'` (`schema.md`).
   A malformed or unparsable message is dropped without dropping the connection. A sample whose
   `session_id` is not currently `running` on this host (e.g. it arrived as the session went

@@ -458,11 +458,16 @@ read) and the per-source ordering cheaply.
 
 **`metrics` field dictionary.** All keys optional (a reporter sends what it has); units are in
 the key suffix (`_ms`, `_kbps`). The `source` column scopes which set applies.
-- **`source='agent'` (host-observable):** `fps`, `bitrate_kbps`, `encode_ms`, `frames_encoded`,
-  `frames_dropped` (encoder-side). The admin UI joins this always-on `encode_ms` as the encode
-  bar of the glass-to-glass timeline (the browser cannot measure host encode directly).
+- **`source='agent'` (host-observable):** `fps`, `bitrate_kbps`, `encode_ms`,
+  `encode_ms_p50`, `encode_ms_p95`, `frames_encoded`, `frames_dropped` (encoder-side),
+  `source_fps`, `compositor_pts_delta_p50_ms`, `compositor_pts_delta_p95_ms`,
+  `interpipe_queue_level_max`, `interpipe_queue_dwell_p50_ms`,
+  `interpipe_queue_dwell_p95_ms`, `interpipe_queue_drops`, `rtp_fps`, and
+  `rtp_bitrate_kbps`. The admin UI joins these bounded per-window stage signals as the
+  host-side portion of the glass-to-glass timeline.
 - **`source='browser'` (`getStats()`-derived):** `fps`, `bitrate_kbps`, `rtt_ms`,
   `jitter_buffer_ms`, `decode_ms`, `packets_lost`, `frames_dropped` (receiver-side),
+  `freeze_count`, `display_refresh_hz`,
   the **presentation-pacing** keys (`#108`, always-on, `requestVideoFrameCallback`-derived):
   `present_fps` (distinct frames presented to the display per second),
   `present_interval_sd_ms` (σ of frame-to-frame *presentation* intervals — the headline
