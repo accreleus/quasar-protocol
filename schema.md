@@ -460,7 +460,7 @@ read) and the per-source ordering cheaply.
 the key suffix (`_ms`, `_kbps`). The `source` column scopes which set applies.
 - **`source='agent'` (host-observable):** `fps`, `bitrate_kbps`, `encode_ms`,
   `encode_ms_p50`, `encode_ms_p95`, `frames_encoded`, `frames_dropped` (encoder-side),
-  `source_fps`, `compositor_pts_delta_p50_ms`, `compositor_pts_delta_p95_ms`,
+  `source_fps`, `compositor_fps`, `compositor_pts_delta_p50_ms`, `compositor_pts_delta_p95_ms`,
   `interpipe_queue_level_max`, `interpipe_queue_dwell_p50_ms`,
   `interpipe_queue_dwell_p95_ms`, `interpipe_queue_drops`, `rtp_fps`, and
   `rtp_bitrate_kbps`. The admin UI joins these bounded per-window stage signals as the
