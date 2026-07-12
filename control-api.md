@@ -535,7 +535,7 @@ is the single hinge to `signaling.md`.
   rule) — in all of which **no session row persists** (quota/availability is checked before the
   row is committed, or the row is rolled back):
   - **`409 session_quota_exceeded`** — the caller already holds `max_concurrent_sessions` active
-    sessions (`state ∈ {pending, assigned, starting, running}`).
+    sessions (`state ∈ {pending, assigned, starting, running, stopping}`).
   - **`503 no_host_available`** — no online host has a GPU that could serve the request.
   - **`503 capacity_exhausted`** — a matching GPU is online but its available encode slots / VRAM
     (totals − active reservations) cannot satisfy the request right now; retryable once a session
@@ -638,7 +638,7 @@ field; a native client (Phase 9) must send `client_type:"native"` to receive the
 A `POST /v1/sessions` launch is admitted only if **both** gates pass, evaluated in this order:
 
 1. **Per-user session quota.** Let `active` = the caller's sessions in `state ∈ {pending,
-   assigned, starting, running}` (the non-terminal, pre-teardown set — see `schema.md`
+   assigned, starting, running, stopping}` (the non-terminal set — see `schema.md`
    `users.max_concurrent_sessions`). If `count(active) ≥ user.max_concurrent_sessions`, reject
    with **`409 session_quota_exceeded`** and persist no row. A `max_concurrent_sessions` of `0`
    blocks every launch for that user. This gate is per-user and independent of host capacity.
@@ -647,7 +647,7 @@ A `POST /v1/sessions` launch is admitted only if **both** gates pass, evaluated 
    `requested_encode_slots = apps.default_encode_slots`, `requested_vram_mb = apps.default_vram_mb`
    (clients never set these; the `stream` block carries resolution/bitrate, not resource
    reservations). A GPU admits the launch iff, with availability derived per `schema.md` §gpus
-   (`total − Σ reservations of sessions in {assigned, starting, running}`):
+   (`total − Σ reservations of sessions in {assigned, starting, running, stopping}`):
    ```
    encode_slots_available ≥ requested_encode_slots   AND   vram_available ≥ requested_vram_mb
    ```
@@ -1490,7 +1490,7 @@ as a `config_update` message (`agent-api.md`).
   be set to `null` explicitly — this is a valid value, not a deletion marker for those knobs;
   the control plane distinguishes "absent from overrides" from "present as null".
 - **Restart-class knobs with live sessions.** When any restart-class knob is changed and the
-  host has one or more sessions in `state ∈ {assigned, starting, running}`:
+  host has one or more sessions in `state ∈ {assigned, starting, running, stopping}`:
   - If `restart_confirm` is absent or `false` → **`409 restart_required`** with body
     `{ "error": { "code": "restart_required", "message": "...", "live_sessions": N } }`.
     No override is persisted and the agent is not contacted.

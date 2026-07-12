@@ -156,7 +156,7 @@ Accounts. Login is by email; `username` is the display handle.
 | `password_hash` | `TEXT` NOT NULL | full argon2id PHC string (`$argon2id$v=19$m=...,t=...,p=...$salt$hash`); params live in the string. Never the password. |
 | `role` | `TEXT` NOT NULL DEFAULT `'user'` | `CHECK (role IN ('user','admin'))`. Multi-user authz (Phase 2) and admin CRUD (P1-3) need this from the start. |
 | `disabled_at` | `TIMESTAMPTZ` NULL | non-null = account deactivated; login + token mint refused. |
-| `max_concurrent_sessions` | `INT` NOT NULL DEFAULT `3` | *(P2-01, migration 0002)* per-user cap on simultaneously-active sessions, admin-settable. `CHECK (max_concurrent_sessions >= 0)`; `0` blocks all launches for the user (without disabling the account). Enforced at launch (`control-api.md` `session_quota_exceeded`); "active" = `state ∈ {pending, assigned, starting, running}`. |
+| `max_concurrent_sessions` | `INT` NOT NULL DEFAULT `3` | *(P2-01, migration 0002)* per-user cap on simultaneously-active sessions, admin-settable. `CHECK (max_concurrent_sessions >= 0)`; `0` blocks all launches for the user (without disabling the account). Enforced at launch (`control-api.md` `session_quota_exceeded`); "active" = `state ∈ {pending, assigned, starting, running, stopping}`. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 | `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
@@ -168,9 +168,10 @@ Accounts. Login is by email; `username` is the display handle.
 > busy host is the **per-GPU capacity governor** (encode slots / VRAM), not this per-user
 > fairness cap. The quota's "active" set **includes `pending`** (a not-yet-placed launch counts
 > against you, so a user cannot evade the cap by spamming launches faster than the scheduler
-> places them) and **excludes `stopping`** and the terminal states (a session on its way out
-> frees the user's quota immediately). Note this set differs from the **reservation**-holding
-> set `{assigned, starting, running}` used for GPU availability — quota counts the in-flight
+> places them) and **includes `stopping`**: teardown still owns the app home and GPU resources,
+> so replacement launch must wait for the terminal callback. Terminal states are excluded.
+> This set differs from the **reservation**-holding set
+> `{assigned, starting, running, stopping}` used for GPU availability — quota counts the in-flight
 > `pending` row, GPU reservation does not (nothing is reserved until `assigned`).
 
 ## `auth_tokens`
@@ -345,9 +346,9 @@ reservations held by active sessions), so reservations cannot drift from session
 **Availability (derived, not stored):**
 ```sql
 -- VRAM free on a GPU:
-vram_mb_total  - COALESCE(SUM(s.reserved_vram_mb)     FILTER (WHERE s.gpu_id = g.id AND s.state IN ('assigned','starting','running')), 0)
+vram_mb_total  - COALESCE(SUM(s.reserved_vram_mb)     FILTER (WHERE s.gpu_id = g.id AND s.state IN ('assigned','starting','running','stopping')), 0)
 -- encode slots free on a GPU:
-encode_slots_total - COALESCE(SUM(s.reserved_encode_slots) FILTER (WHERE s.gpu_id = g.id AND s.state IN ('assigned','starting','running')), 0)
+encode_slots_total - COALESCE(SUM(s.reserved_encode_slots) FILTER (WHERE s.gpu_id = g.id AND s.state IN ('assigned','starting','running','stopping')), 0)
 ```
 The scheduler reserves and checks this transactionally (`SELECT ... FOR UPDATE` on the `gpus`
 row, see P1-8) so two launches cannot oversubscribe. At N=1 the check always passes; the code
@@ -387,7 +388,7 @@ signaling (P1-D).
 | `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | bumped on every state change. |
 
 Indexes: `(user_id, created_at DESC)` for a user's session list; `(host_id)` and `(gpu_id)`
-for the availability sums; partial index `(gpu_id) WHERE state IN ('assigned','starting','running')`
+for the availability sums; partial index `(gpu_id) WHERE state IN ('assigned','starting','running','stopping')`
 to make the reservation sum cheap.
 
 ## `session_tokens`
@@ -833,7 +834,7 @@ states.
    which a session cannot fail; a stuck session is a bug, not a designed state.
 2. **Every terminal transition releases the reservation in the same transaction** that writes the
    terminal state. The release is unconditional: reservation is *held* only while
-   `state ∈ {assigned, starting, running}` (exactly the GPU-availability-sum filter), so on
+   `state ∈ {assigned, starting, running, stopping}` (exactly the GPU-availability-sum filter), so on
    `pending → failed` the release is a no-op (nothing was reserved) and on every other path it
    returns the held VRAM + encode slots. There is **no terminal path that leaves a reservation
    dangling.**
