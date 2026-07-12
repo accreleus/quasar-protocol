@@ -1570,6 +1570,8 @@ components:
         present_interval_sd_ms: { type: number }
         present_interval_p95_ms: { type: number }
         playout_target_ms: { type: number }
+        rvfc_capture_time_available: { type: integer, description: "RVFC captureTime yielded a validated sample this session (0/1); not proof of abs-capture-time RTP negotiation." }
+        abs_capture_time_negotiated: { type: integer, description: "Strict abs-capture-time RTP-extension negotiation evidence (0 until SDP/RTP wire proof exists)." }
         glass_to_glass_ms: { type: number }
         encode_ms: { type: number }
         network_pacing_ms: { type: number }

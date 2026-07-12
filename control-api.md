@@ -826,7 +826,9 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
                    // presentation pacing (#108, always-on; schema.md dictionary):
                    "present_fps": 59.8, "present_interval_sd_ms": 2.9,
                    "present_interval_p95_ms": 18.0, "playout_target_ms": 100,
-                   // glass-to-glass budget (always-on via the abs-capture-time RTP extension):
+                   // RVFC captureTime capability (not abs-capture-time wire proof):
+                   "rvfc_capture_time_available": 1, "abs_capture_time_negotiated": 0,
+                   // RVFC capture-to-display estimate (legacy key name retained):
                    "glass_to_glass_ms": 71, "network_pacing_ms": 7.5,
                    "decode_display_ms": 30.9 } }
   ] }
@@ -834,10 +836,12 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
 ```
 - Each sample becomes a `session_metrics` row with `source =` the request's `client`
   (default `'browser'`; `'native'` for the native client — P9-01; an unknown `client` value
-  is rejected, not silently coerced). The glass-to-glass keys
-  (`glass_to_glass_ms`, `network_pacing_ms`, `decode_display_ms`) are **always-on** — glass-to-
-  glass is measured from the `abs-capture-time` RTP header extension (no per-frame overlay,
-  hardware-independent). *(Supersedes the removed deep-trace toggle / pixel-overlay instrument.)*
+  is rejected, not silently coerced). `rvfc_capture_time_available` records whether this browser
+  yielded a valid RVFC `captureTime` sample; `abs_capture_time_negotiated` remains `0` until
+  SDP/RTP-extension wire proof exists. The legacy staged keys (`glass_to_glass_ms`,
+  `network_pacing_ms`, `decode_display_ms`) are emitted only after valid RVFC capture-to-display
+  samples. They are not a strict abs-capture-time measurement. *(Supersedes the removed
+  deep-trace toggle / pixel-overlay instrument.)*
 - Best-effort: a malformed sample is dropped, not fataled. Accepting telemetry never affects
   session state.
 

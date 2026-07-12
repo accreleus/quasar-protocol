@@ -476,11 +476,12 @@ the key suffix (`_ms`, `_kbps`). The `source` column scopes which set applies.
   rising sharply when the playout buffer is too tight to keep a frame ready for every vsync),
   `present_interval_p95_ms`, and `playout_target_ms` (the receiver jitter-buffer/playout target
   the sample was measured under, so a stored σ correlates with its setting); and the
-  **always-on staged glass-to-glass budget**, derived browser-side from the abs-capture-time RTP
-  header extension (`control-api.md`) plus `getStats()`, one key per receive-side Phase-0 stage
-  (`docs/completed/phase0-latency-report.md`): `glass_to_glass_ms` (total, host-capture→present),
-  **`network_pacing_ms`**, **`jitter_buffer_ms`**, and **`decode_display_ms`**. These keys are the
-  contract for the timeline the admin UI reconstructs (`P4-05`/`P4-06`), joining the agent
+  **RVFC capture-to-display estimate** when a valid `captureTime` exists. The capability marker
+  `rvfc_capture_time_available` is `1` only after such a valid sample; strict
+  `abs_capture_time_negotiated` remains `0` until SDP/RTP-extension wire proof lands. The legacy
+  staged keys (`glass_to_glass_ms`, **`network_pacing_ms`**, **`jitter_buffer_ms`**, and
+  **`decode_display_ms`**) must not be interpreted as strict abs-capture-time G2G. They form the
+  timeline the admin UI reconstructs (`P4-05`/`P4-06`), joining the agent
   `encode_ms` (above) as the host-encode bar; the budget closes as `glass_to_glass_ms ≈ encode_ms +
   network_pacing_ms + jitter_buffer_ms + decode_display_ms` (`network_pacing_ms` is `rtt_ms/2` on a
   clean link, or the residual when `rtt` is untrustworthy — `P4-04` documents which, per the

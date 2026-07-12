@@ -287,8 +287,9 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   non-overlapping. These are the always-on signal the design promised — collectible with **no
   overlay stamping**, so the default hot path is unchanged (the Phase-0 invariant; see `P4-03`).
   The exact `metrics` JSONB keys are enumerated in `schema.md`'s field dictionary — implementers
-  use those names verbatim. Glass-to-glass latency is measured **always-on, browser-side** via the
-  abs-capture-time RTP header extension (`control-api.md`), not by a host-side overlay.
+  use those names verbatim. Browser-side capture-to-display telemetry uses RVFC `captureTime`
+  when available; it is not strict abs-capture-time RTP-extension evidence until the browser
+  records SDP/RTP wire proof (`control-api.md`). No host-side overlay is used.
 - **Correlated stage-budget fields (Wave 4.1):** `source_fps` is the delta-sampled cadence of
   new buffers committed by the mapped fullscreen application's top-level Wayland surface;
   `compositor_fps` and compositor PTS-delta p50/p95 measure frames emitted by
