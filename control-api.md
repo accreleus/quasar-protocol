@@ -837,8 +837,9 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
 - Each sample becomes a `session_metrics` row with `source =` the request's `client`
   (default `'browser'`; `'native'` for the native client — P9-01; an unknown `client` value
   is rejected, not silently coerced). `rvfc_capture_time_available` records whether this browser
-  yielded a valid RVFC `captureTime` sample; it returns to `0` and staged keys stop when RVFC
-  frames become stale. `abs_capture_time_negotiated` remains `0` until SDP/RTP-extension wire
+  yielded a valid RVFC `captureTime` sample; it returns to `0` and staged keys stop when valid
+  captureTime becomes stale, even if RVFC callbacks continue with null/invalid metadata.
+  `abs_capture_time_negotiated` remains `0` until SDP/RTP-extension wire
   proof exists. The legacy staged keys (`glass_to_glass_ms`, `network_pacing_ms`,
   `decode_display_ms`) are emitted only after valid, fresh RVFC capture-to-display samples. They
   are not a strict abs-capture-time measurement. *(Supersedes the removed

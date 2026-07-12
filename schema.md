@@ -481,8 +481,9 @@ the key suffix (`_ms`, `_kbps`). The `source` column scopes which set applies.
   `abs_capture_time_negotiated` remains `0` until SDP/RTP-extension wire proof lands. The legacy
   staged keys (`glass_to_glass_ms`, **`network_pacing_ms`**, **`jitter_buffer_ms`**, and
   **`decode_display_ms`**) must not be interpreted as strict abs-capture-time G2G. They form the
-  qualified browser-only bar when `rvfc_capture_time_available=1`; no-frame staleness clears that
-  marker and stops the staged keys. `decode_display_ms` is an **unattributed residual**, so the
+  qualified browser-only bar when `rvfc_capture_time_available=1`; valid-captureTime staleness
+  clears that marker and stops the staged keys even if null/invalid RVFC callbacks continue.
+  `decode_display_ms` is an **unattributed residual**, so the
   bar closes as `network_pacing_ms + jitter_buffer_ms + decode_display_ms ≤ glass_to_glass_ms`.
   Agent `encode_ms` is independently sampled and must not be added without correlated trace proof.
 - **`source='native'` (P9-01, the native client via `client: "native"`):** the same
