@@ -1131,6 +1131,7 @@ components:
         name: { type: string }
         description: { type: string }
         cover_url: { type: [string, "null"] }
+        kind: { type: string, enum: [app, game, desktop], description: "P-APP-KIND (additive): library-presentation classification; absent => app." }
         default_width: { type: integer }
         default_height: { type: integer }
         default_fps: { type: integer }
