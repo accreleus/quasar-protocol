@@ -223,7 +223,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `GET /v1/me/storage` | user (self) | *(P5-01)* the caller's own per-app storage usage |
 | `POST /v1/me/password` | user (self) | *(CP-01)* change the caller's own password; subject is the bearer identity, never a body field. Revokes all active tokens on success — client must re-authenticate |
-| `GET /v1/admin/settings` | **admin** | *(LP-SEC-01)* read instance settings (`registration_mode`, …) |
+| `GET /v1/admin/settings` | **admin** | *(LP-SEC-01)* read instance settings (`registration_mode`, `storage_provider`, …) |
 | `PATCH /v1/admin/settings` | **admin** | *(LP-SEC-01)* update instance settings — how invites are enabled/disabled from the UI |
 | `POST /v1/admin/invites` | **admin** | *(LP-SEC-01)* mint an invite; plaintext code + magic link returned once |
 | `GET /v1/admin/invites` | **admin** | *(LP-SEC-01)* list minted invites (never plaintext) |
@@ -365,7 +365,7 @@ existing token-revocation path. Gated by `RequireAuth` like the other `/v1/me` r
 ## Account security — invites + device management (LP-SEC-01)
 
 > **Amendment — LP-SEC-01 (W1 security wave), additive, requires sign-off.** Adds the admin
-> **instance-settings** surface (`GET/PATCH /v1/admin/settings`) exposing `registration_mode`
+> **instance-settings** surface (`GET/PATCH /v1/admin/settings`) exposing `registration_mode` and *(storage-config amendment, additive)* `storage_provider` (`auto`|`local`|`volume`, managed-home backing store — see `schema.md §instance_settings`)
 > (`closed` **default** | `invite_only` | `open`) so the invitation system is **off by default
 > and turned on by an admin in the UI** (persisted in `schema.md` `instance_settings`; the
 > `REGISTRATION_MODE` env only seeds first boot); the admin **invite** surface

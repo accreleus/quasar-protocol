@@ -574,6 +574,7 @@ paths:
               type: object
               properties:
                 registration_mode: { $ref: "#/components/schemas/RegistrationMode" }
+                storage_provider: { $ref: "#/components/schemas/StorageProvider" }
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SettingsEnvelope" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
@@ -1342,15 +1343,21 @@ components:
           type: boolean
           description: "Required true to apply a restart-class knob while the host has live sessions."
 
+    StorageProvider:
+      type: string
+      enum: [auto, local, volume]
+      description: "Managed-home backing store: auto = local when the session host has an effective home root, volume otherwise. Affects new homes only."
+
     SettingsEnvelope:
       type: object
       required: [settings]
       properties:
         settings:
           type: object
-          required: [registration_mode, updated_by, updated_at]
+          required: [registration_mode, storage_provider, updated_by, updated_at]
           properties:
             registration_mode: { $ref: "#/components/schemas/RegistrationMode" }
+            storage_provider: { $ref: "#/components/schemas/StorageProvider" }
             updated_by: { type: [string, "null"], format: uuid }
             updated_at: { type: string, format: date-time }
 

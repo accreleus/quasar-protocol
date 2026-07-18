@@ -207,6 +207,7 @@ A token is valid iff `revoked_at IS NULL AND expires_at > now()`.
 |---|---|---|
 | `id` | `BOOLEAN` PK DEFAULT `true` | `CHECK (id)` — the singleton idiom (only one row can exist). |
 | `registration_mode` | `TEXT` NOT NULL DEFAULT `'closed'` | `CHECK (registration_mode IN ('closed','invite_only','open'))`. **Default `closed`** — the invitation system is **off** on a fresh install; nobody self-registers until an admin turns it on (`control-api.md` `PATCH /v1/admin/settings`). |
+| `storage_provider` | `TEXT` NOT NULL DEFAULT `'auto'` | *(storage-config amendment, migration 0030, additive)* `CHECK (storage_provider IN ('auto','local','volume'))`. Managed-home (P5) backing store: `local` = host directories under the effective home root; `volume` = named docker volumes; **`auto`** = `local` when the session host has an effective home root, `volume` otherwise. Admin-settable via `PATCH /v1/admin/settings`; affects **new** homes only (existing `user_homes` rows keep their recorded provider/ref — refs are sticky). |
 | `updated_by` | `UUID` NULL → `users(id)` ON DELETE SET NULL | last admin who changed it. |
 | `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
@@ -627,6 +628,16 @@ Migration: `0010_host_settings.up.sql` — `CREATE TABLE host_settings (...)`. T
 > `cuda_device`) are read once at the agent's first session build (`gst::init` is a process-wide
 > `Once`); changing them requires an agent restart via the `restart` downstream message (`agent-api.md`).
 > Precedence: catalog default → per-host override; env vars are the agent's bootstrap fallback only.
+>
+> *(storage-config amendment, catalog-only addition — no schema change, per the JSONB design
+> above.)* The catalog gains **`home_root`** (`string`, live-class, env `QUASAR_HOME_ROOT`,
+> default empty): the absolute host directory holding managed homes (P5). The **control plane**
+> resolves a session host's *effective* home root as stored-override → the host's last-reported
+> `effective_settings.home_root` (the agent's env baseline) → the control plane's own
+> `QUASAR_HOME_ROOT` env (legacy fallback) when synthesizing local-driver home paths, so
+> different hosts may use different roots. The **agent** uses the same overlaid value for its
+> post-session home-usage measurement (`metrics.bytes_used`); an empty effective root disables
+> measurement (volume-driver semantics).
 
 ---
 
