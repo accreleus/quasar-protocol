@@ -1035,6 +1035,10 @@ components:
     H264Profile:
       type: string
       enum: [constrained-baseline, baseline, main, high]
+    Codec:
+      type: string
+      description: "Multi-codec: the WIRE session video codec (h265 is HEVC). Resolved server-side at launch; the client answers the single codec the host offers. Distinct from the profile catalog's codecs[].codec vocabulary, which spells HEVC 'hevc'."
+      enum: [h264, h265, av1]
     SessionState:
       type: string
       enum: [pending, assigned, starting, running, stopping, stopped, failed]
@@ -1123,6 +1127,7 @@ components:
         fps: { type: integer }
         bitrate_kbps: { type: integer }
         h264_profile: { $ref: "#/components/schemas/H264Profile" }
+        codec: { allOf: [ { $ref: "#/components/schemas/Codec" } ], description: "Multi-codec: the resolved session video codec on session.stream; absent on an app's display_stream. Additive; h264 for every pre-multi-codec session. h264_profile applies only when codec is h264." }
         playout0_ms: { type: integer, description: "AS-02: tier-selected initial receiver playout target (ms) on session.stream; absent on an app's display_stream." }
     AppListItem:
       type: object
@@ -1228,6 +1233,7 @@ components:
             fps: { type: integer }
             bitrate_kbps: { type: integer }
             h264_profile: { $ref: "#/components/schemas/H264Profile" }
+            codec: { allOf: [ { $ref: "#/components/schemas/Codec" } ], description: "Multi-codec: optional admin/diagnostic codec override. Orthogonal to the resolution envelope (a codec-only override does not bypass the eligibility gate). Bypasses the device-decode and failure-history clamps (forced re-test path) but not the host-encoder clamp (409 conflict if the placed host cannot encode it)." }
     LaunchResponse:
       type: object
       required: [session, signaling]
@@ -1440,7 +1446,7 @@ components:
     # ─── stream profiles / policy (AS10-01/02) ───────────────────────────────────
     StreamProfile:
       type: object
-      description: "A first-class stream profile (AS10-01). Codec-agnostic; H.264 is launchable today, HEVC/AV1 are placeholders."
+      description: "A first-class stream profile (AS10-01). Codec-agnostic; codecs[] is the per-profile codec-preference list in the CATALOG vocabulary (codec: h264|hevc|av1, where HEVC is 'hevc' here, distinct from the wire Codec enum's 'h265'). H.264 ships launchable; HEVC/AV1 default to 'future' and are enabled per profile by an admin (multi-codec). h264 must stay launchable in a non-empty list (it is the resolution floor)."
       required: [id, display_name, width, height, fps, codecs, h264_profile, nominal_bitrate_kbps, min_offer_bandwidth_kbps, recommended_offer_bandwidth_kbps, headroom_factor, abr_floor_kbps, max_startup_rtt_ms, min_decode_height, high_refresh_display, hardware_encoder_required, browser_client, playout0_ms, visibility]
       properties:
         id: { type: string }

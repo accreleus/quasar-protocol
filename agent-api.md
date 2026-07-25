@@ -55,6 +55,20 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > `signaling.md`, `input.md`, `native-client.md` are unchanged. See `docs/session-trace/contract-amendment.md` §C
 > and `docs/session-trace/trace-format.md` §3.2 (the agent event allow-list).
 
+> **Amendment — multi-codec (HEVC/AV1), additive, requires sign-off (signed off 2026-07-25).** Adds
+> two optional, additive fields so a session can stream a codec other than H.264 while every
+> existing H.264 session and every older agent behaves byte-identically. **(1)** The `session_assign`
+> `stream` block gains **`codec`: `"h264" | "h265" | "av1"`** (omitted, or empty, defaults to
+> `"h264"`): the single video codec the agent must encode for the session, resolved server-side at
+> launch. `h264_profile` stays H.264-only and is ignored when `codec` names a non-h264 value. An
+> unrecognised value fails the assignment (the agent must never silently produce a different codec
+> than `sessions.codec` records). **(2)** The agent `capacity` report gains **`codecs`: `["h264",
+> ...]`**, the wire codec set the host's *active encoder path* can actually produce (GStreamer
+> registry probe: encoder element found AND payloader present). Omitted defaults to `["h264"]` so an
+> old agent keeps working. Both are additive; no existing field, message, or ack contract changes.
+> `h265` is the wire spelling of HEVC (the control-plane profile catalog's `hevc` maps to `h265` on
+> this wire). See §`session_assign` and §`capacity`.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -138,6 +152,7 @@ the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
     ]
   },
   "effective_settings": { "encoder": "nvenc", "render_node": "/dev/dri/renderD128" },
+  "codecs": ["h264", "h265"],
   "gpus": [
     { "index": 0, "vendor": "amd", "model": "Radeon Pro V520",
       "vram_mb_total": 16384, "encode_slots_total": 2,
@@ -187,6 +202,20 @@ the agent's env): the control plane stores the latest map and returns it as `eff
 `GET /v1/admin/hosts/{id}/settings` (`control-api.md`). Restart-class knobs are reported as
 **latched** (the values the process is actually using), so a pending-restart discrepancy is
 visible by comparing `effective` against `resolved`. Absent ⇒ `effective` is null.
+
+`codecs` *(NEW, multi-codec, optional, additive)* is the **wire** codec set the host's active
+encoder path can produce: a subset of `["h264", "h265", "av1"]` (`h265` is HEVC on the wire; the
+control-plane profile catalog's `hevc` maps to it in one place in the Go code). A codec is reported
+only when both its encoder element is registered for the agent's active `EncoderChoice` (or, for the
+Vulkan encoder configured with AV1, its per-session vendor-encoder fallback) AND its RTP payloader
+is registered (`rtph265pay` for HEVC, `rtpav1pay` for AV1), so a missing plugin is self-describing
+(the codec is simply absent from the set until the image carries it). The agent probes this from the
+GStreamer registry at startup and **re-probes and re-sends `capacity`** whenever a `config_update`
+flips its effective encoder (a restart-class encoder change reaches the process on reconnect, but a
+live effective-encoder change is re-probed in place). Absent ⇒ the control plane assumes `["h264"]`
+(an old agent that never reports the field is treated as H.264-only; the control plane keeps its
+last-stored value rather than clobbering it when a later report omits the key). H.264 is always
+producible, so the set is never empty in practice.
 
 `host.cpu_model` *(NEW, host-observability-2, optional, additive)* — the CPU marketing name
 (`/proc/cpuinfo` `model name`). `gpus[].render_node` *(NEW, host-observability-2, optional,
@@ -368,7 +397,7 @@ reserve→prepare→go-live steps are real (P1-6), even though at N=1 `start` ma
   },
   "stream": {
     "width": 1920, "height": 1080, "fps": 60,
-    "bitrate_kbps": 15000, "h264_profile": "constrained-baseline"
+    "bitrate_kbps": 15000, "h264_profile": "constrained-baseline", "codec": "h264"
   },
   "resources": { "vram_mb": 1024, "encode_slots": 1 },
   "video_topology": "stream_only"
@@ -398,6 +427,19 @@ capability but does not by itself mirror ordinary browser sessions to a physical
 > ceiling field). **Omitted or `0`** (a legacy/tier/override launch, or an older control plane)
 > ⇒ the agent falls back to its env/ratio-derived floor (`QUASAR_ABR_FLOOR_KBPS`, else `ceiling
 > × QUASAR_ABR_FLOOR_RATIO`) exactly as before. Additive — no existing field or shape changes.
+
+> *(multi-codec, additive)* The `stream` block may also carry an optional
+> **`codec`: `"h264" | "h265" | "av1"`** (omitted, or empty, defaults to `"h264"`): the single
+> video codec the agent encodes and offers as the one video codec in SDP. The control plane resolves
+> it server-side at launch (profile codec preference, clamped by the host's reported `codecs`, the
+> launching device's decode probe, and decode-failure history; guaranteed H.264 floor) and stores it
+> in `sessions.codec` (`schema.md`). `h264_profile` applies to the `h264` codec only and is ignored
+> for `h265`/`av1`. An `h265`/`av1` value the host cannot encode is a hard session-launch failure
+> reported via `ack{ok:false}` (the agent never silently substitutes a different codec, which would
+> desync `sessions.codec` from reality); the control plane will not send such a value because it has
+> already clamped against the host's `codecs` set. Omitted (legacy/tier launch, or an older control
+> plane) ⇒ H.264, so every pre-multi-codec session and older agent is unaffected. Additive; no
+> existing field or shape changes.
 
 ### `session_start` — bring the pipeline up
 ```json

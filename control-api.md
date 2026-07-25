@@ -144,6 +144,26 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > entirely from the existing session lifecycle + `session_metrics` upstream message. See
 > `docs/stream-perf/contract-amendment.md`.
 
+> **Amendment — multi-codec (HEVC/AV1), additive, requires sign-off (signed off 2026-07-25).** Adds a
+> codec dimension to the session API, all ship-dark (h264 behaviour is byte-identical until an admin
+> flips a profile's codec status to launchable). Four pieces, no existing shape or status code
+> changes. **(1)** Every session body (`POST /v1/sessions`, `GET /v1/sessions/{id}`,
+> `GET /v1/sessions`) gains **`stream.codec`** (`"h264" | "h265" | "av1"`), the resolved session
+> codec, alongside `stream.h264_profile`. Additive; `"h264"` for every pre-multi-codec session.
+> **(2)** `POST /v1/sessions` accepts an optional **`stream.codec`** override (admin/diagnostic). It is
+> validated against the wire codec set (`h264|h265|av1`; a bad value ⇒ `400 validation_failed`) and,
+> unlike the other `stream.*` overrides, is orthogonal to the eligibility envelope: a codec-only
+> override does not bypass the profile eligibility gate. It bypasses the device-decode and
+> decode-failure-history clamps (this is the forced re-test path for a fixed encoder) but **not** the
+> host-encoder clamp: forcing a codec the placed host cannot encode returns **`409 conflict`** (no
+> session persists), because host encoder capability is physics, not overridable. **(3)** The admin
+> `/v1/admin/stream-profiles` write path may set a profile's **`codecs[].status`** (the rollout
+> switch). **(4)** Codec resolution is **server-side** (see §Authorization note). Reason codes:
+> `validation_failed` (400) and `conflict` (409) are reused; no new code. `agent-api.md`
+> (`session_assign.stream.codec`, `capacity.codecs`) and `schema.md` (`sessions.codec`,
+> `stream_profiles.codecs`, `hosts.codecs`, `user_device_profile_history.codec`) carry the wire and
+> storage halves. See `docs/design/plans/2026-07-22-multi-codec-hevc-av1-spec.md` §3.
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -520,7 +540,7 @@ is the single hinge to `signaling.md`.
   "session": {
     "id": "<uuid>", "app_id": "<uuid>", "state": "assigned",
     "profile_id": "1080p60",
-    "stream": { "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 15000, "h264_profile": "constrained-baseline" },
+    "stream": { "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 15000, "h264_profile": "constrained-baseline", "codec": "h264" },
     "created_at": "..."
   },
   "signaling": {
@@ -631,6 +651,50 @@ than the account's last-seen probe, so a native session can never poison a subse
 launch on the same account with a profile Chrome cannot decode. The web SPA does not send this
 field; a native client (Phase 9) must send `client_type:"native"` to receive the lift.
 
+#### Codec resolution (multi-codec)
+> *Additive amendment — session bodies gain `stream.codec`; `POST /v1/sessions` gains an optional
+> `stream.codec` override. Signed off 2026-07-25. Changes no existing shape or status code.*
+
+Every session is one codec, chosen **server-side at launch** and reported as `stream.codec`
+(`"h264" | "h265" | "av1"`; `h265` is HEVC on the wire). The client never selects or negotiates the
+codec: it answers the single video codec the host offers. Resolution is, in order:
+
+- **candidates** = the selected profile's `codecs` with status `launchable`, in catalog preference
+  order (an `auto` launch with no profile, or a legacy/tier launch, has a single candidate: h264);
+- **clamp 1, host encoder** = the placed host's reported wire `codecs` set (`agent-api.md`
+  `capacity.codecs`; an old agent reporting nothing is h264-only);
+- **clamp 2/3, client decode** = the launching device's capability probe
+  (`user_devices.capabilities.codecs`, `POST /v1/me/devices`): h265 and av1 are **hard-gated** on a
+  proven `true` (a stale/absent probe resolves to the h264 floor, because sending an undecodable
+  codec is a black stream, not a quality drop);
+- **clamp 4, decode-failure history** = a non-h264 codec this (user, device, profile) previously
+  failed to decode is skipped (`schema.md` `user_device_profile_history.codec`, migration 0032), so
+  the session degrades to the next candidate rather than the profile vanishing from the picker;
+- **result** = the first candidate surviving all clamps, with a **guaranteed h264 floor** (h264 is
+  launchable in every profile and decodable by every browser, so a session can never fail to resolve
+  a codec, the same silent-downgrade-to-H.264 posture as Sunshine/Moonlight).
+
+**Admin/diagnostic override.** `POST /v1/sessions` accepts an optional `stream.codec` (validated
+against `h264|h265|av1`; a bad value ⇒ `400 validation_failed`). It is **orthogonal** to the
+`stream.*` resolution envelope: a codec-only override does **not** bypass the profile eligibility
+gate (unlike the other `stream.*` fields). It forces a concrete codec, bypassing clamps 2/3
+(device decode) and 4 (failure history). This is exactly the forced re-test path by which a
+previously-failed codec on a since-fixed encoder gets a fresh trial, whose sustained smooth run
+records the clearing pass. It does **not** bypass clamp 1: forcing a codec the placed host
+cannot encode returns **`409 conflict`** and no session persists (host encoder capability is
+physics). Authorization is unchanged: codec resolution is server-side and the override is honoured
+per the caller's role exactly like the other `stream.*` overrides; the codec field is never a
+client-asserted capability or an access-control input.
+
+**Enabling a codec (admin).** A profile ships with hevc/av1 at status `future` (not launchable), so
+the default catalog resolves h264 for everyone. An admin turns a codec on per profile by setting its
+`codecs[].status` to `launchable` via the `/v1/admin/stream-profiles` write path (admin-only). The
+write validates the catalog codec vocabulary (`h264|hevc|av1`, note `hevc`, the catalog spelling,
+not the wire `h265`), rejects a duplicate codec, and requires that **h264 stay launchable** in a
+non-empty list (h264 is the unconditional resolution floor, so the catalog must never present it as
+disabled while sessions still fall back to it); an empty list maps to SQL NULL and reads back as the
+in-code default. A bad codec/status value or a missing h264 floor ⇒ `400 validation_failed`.
+
 ### Admission control (P2-01)
 > *Additive amendment — the rule the launch path enforces. Defines wire behaviour only; the
 > implementation (atomic, no-double-admit-under-concurrency) is P2-03.*
@@ -675,7 +739,7 @@ well-formed and authorized; the server simply has no room to place it now.
     "id": "<uuid>", "app_id": "<uuid>", "host_id": "<uuid|null>",
     "state": "running", "state_detail": "pipeline live", "error_message": null,
     "profile_id": "1080p60",
-    "stream": { "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 15000, "h264_profile": "main" },
+    "stream": { "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 15000, "h264_profile": "main", "codec": "h264" },
     "created_at": "...", "started_at": "...", "ended_at": null
   } }
 ```

@@ -92,6 +92,31 @@
 > access-control flag (enforcement is the token binding + the server role gate + the persisted
 > `registration_mode`, never a UI field). See `docs/w1-security/LP-SEC-01-contract.md`.
 
+> **Amendment — multi-codec (HEVC/AV1), additive, requires sign-off (signed off 2026-07-25).** Adds
+> a codec dimension to four places, all ship-dark (zero behaviour change until an admin flips a
+> profile's codec status to launchable). Via **migration 0031** (`0031_multi_codec`): (1) one new
+> column **`sessions.codec TEXT NOT NULL DEFAULT 'h264' CHECK (codec IN ('h264','h265','av1'))`** (the
+> wire codec resolved server-side at launch and sent to the agent in `session_assign.stream.codec`,
+> `agent-api.md`); (2) one new column **`stream_profiles.codecs JSONB NULL`** (a per-profile ordered
+> codec-preference list `[{codec, status}]` in the **catalog** vocabulary `h264|hevc|av1`; NULL means
+> the in-code default of h264-launchable, hevc/av1-future, so existing rows need no backfill; the
+> admin `/v1/admin/stream-profiles` write path materialises it when an operator enables a codec); (3)
+> one new column **`hosts.codecs JSONB NULL`** (the last-reported **wire** codec set the host's active
+> encoder path can produce, from the `capacity` report; NULL means the control plane assumes
+> `['h264']`, so old agents keep working). Via **migration 0032** (`0032_codec_scoped_history`): (4)
+> one new column **`user_device_profile_history.codec TEXT NOT NULL DEFAULT '' CHECK (codec IN
+> ('','h264','h265','av1'))`** with its uniqueness key widened from `(user_id, device_key, profile_id)`
+> to `(user_id, device_key, profile_id, codec)`, making a decode-failure verdict codec-scoped (`''` =
+> a profile-level verdict, the meaning of every pre-0032 row). Both migrations are **purely additive**
+> (new defaulted columns, one widened unique key over a new column); no existing column, type,
+> constraint, or the session state machine changes; the frozen `0001` migration is untouched.
+> `stream_profiles` and `user_device_profile_history` have no dedicated prose section in this
+> contract (the profile catalog is in-code and the history table is AS10-08 detail), so only their
+> migration-ledger lines below carry the amendment; the `sessions` and `hosts` column rows are added
+> to their tables. The `h264_profile` machinery is unchanged and applies to the `h264` codec only.
+> §3.4 semantics of the codec-scoped history are documented at the migration-ledger line for 0032.
+> See `docs/design/plans/2026-07-22-multi-codec-hevc-av1-spec.md` §3/§3.4.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
@@ -286,6 +311,7 @@ capacity (CPU/mem) lives here; GPU capacity is per-row in `gpus`.
 | `cpu_model` | `TEXT` NULL | *(host-observability-2, additive)* last-reported CPU marketing name. |
 | `storage` | `JSONB` NULL | *(host-observability, additive)* last-reported storage volumes (`agent-api.md` `capacity.host.storage`): array of `{label, path, total_mb, available_mb}`. |
 | `effective_settings` | `JSONB` NULL | *(host-observability, additive)* last-reported resolved runtime settings (`agent-api.md` `capacity.effective_settings`): string map, restart-class knobs latched. |
+| `codecs` | `JSONB` NULL | *(multi-codec, migration 0031, additive)* last-reported **wire** codec set the host's active encoder path can produce (`agent-api.md` `capacity.codecs`): a JSON array subset of `["h264","h265","av1"]`. NULL ⇒ the control plane assumes `['h264']` (an old agent that never reports the field is H.264-only). Keep-if-absent on report (a later `capacity` that omits the key does not clobber the stored value). |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
 ### Host status state machine (P3-01)
@@ -376,7 +402,8 @@ signaling (P1-D).
 | `height` | `INT` NOT NULL | |
 | `fps` | `INT` NOT NULL | |
 | `bitrate_kbps` | `INT` NOT NULL | |
-| `h264_profile` | `TEXT` NOT NULL DEFAULT `'constrained-baseline'` | `CHECK (h264_profile IN ('constrained-baseline','main','high'))`. P1-11 negotiates this up; the Phase-0 floor is the default. |
+| `h264_profile` | `TEXT` NOT NULL DEFAULT `'constrained-baseline'` | `CHECK (h264_profile IN ('constrained-baseline','main','high'))`. P1-11 negotiates this up; the Phase-0 floor is the default. Applies to the `h264` codec only (see `codec`). |
+| `codec` | `TEXT` NOT NULL DEFAULT `'h264'` | *(multi-codec, migration 0031)* `CHECK (codec IN ('h264','h265','av1'))`. The single video codec resolved server-side at launch (profile preference, clamped by host encoder + device decode + decode-failure history; guaranteed h264 floor) and sent to the agent in `session_assign.stream.codec` (`agent-api.md`). WIRE vocabulary: `h265` is HEVC (the in-code profile catalog's `hevc` maps to it in one place). Default `'h264'` so every pre-multi-codec / legacy / tier / override launch is unchanged. `h264_profile` above is meaningful only when this is `'h264'`. |
 | `profile_id` | `TEXT` NULL | AS10-03: the AS10-01 stream-profile id this session was launched from (e.g. `'1080p60'`); NULL for a legacy/tier/override launch. The `width`/`height`/`fps`/`bitrate_kbps`/`h264_profile` columns carry the resolved concrete values. Not FK-constrained — the profile catalog is an in-code table, not a DB table. |
 | **reservation** | | what was reserved on assign. |
 | `reserved_vram_mb` | `INT` NOT NULL DEFAULT `0` | |
@@ -901,6 +928,10 @@ control-plane/migrations/
   0018_host_encoder_certification.up.sql -- (SPT-05) CREATE host_encoder_certification (upsert-latest) + lookup index
   0019_encoder_cert_vulkan.up.sql -- (Vulkan adoption) encoder-certification vulkan encoder support
   0020_invites_device_binding.up.sql -- (LP-SEC-01) CREATE instance_settings (singleton) + invites; user_devices +name/+trusted; auth_tokens.device_id + index; sessions.device_id
+  -- (migrations 0021 through 0030 predate this prose ledger's last refresh; the committed SQL in
+  --  migrations/ is authoritative. The multi-codec amendment adds the two lines below.)
+  0031_multi_codec.up.sql        -- (multi-codec) ADD sessions.codec (CHECK h264|h265|av1, DEFAULT 'h264') + stream_profiles.codecs JSONB NULL (per-profile codec-pref list, catalog vocab) + hosts.codecs JSONB NULL (host wire codec set; NULL ⇒ ['h264'])
+  0032_codec_scoped_history.up.sql -- (multi-codec §3.4, codec-aware decode-failure verdicts) ADD user_device_profile_history.codec (CHECK ''|h264|h265|av1, DEFAULT ''); widen its UNIQUE to (user_id, device_key, profile_id, codec). codec='' = profile-level verdict (all pre-0032 rows, plus presentation_degrading fails and pass outcomes, which are codec-independent); codec IN ('h264','h265','av1') = a decode-side fail (client_unsupported / decode_degrading) scoped to the codec the session streamed. Eligibility (ProfileFailures) treats codec IN ('','h264') as profile-blocking (h264 is the guaranteed floor, so an h264 decode failure is a profile failure, pre-0032 behaviour); the launch codec resolver (clamp 4) skips a failed non-h264 codec so the session degrades to the next candidate / the h264 floor instead of the profile vanishing from the picker. A pass deletes the fail row for the codec that actually ran. The admin stream.codec override bypasses clamp 4 (the forced re-test whose sustained smooth run records the clearing pass is the recovery path for a fixed encoder).
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`
