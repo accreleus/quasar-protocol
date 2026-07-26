@@ -1427,7 +1427,7 @@ components:
     GPUAvailability:
       type: object
       description: "One GPU's capacity from GET /v1/hosts/{id}/gpus."
-      required: [gpu_id, gpu_index, vendor, model, vram_mb_total, vram_mb_reserved, slots_total, slots_reserved, active_sessions, render_node]
+      required: [gpu_id, gpu_index, vendor, model, vram_mb_total, vram_mb_reserved, vram_mb_used, vram_mb_free, vram_sampled_at, slots_total, slots_reserved, active_sessions, render_node]
       properties:
         gpu_id: { type: string }
         gpu_index: { type: integer }
