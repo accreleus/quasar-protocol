@@ -1403,7 +1403,13 @@ components:
           description: "Admin-visible app shape: includes runtime_spec + resource/storage defaults (P2-08, P5-01)."
           required: [default_vram_mb, default_encode_slots, runtime_spec, managed_home, home_container_path]
           properties:
-            default_vram_mb: { type: integer }
+            default_vram_mb:
+              type: integer
+              deprecated: true
+              description: >-
+                DEPRECATED (#383). Still accepted on write and returned on read, but no longer
+                read by the scheduler - admission gates on default_encode_slots plus a live
+                free-VRAM veto. It was never enforceable (no VRAM cap is applied to a session).
             default_encode_slots: { type: integer }
             runtime_spec: { type: object, additionalProperties: true }
             managed_home: { type: boolean, description: "P5-01: whether this app provisions a per-user managed home directory." }
@@ -1428,7 +1434,30 @@ components:
         vendor: { type: string }
         model: { type: string }
         vram_mb_total: { type: integer }
-        vram_mb_reserved: { type: integer }
+        vram_mb_reserved:
+          type: integer
+          deprecated: true
+          description: >-
+            DEPRECATED (#383). Sum of declared per-app VRAM over active sessions. Declared VRAM
+            no longer participates in admission and new sessions record 0, so this trends to 0
+            and should not be rendered as utilization. Use vram_mb_used / vram_mb_free instead.
+        vram_mb_used:
+          type: [integer, "null"]
+          description: >-
+            (#383, additive) Live per-GPU memory in use, from the agent heartbeat sample. Null
+            means unknown - never sampled, agent predates the field, or the sample failed
+            plausibility validation. Null is not zero.
+        vram_mb_free:
+          type: [integer, "null"]
+          description: >-
+            (#383, additive) Live free memory. This is the figure the admission veto reads. Null
+            means unknown, in which case admission abstains and encode slots decide alone.
+        vram_sampled_at:
+          type: [string, "null"]
+          format: date-time
+          description: >-
+            (#383, additive) When the control plane ingested the sample, on its own clock. A
+            sample older than the server freshness window is treated as unknown.
         slots_total: { type: integer }
         slots_reserved: { type: integer }
         active_sessions: { type: integer }

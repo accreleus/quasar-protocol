@@ -708,20 +708,51 @@ A `POST /v1/sessions` launch is admitted only if **both** gates pass, evaluated 
    blocks every launch for that user. This gate is per-user and independent of host capacity.
 
 2. **Per-GPU capacity (the governor).** The request's resource ask comes from the app row —
-   `requested_encode_slots = apps.default_encode_slots`, `requested_vram_mb = apps.default_vram_mb`
-   (clients never set these; the `stream` block carries resolution/bitrate, not resource
-   reservations). A GPU admits the launch iff, with availability derived per `schema.md` §gpus
+   `requested_encode_slots = apps.default_encode_slots` (clients never set this; the `stream`
+   block carries resolution/bitrate, not resource reservations). A GPU admits the launch iff
+   **both** of the following hold, with availability derived per `schema.md` §gpus
    (`total − Σ reservations of sessions in {assigned, starting, running, stopping}`):
+
+   **(a) The encode-slot reservation.** This is the real budget and the only race-safe one:
    ```
-   encode_slots_available ≥ requested_encode_slots   AND   vram_available ≥ requested_vram_mb
+   encode_slots_available ≥ requested_encode_slots
    ```
+
+   **(b) The live free-VRAM veto** *(#383, amended)*. A GPU whose most recent live sample
+   (`gpus.vram_mb_free`, reported on the agent heartbeat — `agent-api.md` §heartbeat) shows less
+   free memory than the server's floor is not a candidate, even with slots free. The floor is
+   **server policy, not a client or per-app input**.
+
+   The veto is **advisory**: it refuses a GPU that is *already* out of memory; it does not
+   allocate or reserve memory, and slots remain the reservation. Because a sample lags reality,
+   sessions admitted too recently for the sample to reflect their allocation are debited against
+   it.
+
+   The veto **abstains** — admission falls through to (a) alone — whenever the answer is not
+   trustworthy: no sample, no sample timestamp, a sample older than the server's freshness
+   window, a GPU whose reported total is at or below the floor (an AMD APU's UMA carve-out is not
+   the pool the workload lives in), or the floor configured to zero. **Unknown telemetry must
+   never reduce availability**: an agent whose sampler breaks cannot be allowed to strangle its
+   own host.
+
+   > **Declared per-app VRAM is no longer part of admission.** `apps.default_vram_mb` and
+   > `sessions.reserved_vram_mb` are **deprecated** (`schema.md`). The API still accepts
+   > `default_vram_mb` on app write and it is still returned on read, but it no longer influences
+   > placement, and new sessions record `reserved_vram_mb = 0`. It was never enforceable — no
+   > VRAM cap is applied to a session — so it only ever encoded a guess that under-declaring
+   > could silently oversubscribe.
+
    - If **no online host** has any GPU that could serve the request — no host is `online`, or none
-     has a GPU whose **totals** could ever satisfy the ask — reject with **`503 no_host_available`**.
-     This is the "fleet is empty/down" condition; it is distinct from "full".
+     has a GPU whose **encode-slot totals** could ever satisfy the ask — reject with
+     **`503 no_host_available`**. This is the "fleet is empty/down" condition; it is distinct from
+     "full". Note the VRAM floor is deliberately *not* part of this test: a GPU whose total is at
+     or below the floor is abstained from the veto and is therefore servable, so counting the
+     floor here would report a merely-busy host as one the fleet can never serve.
    - If a candidate GPU exists (its totals suffice) but **no** candidate currently has enough
-     **available** slots/VRAM, reject with **`503 capacity_exhausted`**. This is the "up but full
-     right now" condition; it is **retryable** — a later launch may succeed once an active session
-     ends and frees its reservation.
+     **available** slots, or none currently shows enough **free VRAM**, reject with
+     **`503 capacity_exhausted`**. This is the "up but full right now" condition; it is
+     **retryable** — a later launch may succeed once an active session ends, or once memory is
+     released and the next sample reflects it.
    - Otherwise the scheduler picks a satisfying GPU and reserves transactionally
      (`SELECT … FOR UPDATE` on the `gpus` row, P1-8 / P2-03) so concurrent launches cannot
      oversubscribe, commits the `sessions` row as `assigned`, and returns `201`.
@@ -781,10 +812,14 @@ interpipe boundary while encode + `webrtcbin` stay up, so the browser stream nev
   stays `running` on the previous app (the detail reports the failure). **On a failed swap with no
   recoverable previous app**, the session goes `failed` and its reservation is released
   (`agent-api.md` defines which). A browser already attached keeps its media throughout.
-- **Reservation rule (Phase 2): the swap must fit within the held reservation.** The new app's
-  `default_vram_mb` / `default_encode_slots` must each be ≤ the session's `reserved_vram_mb` /
-  `reserved_encode_slots`. If not, `409 swap_exceeds_reservation` and **no** swap is attempted
-  (the session is untouched). Reservation *resize* on swap is deferred past Phase 2.
+- **Reservation rule (Phase 2, amended by #383): the swap must fit within the held reservation.**
+  The new app's `default_encode_slots` must be ≤ the session's `reserved_encode_slots`. If not,
+  `409 swap_exceeds_reservation` and **no** swap is attempted (the session is untouched).
+  Reservation *resize* on swap is deferred past Phase 2. The VRAM half of this rule is
+  **removed**: declared per-app VRAM no longer participates in admission, so it cannot bound a
+  swap either. The live free-VRAM veto is an *admission*-time check and is deliberately not
+  applied to a swap — the session already holds its GPU and its memory, and refusing the swap
+  would not release anything.
 - **Errors** (the session is left untouched in every rejection):
   - `409 session_not_swappable` — the session is not in a swappable state: top-level `state` is not
     `running`, or a swap is already in progress (`state_detail = "swapping"`).

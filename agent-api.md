@@ -241,11 +241,43 @@ sessions should not vanish, that's a fault the control plane logs).
 
 ### `heartbeat` — liveness + live utilization
 ```json
-{ "type": "heartbeat", "running_sessions": ["<session_id>"], "ts_unix_ms": 1735689600000 }
+{
+  "type": "heartbeat",
+  "running_sessions": ["<session_id>"],
+  "ts_unix_ms": 1735689600000,
+  "gpu_vram": [ { "index": 0, "used_mb": 1840, "free_mb": 30928 } ]
+}
 ```
 Sent every `heartbeat_interval_ms`. Updates `hosts.last_heartbeat_at`. `running_sessions` lets
 the control plane reconcile its view against the agent's ground truth (detect orphans both ways).
 Missing N consecutive heartbeats ⇒ host `offline`, its sessions `failed`, reservations released.
+
+`gpu_vram` *(NEW, #383, optional, additive)* — a live per-GPU memory sample, `index` matching the
+GPU's index in the `capacity` report. `used_mb` / `free_mb` are each **optional**: an omitted or
+null value means the agent could not measure that figure, which is materially different from
+zero, and the control plane must treat it as unknown rather than as "full". An agent that omits
+`gpu_vram` entirely is simply an agent that predates this field.
+
+Sources: AMD reads `<sysfs device>/mem_info_vram_used`; NVIDIA runs one
+`nvidia-smi --query-gpu=pci.bus_id,memory.used,memory.free` for all GPUs. On an AMD APU
+`mem_info_vram_total` is the BIOS UMA carve-out rather than a real pool, so the reported figures
+are honest but not representative of where the workload's memory lives — consumers must not
+assume the sample bounds a session's actual usage.
+
+The control plane stores these on `gpus` (`schema.md`) and uses them for the live free-VRAM
+admission veto (`control-api.md` §Admission control). Two properties are contractual:
+
+- **The sample is advisory, not a reservation.** Encode slots remain the only race-safe
+  reservation. A sample is a point-in-time observation and two launches a second apart see the
+  same one.
+- **Unknown or stale telemetry must fail open.** A missing field, a missing sample, or a sample
+  older than the control plane's freshness window means the veto abstains and encode slots decide
+  alone. An agent whose sampler breaks must never be able to strangle its own host.
+
+Sampling must not delay the heartbeat. `nvidia-smi` can block for seconds on a loaded or
+Xid-faulted GPU, and a heartbeat stalled past the read deadline marks the host offline and reaps
+its sessions — so the agent samples off the control path and attaches whatever result is already
+available.
 
 ### `session_state` — lifecycle callback (the authoritative progress signal)
 ```json

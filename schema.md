@@ -282,7 +282,7 @@ defaults the scheduler and pipeline need.
 | `description` | `TEXT` NOT NULL DEFAULT `''` | |
 | `cover_url` | `TEXT` NULL | library art |
 | `runtime_spec` | `JSONB` NOT NULL DEFAULT `'{}'` | container launch spec the **node agent** consumes: `{ "image", "args":[], "env":{}, "mounts":[], "gpu":true }`. JSONB (not frozen columns) because this is agent-internal launch detail that will grow; the scheduler does **not** read it. |
-| `default_vram_mb` | `INT` NOT NULL DEFAULT `1024` | resource hint the **scheduler** reserves (explicit column, not parsed from JSONB). |
+| `default_vram_mb` | `INT` NOT NULL DEFAULT `1024` | **DEPRECATED (#383)** — no longer read by the scheduler. Retained so existing rows and API clients are undisturbed; still accepted on write and returned on read, but placement ignores it. Admission now gates on `default_encode_slots` plus the live free-VRAM veto (`control-api.md` §Admission control). It was never enforceable — no VRAM cap is applied to a session — so it only ever encoded a guess. Slated for removal once a release has passed with no readers. |
 | `default_encode_slots` | `INT` NOT NULL DEFAULT `1` | encode sessions this app needs (normally 1). |
 | `default_width` | `INT` NOT NULL DEFAULT `1920` | launch defaults for the P1-5 pipeline; per-launch overrides live on `sessions`. |
 | `default_height` | `INT` NOT NULL DEFAULT `1080` | |
@@ -368,18 +368,40 @@ reservations held by active sessions), so reservations cannot drift from session
 | `vram_mb_total` | `INT` NOT NULL | reported capacity. |
 | `encode_slots_total` | `INT` NOT NULL | concurrent encode-session cap (NVENC/VCN limit). |
 | `render_node` | `TEXT` NULL | *(host-observability-2, additive)* stable by-path render-node device path (`agent-api.md` `gpus[].render_node`). |
+| `vram_mb_used` | `INT` NULL | *(#383, migration 0033)* last live sample from the agent heartbeat. **NULL means unknown** — never sampled, never reported, or the sample failed plausibility validation. NULL is not zero. |
+| `vram_mb_free` | `INT` NULL | *(#383)* as above. This is the figure the admission veto reads. |
+| `vram_sampled_at` | `TIMESTAMPTZ` NULL | *(#383)* when the control plane **ingested** the sample — its own clock, never the agent's. The debit below compares it against `sessions.started_at`, which is also DB time; mixing clocks would silently disable the debit. A sample older than the server's freshness window is treated as unknown. |
+| `vram_sample_agent_ms` | `BIGINT` NULL | *(#383)* the agent's own `ts_unix_ms` for the sample. Used **only** as a monotonicity guard so a displaced (zombie) websocket cannot overwrite a fresh sample with pre-restart data. Not a time source. |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | |
 
 **Availability (derived, not stored):**
 ```sql
--- VRAM free on a GPU:
-vram_mb_total  - COALESCE(SUM(s.reserved_vram_mb)     FILTER (WHERE s.gpu_id = g.id AND s.state IN ('assigned','starting','running','stopping')), 0)
--- encode slots free on a GPU:
+-- encode slots free on a GPU -- the reservation dimension:
 encode_slots_total - COALESCE(SUM(s.reserved_encode_slots) FILTER (WHERE s.gpu_id = g.id AND s.state IN ('assigned','starting','running','stopping')), 0)
 ```
 The scheduler reserves and checks this transactionally (`SELECT ... FOR UPDATE` on the `gpus`
 row, see P1-8) so two launches cannot oversubscribe. At N=1 the check always passes; the code
 path is real.
+
+**Live VRAM (sampled, not derived)** *(#383)*. `vram_mb_free` is a measurement, not an
+accounting identity, and it is **not** a reservation — it cannot be, since nothing caps a
+session's VRAM. Admission applies it as an advisory veto with an in-flight debit for sessions
+whose allocation the sample cannot yet show:
+
+```sql
+-- a GPU is vetoed only when the sample is fresh, the pool is meaningful, and:
+vram_mb_free - (in-flight sessions on this GPU) * <inflight estimate> < <min free floor>
+```
+
+In-flight means `state IN ('assigned','starting','running','stopping')` with `started_at` null
+or newer than the sample minus one freshness window. Note this state set intentionally differs
+from the reservation set above: a `stopping` pipeline still holds Vulkan image refs, so it holds
+memory even though it no longer holds a reservation. Residency and reservation are different
+questions.
+
+The declared-VRAM availability formula that used to live here (`vram_mb_total − Σ
+reserved_vram_mb`) is **removed** — see the deprecation notes on `apps.default_vram_mb` and
+`sessions.reserved_vram_mb`.
 
 ## `sessions`
 The central unit: a scheduled, resource-reserved, lifecycle-tracked stream. Created by
@@ -406,7 +428,7 @@ signaling (P1-D).
 | `codec` | `TEXT` NOT NULL DEFAULT `'h264'` | *(multi-codec, migration 0031)* `CHECK (codec IN ('h264','h265','av1'))`. The single video codec resolved server-side at launch (profile preference, clamped by host encoder + device decode + decode-failure history; guaranteed h264 floor) and sent to the agent in `session_assign.stream.codec` (`agent-api.md`). WIRE vocabulary: `h265` is HEVC (the in-code profile catalog's `hevc` maps to it in one place). Default `'h264'` so every pre-multi-codec / legacy / tier / override launch is unchanged. `h264_profile` above is meaningful only when this is `'h264'`. |
 | `profile_id` | `TEXT` NULL | AS10-03: the AS10-01 stream-profile id this session was launched from (e.g. `'1080p60'`); NULL for a legacy/tier/override launch. The `width`/`height`/`fps`/`bitrate_kbps`/`h264_profile` columns carry the resolved concrete values. Not FK-constrained — the profile catalog is an in-code table, not a DB table. |
 | **reservation** | | what was reserved on assign. |
-| `reserved_vram_mb` | `INT` NOT NULL DEFAULT `0` | |
+| `reserved_vram_mb` | `INT` NOT NULL DEFAULT `0` | **DEPRECATED (#383)** — written as `0` for sessions created after the live-VRAM change; historical rows keep their values. Encode slots are now the only reservation dimension. |
 | `reserved_encode_slots` | `INT` NOT NULL DEFAULT `0` | |
 | **timestamps** | | |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
