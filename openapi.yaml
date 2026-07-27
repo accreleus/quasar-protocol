@@ -470,6 +470,151 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  # ─── cover artwork (UI-P7) ───────────────────────────────────────────────
+  # The artwork provider SHIPS DARK: with no API key configured the control
+  # plane makes no third-party request, writes no artwork, and every app keeps
+  # cover_url/hero_url null - i.e. the gradient tile, exactly the pre-UI-P7
+  # behaviour. The LOCAL half (upload, override, clear, serving) is available
+  # regardless, because it contacts nothing.
+  /v1/artwork/{asset}:
+    parameters:
+      - name: asset
+        in: path
+        required: true
+        schema: { type: string, pattern: "^[0-9a-f]{64}\\.(jpg|png|webp)$" }
+        description: >-
+          The cached blob's CONTENT-ADDRESSED name: the lowercase hex SHA-256 of the image bytes
+          plus an extension derived from the sniffed type. Nothing a remote supplies influences
+          it, so path traversal is impossible by construction; anything not matching the pattern
+          is 404, never 500.
+    get:
+      tags: [apps]
+      summary: Serve a locally cached artwork image.
+      description: >-
+        UI-P7. DELIBERATELY UNAUTHENTICATED: a browser cannot attach a bearer token to an
+        <img src>, so the URL is instead a capability - the path is a 256-bit content hash,
+        unguessable, and reveals nothing about the app, the user or the catalogue. Responses
+        carry X-Content-Type-Options: nosniff and an immutable long cache (the bytes at a
+        content-addressed URL can never change). Art is always served from here and NEVER
+        hotlinked from the provider: a self-hosted deployment must not depend on a third party
+        at browse time, and hotlinking would report the whole library to that third party on
+        every page view.
+      responses:
+        "200":
+          description: The image.
+          content:
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/admin/apps/{id}/artwork:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin, apps]
+      summary: An app's artwork record + whether a provider is configured.
+      x-required-role: admin
+      responses:
+        "200": { description: OK., content: { application/json: { schema: { $ref: "#/components/schemas/AppArtworkEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [admin, apps]
+      summary: Override an app's artwork (fuzzy matching WILL be wrong sometimes).
+      description: >-
+        UI-P7. Exactly one intent per request. `provider_ref` accepts a candidate from
+        POST .../artwork/search. `tile_url`/`hero_url` fetch operator-supplied art - the path for
+        anything a games database does not have, including every desktop app. `rematch` re-runs
+        automatic matching now instead of waiting for the background sweep.
+        An operator-supplied URL is ATTACKER-ADJACENT input (an operator pastes what they were
+        sent) and goes through the same guards as a provider URL with no exception for admin
+        privilege: http(s) only, resolved address must be publicly routable (loopback, RFC1918,
+        link-local, CGNAT and cloud-metadata addresses are refused, including across redirects),
+        at most 3 redirects, a byte cap, and the stored bytes must SNIFF as JPEG/PNG/WebP
+        regardless of the Content-Type claimed. Any override sets locked=true, so the background
+        sweep can never silently re-break the correction.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AppArtworkWrite" } } }
+      responses:
+        "200": { description: OK., content: { application/json: { schema: { $ref: "#/components/schemas/AppArtworkEnvelope" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [admin, apps]
+      summary: Clear an app's artwork (back to the gradient tile).
+      description: >-
+        UI-P7. Removes the artwork record and NULLs cover_url/hero_url. Cached blobs are
+        content-addressed and possibly shared with another app, so they are deliberately NOT
+        deleted here; unreferenced ones are reclaimed by the service's orphan sweep.
+      x-required-role: admin
+      responses:
+        "204": { description: Artwork cleared. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/admin/apps/{id}/artwork/search:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [admin, apps]
+      summary: Search the configured artwork provider for candidate matches.
+      description: >-
+        UI-P7. With no provider configured this is 409 conflict - nothing is broken, the
+        deployment simply has not opted in to a third party. An empty candidate list is a
+        NORMAL result, not a failure.
+      x-required-role: admin
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query: { type: string, description: "Defaults to the app's own name when absent or blank." }
+      responses:
+        "200": { description: OK., content: { application/json: { schema: { $ref: "#/components/schemas/AppArtworkCandidates" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/admin/apps/{id}/artwork/upload:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - name: crop
+        in: query
+        schema: { type: string, enum: [tile, hero], default: tile }
+        description: "Which crop the uploaded image replaces."
+    post:
+      tags: [admin, apps]
+      summary: Upload artwork for one crop (the always-available fallback).
+      description: >-
+        UI-P7. Raw image bytes with an image/* Content-Type. Needs no provider and no network,
+        which is what makes an unmatched app - every desktop app included - a solved case rather
+        than a permanent gradient. The body is capped by the server's own reader (not by the
+        declared Content-Length) and the bytes must sniff as JPEG/PNG/WebP; SVG is refused
+        outright as an executable document format. Sets locked=true.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          image/png: { schema: { type: string, format: binary } }
+          image/jpeg: { schema: { type: string, format: binary } }
+          image/webp: { schema: { type: string, format: binary } }
+      responses:
+        "200": { description: OK., content: { application/json: { schema: { $ref: "#/components/schemas/AppArtworkEnvelope" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { description: "The image exceeds the configured byte cap." }
+
   # ─── hosts ───────────────────────────────────────────────────────────────
   /v1/hosts:
     get:
@@ -1508,12 +1653,28 @@ components:
       # UI-P1: kind + favourite are added HERE, so App and AdminApp — which are allOf
       # compositions over this schema — inherit both. There is no read shape that omits them.
       type: object
-      required: [id, name, description, cover_url, kind, favourite, default_width, default_height, default_fps, default_bitrate_kbps, default_profile_id, profile_policy, enabled]
+      required: [id, name, description, cover_url, hero_url, kind, favourite, default_width, default_height, default_fps, default_bitrate_kbps, default_profile_id, profile_policy, enabled]
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
         description: { type: string }
-        cover_url: { type: [string, "null"] }
+        cover_url:
+          type: [string, "null"]
+          description: >-
+            UI-P7: the TILE crop - the 16:10 library-tile artwork. Null when the app has no
+            artwork, which is the shipped default and renders the gradient tile. Written
+            EXCLUSIVELY by the artwork service (/v1/admin/apps/{id}/artwork) for any app that
+            has an artwork record; a value set directly via AppWrite is honoured only while the
+            app has no artwork record.
+        hero_url:
+          type: [string, "null"]
+          description: >-
+            UI-P7, ADDITIVE: the HERO crop - a much wider banner asset for the detail/hero
+            panels. A DIFFERENT source asset from cover_url, not the same image scaled: a
+            ~2.1:1 tile stretched into a ~3:1 hero reads as a blown-up thumbnail. Null
+            independently of cover_url (a title may have one crop and not the other); a client
+            falls back hero_url -> cover_url -> gradient. Read-only: not accepted on AppWrite,
+            written only by the artwork service.
         kind: { allOf: [ { $ref: "#/components/schemas/AppKind" } ], description: "UI-P1: presentation-only library classification (apps.kind). Always serialized; 'game' for every pre-UI-P1 row." }
         favourite:
           type: boolean
@@ -1874,6 +2035,81 @@ components:
         created_at: { type: string, format: date-time }
 
     # ─── admin: apps ──────────────────────────────────────────────────────────
+    AppArtwork:
+      type: object
+      description: "UI-P7: an app's artwork provenance and the two locally served crops."
+      required: [app_id, source, provider, provider_ref, matched_name, tile_url, hero_url, attribution, locked, updated_at]
+      properties:
+        app_id: { type: string, format: uuid }
+        source:
+          type: string
+          enum: [provider, manual, none]
+          description: >-
+            'provider' = matched and fetched automatically. 'manual' = an admin picked, supplied
+            or uploaded it. 'none' = we looked and there is nothing - a NEGATIVE CACHE and a
+            first-class outcome, not an error: a desktop app is not in a games database and never
+            will be, so recording it stops every sweep re-querying a third party for a row that
+            can never match. All three render correctly; 'none' is the gradient tile.
+        provider: { type: string, description: "Which provider produced the match ('steamgriddb'); empty for a manual or unmatched app." }
+        provider_ref: { type: string, description: "The provider's opaque id for the matched title." }
+        matched_name:
+          type: string
+          description: >-
+            The provider-side title that was matched. Surfaced so an operator can SEE that
+            "Portal" matched "Portal Knights" before deciding to override it.
+        tile_url: { type: [string, "null"], description: "Local /v1/artwork/... path for the 16:10 tile crop, or null." }
+        hero_url: { type: [string, "null"], description: "Local /v1/artwork/... path for the wide hero crop, or null." }
+        attribution: { type: string, description: "Credit line to render beside the art, when the source asks for one." }
+        locked:
+          type: boolean
+          description: >-
+            True once an admin has overridden the match. The automatic sweep NEVER touches a
+            locked record - fuzzy matching is wrong sometimes, and a correction must not be
+            silently re-broken.
+        updated_at: { type: string, format: date-time }
+    AppArtworkEnvelope:
+      type: object
+      required: [artwork, provider_configured, provider_name]
+      properties:
+        artwork:
+          oneOf: [ { $ref: "#/components/schemas/AppArtwork" }, { type: "null" } ]
+          description: "Null when the app has no artwork record at all - the gradient-tile state."
+        provider_configured:
+          type: boolean
+          description: >-
+            Whether a third-party artwork provider is configured on this deployment. False is the
+            SHIPPED DEFAULT. The admin UI reads this to explain why the provider-backed controls
+            are unavailable, rather than offering a button that silently does nothing.
+        provider_name: { type: string, description: "Empty when no provider is configured." }
+    AppArtworkWrite:
+      type: object
+      description: "Exactly one intent per request; an empty body is 400 validation_failed."
+      properties:
+        provider_ref: { type: string, description: "Accept this candidate from a prior .../artwork/search." }
+        tile_url: { type: string, description: "Fetch operator-supplied art for the tile crop. Absent leaves the existing tile untouched." }
+        hero_url: { type: string, description: "Fetch operator-supplied art for the hero crop. Absent leaves the existing hero untouched." }
+        rematch: { type: boolean, description: "Re-run automatic matching now instead of waiting for the background sweep." }
+    AppArtworkCandidates:
+      type: object
+      required: [candidates, provider_configured, provider_name]
+      properties:
+        candidates:
+          type: array
+          items:
+            type: object
+            required: [ref, name, thumb_url]
+            properties:
+              ref: { type: string }
+              name: { type: string }
+              thumb_url:
+                type: string
+                description: >-
+                  A REMOTE preview URL, the one place a provider URL is loaded directly and only
+                  for an admin who explicitly opened the picker. Never stored, never rendered to
+                  an end user - the no-hotlinking rule governs the library, and a picker an
+                  operator opened is not the library.
+        provider_configured: { type: boolean }
+        provider_name: { type: string }
     AdminApp:
       allOf:
         - { $ref: "#/components/schemas/App" }

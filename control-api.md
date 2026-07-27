@@ -2574,6 +2574,122 @@ key to its default (except `audio_output`/`default_app`, where `null` is the mea
 
 ---
 
+## Cover artwork (UI-P7)
+
+Populates `apps.cover_url` — present since Phase 1 and **never written until now** — plus a new
+`apps.hero_url`. **Additive and admin-gated**; every route below is new, and no existing shape
+changes except the two extra read-only fields on `AppListItem`.
+
+### The rule that governs the whole feature: it ships dark
+
+The artwork provider is configured per deployment (`QUASAR_STEAMGRIDDB_API_KEY`, see
+`docs/configuration.md`). **With no key set the control plane makes no third-party request,
+starts no background sweep, writes no artwork row for a game, and every app keeps
+`cover_url`/`hero_url` `null`** — which renders the gradient tile, byte-for-byte the pre-UI-P7
+behaviour. `provider_configured: false` on every artwork response is the shipped default, not a
+degraded state, and the provider-backed routes answer `409 conflict` rather than `500`: nothing
+is broken, the deployment has simply not opted in to a third party.
+
+The **local** half — upload, override, clear, and serving cached images — works regardless,
+because none of it contacts anything. That is deliberate: it is what makes an app a games
+database will never carry a solved case rather than a permanent gradient.
+
+### Two crops, not one image scaled
+
+`cover_url` is the **TILE** crop for the 16:10 library-tile frame; `hero_url` is the **HERO**
+crop, a much wider banner for the detail/hero panels. They are **different source assets**. A
+~2.1:1 tile stretched into a ~3:1 hero reads as a blown-up thumbnail, which is the specific
+failure this split exists to avoid. Either may be null independently; a client falls back
+`hero_url` → `cover_url` → the gradient tile.
+
+### Cached locally, never hotlinked
+
+Every stored URL is a **local** path, `/v1/artwork/<sha256>.<ext>`. Art is fetched once into the
+deployment's own storage and served from there forever. Two reasons, both load-bearing: a
+self-hosted box must not depend on a third party being reachable at browse time, and a hotlinked
+`<img>` would report the deployment's entire library to that third party on every page view.
+
+### `GET /v1/artwork/{asset}` — serve a cached image
+
+**Deliberately unauthenticated.** A browser cannot attach a bearer token to an `<img src>`, so
+the URL is a **capability** instead: the path is the lowercase hex SHA-256 of the image bytes,
+which is unguessable (256 bits) and reveals nothing about the app, the user or the catalogue.
+The name is content-addressed, so the bytes at a given URL can never change and the response is
+`immutable`-cached; it also means nothing a remote supplies influences the on-disk path, and
+anything not matching `^[0-9a-f]{64}\.(jpg|png|webp)$` is `404`, never `500`. Responses carry
+`X-Content-Type-Options: nosniff` — this is the one route that returns bytes a third party
+supplied, and the bytes were already verified to sniff as JPEG/PNG/WebP before being stored.
+
+### `GET /v1/admin/apps/{id}/artwork` *(admin)*
+
+Returns `{ artwork, provider_configured, provider_name }`. `artwork` is `null` when the app has
+no record — the gradient-tile state. `artwork.source` is one of:
+
+| `source` | meaning |
+|---|---|
+| `provider` | matched and fetched automatically |
+| `manual` | an admin picked, supplied or uploaded it |
+| `none` | we looked and there is nothing — a **negative cache**, not an error |
+
+`none` is a first-class outcome. `apps.kind = 'desktop'` (Phase 1) is checked **before** any
+provider call, so a desktop app is never queried at all: a games database will not have Blender
+or Firefox, and asking costs a request and leaks the app name for a guaranteed miss. An
+unmatched *game* records `none` too, so the next sweep does not re-ask. A provider **error**,
+by contrast, records nothing — a transient outage must never be cached as "this app has no art".
+
+### `POST /v1/admin/apps/{id}/artwork/search` *(admin)*
+
+Candidate matches for a title (body `{"query"}`, defaulting to the app's own name). An empty
+candidate list is a normal result. `409 conflict` when no provider is configured.
+`candidates[].thumb_url` is a **remote** preview URL — the one place a provider URL is loaded
+directly, and only for an admin who explicitly opened the picker. It is never stored and never
+rendered to an end user; the no-hotlinking rule governs the library, and a picker an operator
+opened is not the library.
+
+### `PUT /v1/admin/apps/{id}/artwork` — the override *(admin)*
+
+**Fuzzy matching will be wrong sometimes, so this is part of the feature, not a follow-up.**
+Exactly one intent per request:
+
+- `{"provider_ref"}` — accept a candidate from the search results.
+- `{"tile_url"}` / `{"hero_url"}` — fetch operator-supplied art. Either may be omitted, which
+  leaves that crop untouched, so an operator can replace just the hero.
+- `{"rematch": true}` — re-run automatic matching now instead of waiting for the sweep. Wanted
+  right after a key is first configured, when every app carries a `none` row from before.
+
+Any override sets `locked: true`, and **the automatic sweep never touches a locked record** — a
+correction must not be silently re-broken.
+
+An operator-supplied URL is **attacker-adjacent input**: an operator pastes what they were sent.
+It goes through exactly the same guards as a provider URL, with **no exception for admin
+privilege** — `http(s)` only; the *resolved* address must be publicly routable (loopback,
+RFC1918, link-local, CGNAT, and cloud-metadata addresses are refused, and the check is re-applied
+to every hop so a public URL cannot redirect into the deployment's own network); at most 3
+redirects; a byte cap; and the stored bytes must **sniff** as JPEG/PNG/WebP whatever the
+`Content-Type` claimed. SVG is refused outright as an executable document format. A blocked or
+mislabelled fetch is `400 validation_failed` and stores nothing.
+
+### `POST /v1/admin/apps/{id}/artwork/upload?crop=tile|hero` *(admin)*
+
+Raw image bytes with an `image/*` `Content-Type`. Needs no provider and no network. The body is
+capped by the server's own reader — not by the client-declared `Content-Length` — and oversize is
+`413`. Sets `locked: true`.
+
+### `DELETE /v1/admin/apps/{id}/artwork` *(admin)*
+
+Clears the record and NULLs both URLs: back to the gradient tile. Cached blobs are
+content-addressed and possibly **shared** with another app, so they are deliberately not deleted
+here; unreferenced ones are reclaimed by the service's orphan sweep.
+
+### Authorization
+
+Every route except `GET /v1/artwork/{asset}` is `RequireAuth → RequireAdmin`, enforced by the
+middleware at route registration. Hiding the Artwork panel from a non-admin UI is **not** the
+access control (invariant #6): a valid non-admin token is `403` on all five admin routes, and a
+missing token is `401`.
+
+---
+
 ## How the client uses this (end-to-end)
 ```
 register ─▶ login ─▶ GET /v1/apps ─▶ POST /v1/sessions {app_id}
