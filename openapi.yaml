@@ -1319,6 +1319,74 @@ components:
         The CATALOG codec vocabulary used by stream profiles (rungs). Note 'hevc', not the wire
         'h265' - the rename is bridged in exactly one place server-side and never on this surface.
       enum: [h264, hevc, av1]
+    RungRejection:
+      type: string
+      description: >-
+        UI-P6: the clamp that rejected a rung during the walk. Treat this set as OPEN - render an
+        unrecognised value rather than assuming the list is closed. host_encoder=clamp 1,
+        client_decode=clamp 2/3 (codec), decode_height=clamp 2/3 (resolution), decode_history=clamp
+        4, hardware_encoder=clamp 5, unknown_codec=a rung whose catalog codec does not map
+        (hand-edited data; `codec` then carries the raw catalog value).
+      enum: [host_encoder, client_decode, decode_height, decode_history, hardware_encoder, unknown_codec]
+    CodecDecisionRung:
+      type: object
+      description: "UI-P6: one rung's verdict in the resolution walk."
+      required: [rung_id, codec, rejected_by, selected, clamps_bypassed]
+      properties:
+        rung_id: { type: string }
+        codec:
+          type: string
+          description: >-
+            Wire vocabulary (h264|h265|av1), except when rejected_by is unknown_codec, where it is
+            the raw unmappable catalog value - the only useful thing to show for a hand-edited row.
+        rejected_by:
+          oneOf:
+            - { $ref: "#/components/schemas/RungRejection" }
+            - { type: "null" }
+          description: "The clamp that killed this rung, or null when it passed. A floor-selected rung KEEPS this - see CodecDecision."
+        selected:
+          type: boolean
+          description: "The rung that was actually dispatched. Exactly one entry per recorded decision."
+        clamps_bypassed:
+          type: boolean
+          description: >-
+            This rung was dispatched WITHOUT being measured against the full clamp chain - the
+            clamp-0 override path (clamps 2/3/4/5 skipped) or the floor (every clamp skipped).
+            Never set on a rung that won the walk.
+    CodecDecision:
+      type: object
+      description: >-
+        UI-P6: how this session's rung/codec was resolved. Persisted at launch and echoed on every
+        session body; null for every pre-UI-P6 session and for any launch that walked no rung chain
+        (console, or a legacy/tier launch that resolved no launch profile).
+
+        THE THREE OUTCOMES ARE DELIBERATELY DISTINGUISHABLE and a client must not collapse them,
+        because `stream.codec` is identical in all three. Won on merit: selected with
+        rejected_by=null, clamps_bypassed=false, floor=false, override=null. Operator override:
+        `override` names the forced codec and the selected rung has clamps_bypassed=true with
+        rejected_by=null (it SKIPPED clamps 2/3, 4 and 5 rather than surviving them). Floor:
+        floor=true and the selected rung is clamps_bypassed=true WHILE STILL CARRYING the
+        rejected_by that killed it - it was dispatched despite being rejected. `floor` and
+        `clamps_bypassed` answer different questions ("did anything survive?" vs "was THIS rung
+        measured?") and the override case sets the second without the first; do not merge them.
+      required: [result_rung, result_codec, override, floor, considered]
+      properties:
+        result_rung: { type: string, description: "The dispatched rung id." }
+        result_codec: { $ref: "#/components/schemas/Codec" }
+        override:
+          oneOf:
+            - { $ref: "#/components/schemas/Codec" }
+            - { type: "null" }
+          description: "The operator/diagnostic stream.codec that pre-empted the walk (clamp 0), or null."
+        floor:
+          type: boolean
+          description: "NO rung survived the clamp chain and the unconditional h264 floor fired."
+        considered:
+          type: array
+          description: >-
+            Every rung WALKED, in position order. The walk stops at the first survivor, so a clean
+            top-rung win lists exactly one entry - that is the whole decision, not a truncation.
+          items: { $ref: "#/components/schemas/CodecDecisionRung" }
     ProfilePolicy:
       type: string
       description: >-
@@ -1566,7 +1634,7 @@ components:
       type: object
       # health_state/health_reason are additive (present only when running/unsustainable);
       # every other key is always serialized (nullable ones present-but-null).
-      required: [id, user_id, app_id, host_id, state, state_detail, error_message, profile_id, stream_profile_id, stream, created_at, started_at, ended_at]
+      required: [id, user_id, app_id, host_id, state, state_detail, error_message, profile_id, stream_profile_id, stream, codec_decision, negotiated_codec, created_at, started_at, ended_at]
       properties:
         id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
@@ -1590,6 +1658,22 @@ components:
             carries its own resolution, the two can legitimately disagree about width/height/fps/
             bitrate. The `stream` block below is always the truth for the running session.
         stream: { $ref: "#/components/schemas/Stream" }
+        codec_decision:
+          oneOf:
+            - { $ref: "#/components/schemas/CodecDecision" }
+            - { type: "null" }
+          description: >-
+            UI-P6: WHY this session got the codec it got - every rung walked and the clamp that
+            rejected each. Always serialized; null when no rung chain was walked.
+        negotiated_codec:
+          type: [string, "null"]
+          description: >-
+            UI-P6: the wire codec the CLIENT reports it is actually decoding (normalised getStats
+            mimeType), beside stream.codec, which is what the SERVER resolved. They should agree;
+            when they do not, that is how a silent fallback or a mis-negotiated m-line presents, so
+            both are kept and neither is reconciled away. NOT constrained to the Codec enum - a
+            value the server never resolves (vp9) is preserved rather than dropped, because it is
+            the loudest disagreement there is. Always serialized; null until the client reports one.
         health_state:
           type: string
           description: "AS10-06: computed stream-health classification; present only when the session is running/unsustainable."
@@ -2646,6 +2730,14 @@ components:
                 description: "AS10-11: browser-classified client health (sibling of the numeric metrics dict)."
               client_health_reason: { type: string }
               device_key: { type: string }
+              codec_mime_type:
+                type: string
+                description: >-
+                  UI-P6 (additive): the getStats() codec mimeType the receiver reports it is
+                  actually decoding, e.g. "video/H264". A sibling STRING field, not a metrics
+                  dictionary key (the dictionary is numeric). Normalised server-side to the wire
+                  codec vocabulary and recorded on the session as negotiated_codec; an
+                  unparseable value is dropped and the POST still returns 202.
     TraceEventsRequest:
       type: object
       description: "POST /v1/sessions/{id}/trace/events body (ST-04). Events with unknown types are dropped at ingest."

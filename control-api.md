@@ -1402,6 +1402,79 @@ non-empty list (h264 is the unconditional resolution floor, so the catalog must 
 disabled while sessions still fall back to it); an empty list maps to SQL NULL and reads back as the
 in-code default. A bad codec/status value or a missing h264 floor ⇒ `400 validation_failed`.
 
+#### Codec decision *(UI-P6)*
+> *Additive amendment — session bodies gain `codec_decision` and `negotiated_codec`;
+> `POST /v1/sessions/{id}/stats` samples gain an optional `codec_mime_type`. Changes no existing
+> shape, no status code, no route, and no authorization rule. Nothing on the agent wire
+> (`agent-api.md`) is touched: this is a record of a decision the control plane already made.*
+
+The clamp chain above answers "which rung did this session get". It did not answer **"why not the
+one above it"** — the resolver's per-rung verdicts were logged and discarded, so after the fact the
+only way to explain a fallback was to re-derive it by hand from the host codec set, the device
+probe and the failure history, on the assumption all three still read the same as they did at
+launch. `codec_decision` is that record, persisted at launch (`schema.md` `sessions.codec_decision`)
+and echoed on **every** session body.
+
+```json
+"codec_decision": {
+  "result_rung": "1080p60-h264",
+  "result_codec": "h264",
+  "override": null,          // the operator/diagnostic stream.codec that pre-empted the walk
+  "floor": false,            // true ⇒ NO rung survived and the unconditional h264 floor fired
+  "considered": [            // every rung WALKED, in position order
+    { "rung_id": "1440p60-av1",  "codec": "av1",  "rejected_by": "client_decode",
+      "selected": false, "clamps_bypassed": false },
+    { "rung_id": "1440p60-hevc", "codec": "h265", "rejected_by": "host_encoder",
+      "selected": false, "clamps_bypassed": false },
+    { "rung_id": "1080p60-h264", "codec": "h264", "rejected_by": null,
+      "selected": true,  "clamps_bypassed": false }
+  ]
+}
+```
+
+- `rejected_by` is the clamp that killed the rung, `null` when it passed:
+  `host_encoder` (1) · `client_decode` (2/3, codec) · `decode_height` (2/3, resolution) ·
+  `decode_history` (4) · `hardware_encoder` (5) · `unknown_codec` (a rung whose catalog codec does
+  not map — hand-edited data; `codec` then carries the raw catalog value). Treat the set as
+  **open**: a client must render an unrecognised reason rather than assume the list is closed.
+- `considered` holds only the rungs actually **walked**. The walk stops at the first survivor, so a
+  clean top-rung win lists exactly one entry — that is not a truncated record, it is the whole
+  decision.
+- `codec_decision` is `null` for every pre-UI-P6 session and for any launch that walked no rung
+  chain (console; a legacy/tier launch that resolved no launch profile). Always serialized.
+
+**The three outcomes are deliberately distinguishable, and a client must not collapse them.** The
+`codec` a session ends up with is identical in all three; only this record tells them apart:
+
+| outcome | how it reads |
+|---|---|
+| **won on merit** | `selected: true`, `rejected_by: null`, `clamps_bypassed: false`, `floor: false`, `override: null` — it was measured against every clamp and survived |
+| **operator override** (clamp 0) | `override` names the forced codec and the selected rung has `clamps_bypassed: true` with `rejected_by: null`. It **skipped** clamps 2/3, 4 and 5 rather than surviving them — clamp 1 is the only one an override honours, so a `rejected_by: "host_encoder"` here is the `409` path and no session persists |
+| **the floor** | `floor: true`, and the selected rung is `clamps_bypassed: true` **while still carrying the `rejected_by` that killed it during the walk**. That pairing is the point: the terminal rung was dispatched *despite* being rejected. Recording it as an unqualified pass would misinform an operator about a session that is, for example, running a codec this device has already failed to decode |
+
+`floor` and `clamps_bypassed` answer different questions — "did anything survive?" versus "was
+*this* rung measured?" — and the override case sets the second without the first. Do not merge them.
+
+**`negotiated_codec` — what the receiver actually decoded.** The session body also carries the wire
+codec the **client** reports it is decoding (`"h264" | "h265" | "av1"`, or an unrecognised
+lower-case token, or `null` until reported), beside `stream.codec`, which is what the **server**
+resolved. They should agree. When they do not, that is how a silent fallback or a mis-negotiated
+m-line presents, so **both are kept and neither is reconciled away** — a value the server never
+resolves (`vp9`) is preserved rather than dropped precisely because it is the loudest case there
+is. Comparison is the reader's: the API states two facts and flags nothing.
+
+The value arrives on the existing telemetry path: each sample in `POST /v1/sessions/{id}/stats`
+accepts an optional **`codec_mime_type`** (the `getStats()` codec `mimeType`, e.g. `"video/H264"`),
+a **sibling string field** alongside `client_health` for the same reason — the `schema.md` browser
+metrics dictionary is numeric, and a codec name has nowhere to live inside it. The server takes the
+newest sample in the batch that carries a usable value (a batch legitimately ends with samples
+posted before `getStats()` resolved the codec), normalises it to the wire vocabulary, bounds it,
+and writes it to the session **only when it changes** and **only while the session is non-terminal**
+— a late flush from a torn-down client never rewrites the historical record. An unparseable value is
+dropped, never stored, and never masks an earlier good one; the POST still returns `202`.
+Authorization is unchanged (owner-or-admin, the bearer identity): this is telemetry, and a
+non-owner's `403` writes nothing.
+
 ### Admission control (P2-01)
 > *Additive amendment — the rule the launch path enforces. Defines wire behaviour only; the
 > implementation (atomic, no-double-admit-under-concurrency) is P2-03.*
@@ -1642,7 +1715,9 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
                    "rvfc_capture_time_available": 1, "abs_capture_time_negotiated": 0,
                    // RVFC capture-to-display estimate (legacy key name retained):
                    "glass_to_glass_ms": 71, "network_pacing_ms": 7.5,
-                   "decode_display_ms": 30.9 } }
+                   "decode_display_ms": 30.9 },
+      // optional sibling STRING fields (the metrics dictionary is numeric):
+      "codec_mime_type": "video/H264" }   // UI-P6; see §Codec decision
   ] }
 // 202 — accepted (no body); samples are written with source = the `client` value (default 'browser')
 ```
@@ -1656,8 +1731,17 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
   `decode_display_ms`) are emitted only after valid, fresh RVFC capture-to-display samples. They
   are not a strict abs-capture-time measurement. *(Supersedes the removed
   deep-trace toggle / pixel-overlay instrument.)*
+- *(UI-P6, additive)* `codec_mime_type` is an optional per-sample **string** carrying the
+  `getStats()` codec `mimeType` the receiver is actually decoding. It is a sibling of the numeric
+  `metrics` object, not a key inside it. The server normalises it to the wire codec vocabulary and
+  records it on the session as `negotiated_codec` so an operator can compare it against the
+  server-resolved `stream.codec` — see §Codec decision for the full rule (newest usable value wins,
+  written only on change, never for a terminal session, junk dropped).
 - Best-effort: a malformed sample is dropped, not fataled. Accepting telemetry never affects
-  session state.
+  session state — with the single, deliberate exception of the two observability fields the client
+  is the only source of truth for: the AS10-11 `client_health` class and the UI-P6
+  `codec_mime_type`. Neither is a lifecycle transition, an admission input, or an access-control
+  input.
 
 ### `GET /v1/admin/sessions/{id}/metrics` — read per-session telemetry (admin)
 Returns the **bounded recent window** of telemetry for one session, both sources, newest first.
