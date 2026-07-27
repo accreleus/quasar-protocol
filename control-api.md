@@ -335,6 +335,73 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > `conflict` (409) are reused throughout. See
 > `docs/design/plans/2026-07-28-phase4-profile-restructure-respec.md`.
 
+> **Amendment — UI-P5 (per-app launchable launch profiles), additive, requires sign-off.** An app
+> may constrain **which launch profiles a user can pick** from the menu beside Play.
+> **(1)** `AdminApp` gains **`launchable_profile_ids`** (array of launch-profile ids, **always
+> serialized**, `[]` for every pre-UI-P5 app) and `AppWrite` gains the same field, **optional**.
+> **`[]` = unrestricted = today's behaviour**, so the feature ships inert: nothing changes for any
+> existing app until an operator configures one. **Non-empty = INTERSECT with eligibility** — the
+> allow-list can only ever *narrow* what eligibility already permits, never widen it.
+> It sits on **`AdminApp`, not `AppListItem`**, for the same reason as `runtime_preset_id`: it is
+> operator configuration, and a client is served the already-filtered menu by (2) rather than being
+> asked to intersect anything itself.
+> **(2)** `GET /v1/me/profiles` gains an **optional `app_id` query parameter**. With it the
+> response is narrowed to what that app offers; without it the response is unchanged. An `app_id`
+> that does not resolve is **`404 not_found`**, under the same visibility rule as
+> `GET /v1/apps/{id}` — never a silent fall-back to the full catalogue, which would widen the menu
+> on a typo.
+> **(3) THE APP'S OWN DEFAULT IS IMPLICITLY ALWAYS INCLUDED** (`default_profile_id` under
+> `profile_policy: prefer`) and cannot be removed. It is deliberately **not** stored in the
+> allow-list — it is one field away, and a second copy would need keeping in sync with the column
+> on every default change.
+> **(4) Only meaningful for `inherit` and `prefer`.** `force` pins the app's launch profile
+> outright, so no allow-list can ever apply. That is **mirrored server-side**: setting one on a
+> `force` app is `400 validation_failed`, and switching an app *to* `force` **clears** any stored
+> list even when the patch says nothing about it. Storing a list that can never apply would leave a
+> rule that does nothing today and silently takes effect the moment the policy changes back.
+>
+> **(5) THE NEW FAILURE MODE, stated precisely.** `POST /v1/sessions` **rejects a `profile_id`
+> outside the app's allow-list with `409 conflict`, and no session row persists.** This is a new
+> *behaviour* on an existing endpoint, so it is worth being exact about what is and is not
+> additive: **no request shape, response shape, status code or error code changes** — `409 conflict`
+> was already emitted by this endpoint (profile overrides disabled) and is already in its declared
+> set. What is new is a condition under which it fires, and that condition is unreachable for an app
+> nobody has restricted. **We consider it additive**, on the same reading that made P2-01's new
+> admission rejections additive: a new rule on a launch path that, at the shipped configuration,
+> never triggers.
+> **Why `409` and not `400` or `403`.** The id is valid, exists, and is user-visible — `400
+> validation_failed` is already this endpoint's answer for an **unknown** `profile_id`, and reusing
+> it would make "no such profile" and "this app does not offer it" indistinguishable to a client.
+> `403 forbidden` in this contract is the **role** gate ("valid token, insufficient role", raised
+> before any resource lookup); this refusal says nothing about the caller's identity and every
+> caller gets the same answer. `409` puts it with its two neighbours: `profile_ineligible` (409 —
+> the *device* refuses a valid profile) and `conflict` (409 — the app's `force` policy refuses an
+> override).
+>
+> **The rule that must not be got wrong.** **Filtering the list in the UI is NOT enforcement.**
+> (2) exists so a client renders the right menu; (5) is the gate, and it is checked server-side
+> regardless of which client called — exactly as admin endpoints are gated regardless of client
+> (CLAUDE.md invariant #6). A client-side-only allow-list is the same class of defect as a
+> client-side admin flag. The implicit path is closed too: a launch with **no** `profile_id`
+> resolves through the user preference / global default / recommendation chain, none of which knows
+> about the app, so a source outside the allow-list is **skipped** rather than used — otherwise the
+> implicit path would grant what the explicit path is rejected for.
+>
+> Backed by `schema.md` (`app_launch_profiles`, **migration 0037**). **Deleting a launch profile
+> CASCADES** its allow-list rows rather than being refused: an allow-list entry is a *restriction*
+> naming a catalogue object, not a reference that would be left pointing at nothing, so it is not
+> added to `DELETE /v1/admin/launch-profiles/{id}`'s three refuse-if-referenced dimensions. The
+> cost — a cascade that empties a list turns it back into "unrestricted" — is recorded in the
+> migration header and the affected apps are written into the admin activity log, so the widening is
+> never silent. **`agent-api.md` is unchanged**: the agent receives one resolved `stream` block and
+> has never known what a profile is. `signaling.md`, `input.md`, `native-client.md` are unchanged.
+> No new error code: `validation_failed` (400), `unauthorized` (401), `forbidden` (403),
+> `not_found` (404) and `conflict` (409) are reused. Rollout order, as for UI-P1/UI-P3: **control
+> plane before client** — `crud.decodeJSON` sets `DisallowUnknownFields()`, so a client sending
+> `launchable_profile_ids` to a control plane without this amendment is a hard `400`. See
+> `docs/design/plans/2026-07-27-ui-implementation-spec.md` §"Phase 5" and
+> `docs/design/plans/2026-07-27-admin-mockup-implementation-notes.md` §3.
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -396,8 +463,8 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 
 | endpoint | required role | notes |
 |---|---|---|
-| `POST /v1/apps` | **admin** | create an app |
-| `PATCH /v1/apps/{id}` | **admin** | edit an app |
+| `POST /v1/apps` | **admin** | create an app — *(UI-P5)* including its `launchable_profile_ids` allow-list |
+| `PATCH /v1/apps/{id}` | **admin** | edit an app — *(UI-P5)* including its `launchable_profile_ids` allow-list. **UI-P5 adds no new route**: the allow-list rides these two, which are already `RequireAuth → RequireAdmin`, so a non-admin bearer is `403` before the field is ever looked at |
 | `DELETE /v1/apps/{id}` | **admin** | *(admin-delete)* remove an app from the catalog — refuse-if-in-use |
 | `GET /v1/admin/runtime-presets`, `GET /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* read the shared runtime presets, each with its `used_by` app list |
 | `POST /v1/admin/runtime-presets` | **admin** | *(UI-P3)* create a runtime preset |
@@ -422,7 +489,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/sessions/{id}/metrics` | **admin** | *(P4-01)* per-session telemetry read (oversight) |
 | `POST /v1/me/devices` | user (self) | *(P4-01)* upsert the caller's own device capability; owner is the bearer identity, never a body field |
 | `GET /v1/me/devices` | user (self) | *(AS10-08; **LP-SEC-01**)* read the caller's own devices — **now the full list** (was AS10-08 latest-only); owner is the bearer identity |
-| `GET /v1/me/profiles` | user (self) | *(AS10-02; **UI-P4**: now evaluates **launch profiles**, each with its per-rung verdicts)* eligibility + recommendation for the caller's device; owner is the bearer identity |
+| `GET /v1/me/profiles` | user (self) | *(AS10-02; **UI-P4**: now evaluates **launch profiles**, each with its per-rung verdicts; **UI-P5**: optional `?app_id=` narrows the result to that app's allow-list — a convenience, **never the gate**, which is `POST /v1/sessions`)* eligibility + recommendation for the caller's device; owner is the bearer identity |
 | `PATCH /v1/me/profile-preferences` | user (self) | *(AS10-03; prose added UI-P4)* the caller's preferred **launch profile**; honoured only while the global policy allows user overrides |
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
@@ -454,7 +521,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `POST /v1/admin/hosts/{id}/encoder-certification/cells/{sid}/finalize` | **admin** | *(SPT-06)* derive the verdict from real agent metrics, upsert + teardown |
 | `POST /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}/complete` | **admin** | *(SPT-06)* close the run (release the per-host lock) |
 | `GET /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}` | **admin** | *(SPT-05)* poll a run's status/progress |
-| everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account |
+| everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account. *(UI-P5: `POST /v1/sessions` additionally refuses a `profile_id` outside the app's allow-list with `409` — a per-app configuration rule, not a role check, which is why it is `409` and not the `403` this table's admin rows produce)* |
 
 ### First-admin bootstrap (decision)
 A fresh database has no admin, and `/v1/auth/register` deliberately mints **only**
@@ -739,6 +806,53 @@ value outside `('game','desktop')`. The DB `CHECK` is the backstop, never the pr
 > — not a silent ignore. Deploy the control plane first; a new client against an old control
 > plane fails loudly on every app create/edit.
 
+### Per-app launchable launch profiles *(UI-P5, admin)*
+
+An app may constrain **which launch profiles a user can pick** from the menu beside Play. The
+allow-list lives on the **admin** app shapes only — `AdminApp.launchable_profile_ids` on read,
+`AppWrite.launchable_profile_ids` on write — because a client is served the already-filtered menu
+by `GET /v1/me/profiles?app_id=…` and never needs to intersect anything itself.
+
+```json
+// GET /v1/admin/apps → 200 (excerpt)
+{ "id": "<uuid>", "name": "Steam", "profile_policy": "prefer", "default_profile_id": "high",
+  "launchable_profile_ids": ["balanced", "low-bandwidth"] }
+```
+
+- **`[]` = unrestricted** — any launch profile the device is eligible for. This is every pre-UI-P5
+  app, so the feature is inert until an operator configures one.
+- **Non-empty = INTERSECT with eligibility.** It can only ever *narrow* what eligibility already
+  permits. A profile in the list that the device is ineligible for is still not offered.
+- **The app's own default is implicitly always included and cannot be removed.** That is
+  `default_profile_id` under `profile_policy: prefer`, and it is deliberately **absent from the
+  array**: it is one field away, and storing a second copy would need syncing on every default
+  change. Under `inherit` there is no app default, so a leftover `default_profile_id` is **not**
+  folded in — the account or global default decides there, and folding it in would widen the list
+  by one for no stated reason.
+- **Only meaningful for `inherit` and `prefer`.** `force` pins the app's launch profile outright.
+  Setting an allow-list on a `force` app is **`400 validation_failed`**, and switching an app *to*
+  `force` **clears** any stored list even when the request says nothing about it. Both halves are
+  the mirror of the admin UI hiding the control: a stored list that can never apply is a rule that
+  does nothing today and silently takes effect the moment the policy changes back.
+- **Write semantics.** On create, absent or `[]` = unrestricted. On patch, **absent = unchanged**,
+  `[]` = clear, a non-empty array = replace wholesale (it is a **set**, not an ordered list — order
+  is a launch profile's internal concern, not this one's). **Explicit `null` is `400`**: the
+  contract gives it no meaning here (unlike `default_profile_id` and `runtime_preset_id`, where
+  `null` means "clear"), `[]` already says clear, and reinterpreting it would silently act on a
+  value the caller clearly meant something by.
+- Every id must name a **user-visible launch profile** (`400` otherwise). A **rung id** (a stream
+  profile, e.g. `1080p60-h264`) is not a launch profile and is rejected — the two id spaces look
+  alike and differ only in table. Duplicates are deduped, not rejected.
+- **Deleting a launch profile CASCADES** its allow-list rows. It is deliberately **not** added to
+  `DELETE /v1/admin/launch-profiles/{id}`'s refuse-if-referenced set: an allow-list entry is a
+  restriction naming a catalogue object, not a reference that would be left pointing at nothing,
+  and refusing would make retiring a profile harder the more carefully an operator had curated
+  their apps. The cost is that a cascade which empties a list turns it back into "unrestricted";
+  the affected apps are recorded in the admin activity log so the widening is never silent.
+
+**And the enforcement is at `POST /v1/sessions`, not here.** See §Sessions — the filtered read is a
+convenience, the launch check is the gate.
+
 ### Favourites — owner-self surface *(UI-P1)*
 `RequireAuth`, **any authenticated account — explicitly not admin**. The owner is the **bearer
 identity**; `{app_id}` is the only path parameter and there is no `user_id` anywhere in the
@@ -971,6 +1085,13 @@ unaffected by this feature.
   (`stream_profile_policy.global_default_profile_id`), or by any user preference
   (`user_profile_preferences.default_profile_id`). All three are foreign keys as of migration 0036;
   the `409` is the application-layer gate and the FK is the backstop, not the other way round.
+  *(UI-P5)* Membership of an app's **`launchable_profile_ids`** allow-list is deliberately **not**
+  a fourth dimension: it is a *restriction* naming this profile, not a reference that would be left
+  pointing at nothing, so the join row **cascades away** with the profile and the delete proceeds.
+  The cost — a cascade that empties an app's list turns that app back into "unrestricted" — is
+  bounded (the widened set is still only what the device is eligible for, which is the pre-UI-P5
+  behaviour, and this list is stream-quality curation, never an authorization boundary) and the
+  affected apps are written into the admin activity log so it is recorded rather than silent.
 
 ### `GET` / `PATCH /v1/admin/profile-policy`
 
@@ -1108,6 +1229,30 @@ it to concrete `width`/`height`/`fps`/`bitrate_kbps`/`h264_profile`/`playout0_ms
 - The selected `profile_id` is **persisted on the session** and echoed in every session body
   (launch + `GET`); it is `null` for a legacy/tier/override launch. The resolved concrete values
   live in `stream`; full profile metadata is at `GET /v1/me/profiles` keyed by this id.
+
+*(UI-P5)* **The app's launchable allow-list is enforced HERE.** A `profile_id` outside the app's
+allow-list is **`409 conflict`**, and **no session row persists** (the check runs before the
+scheduler, so there is nothing to roll back and no reservation to leak). The allow-list is
+`AdminApp.launchable_profile_ids` (§Library — per-app launchable launch profiles); it is empty and
+therefore inert for every app an operator has not restricted.
+
+- **This is the enforcement, and the UI filter is not.** `GET /v1/me/profiles?app_id=…` returns the
+  filtered menu so a client renders the right thing, but this endpoint checks the list itself,
+  regardless of which client called. A client-side-only allow-list would be the same class of
+  defect as a client-side admin flag.
+- **The implicit path is closed too.** A launch with **no** `profile_id` resolves through the app
+  pin → user preference → global default → recommendation chain, and the middle two know nothing
+  about the app. A user preference or global default outside the allow-list is therefore
+  **skipped**, falling through to the next source; the recommendation is computed over the
+  **filtered** catalogue. Without this, the implicit path would silently grant what the explicit
+  path is rejected for. The app's own pin is never skipped — it is implicitly always included.
+- **Admin and the explicit-`stream` override bypass it**, exactly as they bypass the eligibility
+  gate and the override policy. `role=admin` is server-verified, never a client assertion.
+- **`force` apps are never restricted** by it: that policy pins the profile, so there is no menu
+  for an allow-list to constrain.
+- **Why `409`** and not `400` or `403`: see the UI-P5 amendment block. Short version — the id is
+  valid and resolves (so not the `400` reserved for an unknown `profile_id`), and the refusal says
+  nothing about the caller's identity (so not the `403` this API reserves for the role gate).
 
 *(UI-P4)* `profile_id` now names a **launch profile**, which is the object a user picks. The
 **rung** the launch actually resolved to is the separate, additive **`stream_profile_id`** field,
@@ -1701,6 +1846,26 @@ retained as the record of what changed. The new shape:
   `quasar-client` (`ffi_control.rs`, `ffi.rs`) hand-projects `width`/`height`/`fps` off the
   evaluation. Its protocol pin is already five tags stale; the re-pin is deferred to its own piece
   of work rather than done blind alongside this change.
+
+#### `?app_id=` — the per-app launch menu *(UI-P5, additive)*
+
+`GET /v1/me/profiles?app_id=<uuid>` narrows `profiles[]` to the launch profiles **that app offers**
+(its `launchable_profile_ids` allow-list, plus its implicit default), intersected with eligibility
+exactly as before. `recommended_id`, `confidence` and `notes` are computed over the **narrowed**
+set, so the recommendation can never name a profile the app does not offer.
+
+- The parameter is **optional**. Without it the response is exactly the pre-UI-P5 one, and an app
+  with an empty allow-list produces the same body either way.
+- An `app_id` that does not resolve is **`404 not_found`**, under the same visibility rule as
+  `GET /v1/apps/{id}` (non-admin: absent *or* disabled). Falling back to the full catalogue on a
+  typo would silently widen the menu, and a `200` for an app the caller cannot read would confirm
+  its existence.
+- A `force` app is never narrowed: its policy pins the profile, so no allow-list applies.
+- **This is a convenience, not the gate.** `POST /v1/sessions` enforces the same allow-list
+  independently (§Sessions), so a client that omits this parameter — or ignores what it returns —
+  cannot launch anything extra. Prefer it over filtering client-side anyway: the server is the only
+  party that knows the allow-list, and re-deriving the intersection in a client is a second
+  implementation of a rule that has exactly one correct answer.
 
 ---
 

@@ -216,6 +216,44 @@
 > See `docs/design/plans/2026-07-28-phase4-profile-restructure-respec.md` and `control-api.md`
 > §Stream profiles and launch profiles.
 
+> **Amendment — UI-P5 (per-app launchable launch profiles), additive, requires sign-off.** Via
+> **migration 0037** (`0037_app_launch_profiles`): **one new join table `app_launch_profiles`**
+> (`app_id`, `launch_profile_id`), which constrains **which launch profiles a user may pick** for
+> an app. **No existing table, column, type, constraint, default, or the session state machine
+> changes.** In particular it does **not** disturb UI-P4's expand/contract state:
+> `stream_profiles.codecs` and the legacy (non-rung) `stream_profiles` rows stay exactly where
+> migration 0036 left them, awaiting the separate contract migration.
+> **A TABLE, NOT A COLUMN**, for the reason the whole schema prefers one: a `jsonb`/`text[]` column
+> would carry no referential integrity, so an entry could name a launch profile that no longer
+> exists and nothing would notice until a menu offered something that resolves to nothing.
+> **Empty set = today's behaviour** (any launch profile the device is eligible for) — the state of
+> every existing app, so no backfill and no behaviour change on upgrade. Non-empty **intersects**
+> with eligibility; it can only narrow, never widen.
+> **The app's default is implicitly always included and is NOT stored here.** It is
+> `apps.default_profile_id` one table over, and a stored copy would need syncing on every default
+> change.
+> **Only meaningful for `profile_policy IN ('inherit','prefer')`.** `force` pins the app's profile
+> outright, so no allow-list can apply. That is enforced in the **write path** (which refuses to
+> store a list for a `force` app and clears any existing one), not by a `CHECK` — the rule spans two
+> tables, the same reason the H.264 floor rule is a write-time rule.
+> **Both foreign keys are `ON DELETE CASCADE`, and the launch-profile side is the one that had a
+> real choice.** `RESTRICT` would have made retiring a launch profile harder the more carefully an
+> operator had curated their apps; `DELETE /v1/admin/launch-profiles/{id}` already refuses (`409`)
+> for the three references that would otherwise leave something pointing at nothing
+> (`apps.default_profile_id`, the global default, a user preference), and an allow-list entry is not
+> one of those. **The cost is stated rather than discovered:** a cascade that empties an app's list
+> turns it back into "unrestricted", so a delete can *widen* a menu. That is bounded — the widened
+> set is still only what the device is eligible for, which is the pre-UI-P5 behaviour, and this list
+> is stream-quality curation and never an authorization boundary — and the affected apps are written
+> into the admin activity log so it is recorded.
+> **The enforcement is at launch, not in the UI.** `POST /v1/sessions` rejects a `profile_id`
+> outside the list with `409 conflict` (`control-api.md` §Sessions); the filtered read
+> `GET /v1/me/profiles?app_id=…` is a convenience. **`agent-api.md` is unchanged** — the agent
+> receives one resolved `stream` block and has never known what a profile is. `signaling.md`,
+> `input.md`, `native-client.md` are unchanged. See
+> `docs/design/plans/2026-07-27-ui-implementation-spec.md` §"Phase 5" and
+> `docs/design/plans/2026-07-27-admin-mockup-implementation-notes.md` §3.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
@@ -393,6 +431,7 @@ defaults the scheduler and pipeline need.
 | `home_container_path` | `TEXT` NOT NULL DEFAULT `'/home/quasar'` | *(P5-01, migration 0008)* container-side mount point for the managed home. |
 | `default_profile_id` | `TEXT` NULL → **`launch_profiles(id)`** | *(migration 0015; **FK repointed by UI-P4 / migration 0036** from `stream_profiles(id)`)* the **launch profile** this app pins or prefers, per `profile_policy`. The stored value is unchanged by the repoint, because existing ids are preserved as launch profile ids. |
 | `profile_policy` | `TEXT` NOT NULL DEFAULT `'inherit'` | *(migration 0015)* `CHECK (profile_policy IN ('inherit','prefer','force'))` **as of UI-P4 / migration 0036 — `'custom'` was removed** (`control-api.md` amendment B2). `inherit` = the user/global default decides; `prefer` = the app's `default_profile_id`, user may still override; `force` = the app's profile always. `custom` (the app opting out of profiles and carrying its own `default_width/height/fps/bitrate_kbps`) is gone: under the two-object model every app points at a launch profile, and `custom` was also the one mode that could not express a codec. **The `default_*` columns above stay** — they are the `display_stream` COALESCE fallback when no launch profile resolves, they are what `LaunchConsoleSession` uses unconditionally, and they are the ceiling on the `POST /v1/sessions` stream-override escape hatch, which is reachable for **any** app. |
+| *(no column)* | — | *(UI-P5, migration 0037)* the app's **launchable launch-profile allow-list** lives in the join table **`app_launch_profiles`**, not on this row. Empty = unrestricted = the pre-UI-P5 behaviour of every app. `default_profile_id` above is implicitly always included in it and is deliberately not duplicated there. |
 | `runtime_preset_id` | `UUID` NULL → `runtime_presets(id)` **ON DELETE RESTRICT** | *(UI-P3, migration 0035)* the shared runtime preset this app inherits its container configuration from. **`NULL` = the app carries everything itself = the pre-UI-P3 behaviour**, so no existing row changes. The preset is **never** flattened into `runtime_spec` on save — the merge happens server-side at launch (`control-api.md` §Runtime presets), which is what makes a preset edit reach every app already using it. `RESTRICT` is a backstop under the application-layer `409` on delete-in-use, not the gate; `SET NULL` would silently strip an app's image/env/mounts and let it launch with a smaller spec instead of failing. Indexed (`apps_runtime_preset_id_idx`) — Postgres does not auto-index the referencing side of a FK, and both the in-use check and the admin "Used by" list are per-preset lookups. |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | |
 
@@ -1093,6 +1132,42 @@ backing store to reap and no meaning to preserve in "somebody once favourited an
 longer exists". It is derived presentation state whose only consumer is a per-user library view,
 so the correct behaviour on either parent's deletion is for the row to disappear.
 
+## `app_launch_profiles` (UI-P5)
+> *Additive amendment (migration 0037). A new join table; it changes no existing table
+> semantics. It is **stream-quality curation** — which launch profiles an app offers from the menu
+> beside Play — and is **never an authorization boundary**: it can only narrow what eligibility
+> already permits.*
+
+One row per (app, offered launch profile). **The presence of rows is the fact**: there is no
+"restricted" boolean to keep in sync, so an app cannot be in a state where a flag says restricted
+and no row says which.
+
+| column | type | notes |
+|---|---|---|
+| `app_id` | `UUID` NOT NULL → `apps(id)` **ON DELETE CASCADE** | the app. The list is a property *of* the app and has no meaning once the app is gone — same posture as `user_app_favourites`. |
+| `launch_profile_id` | `TEXT` NOT NULL → `launch_profiles(id)` **ON DELETE CASCADE** | the offered launch profile. **The side that had a real choice.** `RESTRICT` would make retiring a launch profile harder the more carefully an operator had curated their apps; `DELETE /v1/admin/launch-profiles/{id}` already refuses (`409`) for the three references that would leave something pointing at nothing, and an allow-list entry is not one of those — it is a *restriction* naming a catalogue object, and removing it leaves the app fully functional. **Cost, recorded not discovered:** a cascade that empties an app's list turns it back into "unrestricted", so a delete can widen a menu. Bounded (the widened set is still only what the device is eligible for = the pre-UI-P5 behaviour) and logged (the affected apps go into the admin activity log). |
+
+```
+PRIMARY KEY (app_id, launch_profile_id)
+```
+
+The composite primary key is both the uniqueness constraint and what makes a duplicate id in a
+write shape a non-event (the API dedupes; this refuses).
+
+Index: `(launch_profile_id)`. Postgres indexes the primary key (giving the `(app_id, …)` leading
+edge the per-app launch read needs) but does **not** auto-index the *referencing* side of a foreign
+key — so without it **both** cascade deletes above sequential-scan this table, as does the
+"which apps allow-list this profile" lookup that runs before every launch-profile delete.
+
+**What is deliberately NOT here.** The app's own default (`apps.default_profile_id` under
+`profile_policy = 'prefer'`) is **implicitly always included** and is not stored as a row: it is one
+column away, and a copy would need syncing on every default change. The `'force'` exclusion is
+likewise not a `CHECK` — the rule spans two tables, so it lives in the write path, which refuses to
+store a list for a `force` app and clears any existing one when an app is switched to `force`.
+
+**Empty set = today's behaviour**, which is why no backfill exists and why upgrading changes
+nothing for any app.
+
 ## Session state machine (shared contract)
 This is the canonical lifecycle. `agent-api.md` and `control-api.md` use exactly these
 names. State is owned by the **control plane** (it writes the row); the agent *reports*
@@ -1193,6 +1268,7 @@ control-plane/migrations/
   0034_app_kind_favourites.up.sql -- (UI-P1) ADD apps.kind (CHECK game|desktop, DEFAULT 'game', presentation-only — no scheduler/agent reader); CREATE user_app_favourites (user_id, app_id, created_at) PK (user_id, app_id), both FKs ON DELETE CASCADE, + INDEX (app_id) for the apps-cascade delete. The down migration drops the table and the column.
   0035_runtime_presets.up.sql     -- (UI-P3) CREATE runtime_presets (name UNIQUE, description, image, args/env/mounts JSONB, managed_home, home_container_path, timestamps + set_updated_at trigger); ADD apps.runtime_preset_id UUID NULL REFERENCES runtime_presets(id) ON DELETE RESTRICT (NULL = the app carries everything itself = pre-UI-P3 behaviour, no backfill) + INDEX apps_runtime_preset_id_idx for the in-use check and the "Used by" list. The down migration drops the column FIRST (it is the dependent FK) then the table.
   0036_launch_profiles.up.sql     -- (UI-P4, EXPAND half of an expand/contract pair; NOT purely additive) (a) snapshot stream_profiles / stream_profile_policy / user_profile_preferences / (apps.id, default_profile_id, profile_policy) into _backup_0036_* tables FIRST — the fan-out is lossy and `down` is a verbatim restore, not a computed collapse; (b) ASSERT no app has profile_policy='custom' and FAIL naming them if any does (it cannot be converted behaviour-neutrally: a custom app lands on the legacy tier path where its settings are min(tier, app defaults)), then narrow the CHECK to ('inherit','prefer','force'); (c) ADD stream_profiles.codec TEXT NULL CHECK (h264|hevc|av1) — catalog vocabulary; (d) CREATE launch_profiles (id TEXT PK, display_name, description, visibility CHECK user|debug|internal, sort_order, updated_at + set_updated_at trigger); (e) CREATE launch_profile_rungs (launch_profile_id -> launch_profiles ON DELETE CASCADE, stream_profile_id -> stream_profiles ON DELETE RESTRICT, position CHECK > 0, PK (launch_profile_id, position), UNIQUE (launch_profile_id, stream_profile_id), INDEX (stream_profile_id)); (f) FAN OUT by RULE, never by special-casing an id: per existing stream_profiles row create a launch profile with the SAME id, resolve NULL/empty/unparseable `codecs` to the in-code default [h264 launchable, hevc future, av1 future], keep only `launchable` entries IN STORED ORDER (reordering h264 to last would flip an already-enabled AV1 host and is forbidden here), synthesise a lone h264 rung when zero are launchable (today that profile still streams h264 via the resolver floor), and materialise each surviving codec as a NEW stream_profiles row id = '<parent>-<codec>' with visibility='internal' and EVERY other column copied verbatim; RAISE NOTICE per launch profile whose h264 rung is not last (rungs after it are unreachable); (g) ADD sessions.stream_profile_id TEXT NULL REFERENCES stream_profiles(id) — the resolved rung, vs profile_id which keeps the user's pick; (h) REPOINT THREE FKs to launch_profiles(id): stream_profile_policy.global_default_profile_id, apps.default_profile_id, AND user_profile_preferences.default_profile_id (the third has 0 rows, so omitting it passes every test and 500s on the first real user preference). Deliberately NOT done here: dropping stream_profiles.codecs, deleting the legacy stream_profiles rows, making codec NOT NULL, or giving the global default a value — the first three are the later CONTRACT migration, the fourth would change every `inherit` app's effective resolution at once. The down migration drops the three FKs, drops launch_profile_rungs + launch_profiles, drops sessions.stream_profile_id, restores stream_profiles / policy / preferences / the two apps columns from the _backup_0036_* snapshots, drops stream_profiles.codec, widens the profile_policy CHECK back, recreates the three FKs against stream_profiles(id), and drops the backups — emitting a NOTICE naming any launch profile created after `up` (it is dropped, not collapsed, because the fan-out cannot be inverted). Admin writes made after `up` are lost by `down`; both facts are stated verbatim in the migration file header.
+  0037_app_launch_profiles.up.sql -- (UI-P5, purely additive) CREATE app_launch_profiles (app_id -> apps ON DELETE CASCADE, launch_profile_id -> launch_profiles ON DELETE CASCADE, PK (app_id, launch_profile_id), INDEX (launch_profile_id)) — the per-app allow-list of launch profiles a user may pick from the menu beside Play. A TABLE, NOT A COLUMN: a jsonb/text[] column carries no referential integrity, so an entry could name a launch profile that no longer exists and nothing would notice. EMPTY SET = today's behaviour (any launch profile the device is eligible for), which is every existing app — no backfill, no behaviour change on upgrade; non-empty INTERSECTS with eligibility and can only narrow. The app's own default (apps.default_profile_id under profile_policy='prefer') is IMPLICITLY always included and deliberately NOT stored here (a copy would need syncing on every default change), and the 'force' exclusion is a WRITE-PATH rule rather than a CHECK because it spans two tables. CASCADE on the launch_profile side is the deliberate choice over RESTRICT: an allow-list entry is a restriction naming a catalogue object, not a reference that would be left pointing at nothing, so it must not make retiring a launch profile harder the more carefully an operator curated their apps — the cost, that a cascade emptying a list turns it back into 'unrestricted', is bounded (the widened set is still only what the device is eligible for) and is written into the admin activity log. Touches NOTHING of 0036's expand/contract state: stream_profiles.codecs and the legacy rows stay. The down migration drops the table; any allow-list configured while 0037 was applied is discarded, because the pre-0037 schema has no representation for it.
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`

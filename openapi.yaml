@@ -207,10 +207,30 @@ paths:
   /v1/me/profiles:
     get:
       tags: [me]
-      summary: Stream-profile eligibility + recommendation for the caller's device.
+      summary: Launch-profile eligibility + recommendation for the caller's device.
+      description: |
+        UI-P5 adds the OPTIONAL app_id query parameter. With it, the response is narrowed to the
+        launch profiles that app offers (its allow-list, intersected with eligibility), so a
+        client renders the correct per-app launch menu without intersecting anything itself.
+        Without it the response is exactly the pre-UI-P5 one.
+
+        THIS FILTER IS A CONVENIENCE, NOT THE GATE. POST /v1/sessions enforces the same
+        allow-list independently, so a client that omits the parameter, or ignores what it
+        returns, cannot launch anything extra.
+      parameters:
+        - name: app_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: >-
+            UI-P5, OPTIONAL. Narrow the evaluation to the launch profiles this app offers. 404
+            when the app does not resolve under the SAME visibility rule as GET /v1/apps/{id}
+            (non-admin: absent or disabled) - never a silent fall-back to the full catalogue,
+            which would widen the menu on a typo.
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/ProfilesResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /v1/me/storage:
     get:
       tags: [me]
@@ -526,6 +546,27 @@ paths:
     post:
       tags: [sessions]
       summary: Launch a session; returns signaling coordinates.
+      description: |
+        UI-P5 adds ONE NEW FAILURE MODE on this existing endpoint: a profile_id outside the
+        app's launchable allow-list is 409 conflict, and no session row persists.
+
+        NO EXISTING SHAPE, STATUS CODE OR ERROR CODE CHANGES - 409 conflict was already emitted
+        here (profile overrides disabled) and is already declared below. The new refusal is only
+        reachable for an app an operator has explicitly restricted; every pre-UI-P5 app has an
+        empty allow-list and is unaffected.
+
+        409 rather than 400 or 403, deliberately. The id is valid and resolves, so 400
+        validation_failed - this endpoint's answer for an UNKNOWN profile_id - would make "no
+        such profile" and "this app does not offer it" indistinguishable. And 403 forbidden is
+        the ROLE gate in this contract ("valid token, insufficient role", raised before any
+        resource lookup); this refusal is per-app stream-quality curation and every caller gets
+        the same answer. It sits with its two neighbours: profile_ineligible (409, the DEVICE
+        refuses a valid profile) and conflict (409, the app's `force` policy refuses an
+        override).
+
+        THE UI FILTER IS NOT THE ENFORCEMENT. GET /v1/me/profiles?app_id= returns the filtered
+        menu, but this endpoint checks the allow-list itself, regardless of client - exactly as
+        admin endpoints are gated server-side regardless of client.
       requestBody:
         required: true
         content:
@@ -1481,6 +1522,29 @@ components:
             launch profile - see RuntimePreset. Note crud.decodeJSON sets DisallowUnknownFields(),
             so sending this to a control plane without the UI-P3 amendment is a hard 400 - deploy
             the control plane before the client.
+        launchable_profile_ids:
+          type: array
+          items: { type: string }
+          description: >-
+            UI-P5, OPTIONAL. The LAUNCH PROFILE ids a user may pick for this app. On create,
+            absent or [] = unrestricted = today's behaviour. On patch: absent = UNCHANGED,
+            [] = clear the allow-list (back to unrestricted), a non-empty array = replace it
+            wholesale (it is a set, not an ordered list).
+            EXPLICIT null IS 400 validation_failed. The contract gives null no meaning for this
+            field - unlike default_profile_id and runtime_preset_id, where null explicitly means
+            "clear" - and [] already says clear. Reinterpreting null would silently act on a
+            value the caller clearly meant something by, which is exactly the defect fixed for
+            the runtime-preset list fields.
+            Every id must name a USER-VISIBLE launch profile (400 otherwise). A RUNG id (a stream
+            profile) is not a launch profile and is rejected - the two id spaces look alike and
+            differ only in table. Duplicates are deduped rather than rejected.
+            SETTING IT WHILE profile_policy IS 'force' IS 400: that policy pins the app's launch
+            profile, so no allow-list can ever apply. Switching an app TO 'force' CLEARS any
+            stored list, even when the patch says nothing about it, so nothing can silently
+            reactivate on a later switch back to 'prefer'.
+            Note crud.decodeJSON sets DisallowUnknownFields(), so sending this to a control plane
+            without the UI-P5 amendment is a hard 400 - deploy the control plane before the
+            client.
 
     Session:
       type: object
@@ -1715,7 +1779,7 @@ components:
         - { $ref: "#/components/schemas/App" }
         - type: object
           description: "Admin-visible app shape: includes runtime_spec + resource/storage defaults (P2-08, P5-01)."
-          required: [default_vram_mb, default_encode_slots, runtime_spec, managed_home, home_container_path, runtime_preset_id]
+          required: [default_vram_mb, default_encode_slots, runtime_spec, managed_home, home_container_path, runtime_preset_id, launchable_profile_ids]
           properties:
             default_vram_mb:
               type: integer
@@ -1739,6 +1803,27 @@ components:
                 shape shows the operator exactly what they configured. Admin-only, like
                 runtime_spec: a preset is container configuration, not library presentation, so it
                 is deliberately NOT on AppListItem.
+            launchable_profile_ids:
+              type: array
+              items: { type: string }
+              description: >-
+                UI-P5: which LAUNCH PROFILES a user may pick for this app from the menu beside
+                Play. ALWAYS serialized as an array, never null. EMPTY = unrestricted (any launch
+                profile the device is eligible for), which is every pre-UI-P5 app, so the feature
+                ships inert. NON-EMPTY = intersect with eligibility; it can only ever narrow what
+                eligibility already permits, never widen it.
+                The app's OWN default (default_profile_id under profile_policy 'prefer') is
+                IMPLICITLY always included and cannot be removed, and is deliberately absent from
+                this array - it is one field away and duplicating it would create a second copy to
+                keep in sync.
+                Only meaningful for profile_policy 'inherit' and 'prefer'. 'force' pins the app's
+                profile outright, so this is always [] for a forced app and setting it is
+                400 validation_failed - mirroring the admin UI hiding the control, rather than
+                storing a rule that does nothing today and silently takes effect on a later policy
+                change.
+                Admin-only, for the same reason as runtime_preset_id: it is operator
+                configuration, and a client is served the already-filtered menu by
+                GET /v1/me/profiles?app_id= rather than being asked to intersect anything itself.
     AdminAppsResponse:
       type: object
       required: [items, next_cursor]
