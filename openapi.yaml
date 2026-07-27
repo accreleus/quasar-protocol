@@ -216,6 +216,35 @@ paths:
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/MyStorageResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/me/favourites/{app_id}:
+    parameters: [ { $ref: "#/components/parameters/PathAppId" } ]
+    put:
+      tags: [me]
+      summary: "UI-P1: favourite an app for the calling user (idempotent)."
+      description: |
+        RequireAuth — any authenticated account, explicitly NOT admin. The owner is the bearer
+        identity; no endpoint in this surface takes a user_id. Idempotent
+        (INSERT … ON CONFLICT DO NOTHING) — a repeat PUT does not re-stamp created_at.
+        404 when the app id does not resolve under the SAME visibility rule as GET /v1/apps/{id}
+        (non-admin: absent or disabled; admin: absent) — a 204 on a disabled app would confirm
+        the existence of something the caller cannot read.
+      responses:
+        "204": { description: App favourited. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [me]
+      summary: "UI-P1: unfavourite an app (idempotent, unconditional — never 404)."
+      description: |
+        RequireAuth. Idempotent AND unconditional for a well-formed UUID: never-favourited,
+        disabled and since-deleted all return 204. Deliberately never 404s — the intent is
+        satisfied either way and an app delete cascades the row away, so a 404 would be
+        unactionable. Same posture as DELETE /v1/admin/invites/{id} and POST /v1/auth/logout.
+      responses:
+        "204": { description: App not favourited (whether or not it was). }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/me/profile-preferences:
     get:
       tags: [me]
@@ -238,14 +267,20 @@ paths:
   /v1/apps:
     get:
       tags: [apps]
-      summary: List enabled apps (public library).
-      security: []
+      summary: List enabled apps (requires auth; favourite is resolved for the calling user).
+      description: |
+        UI-P1, BREAKING (2026-07-27): this list was previously public (`security: []`) and
+        returned the full catalogue — names, descriptions, cover URLs, stream defaults — to any
+        unauthenticated caller. That was an information-disclosure defect on a self-hosted
+        deployment; it now requires a bearer and returns 401 without one. Both known consumers
+        (the web SPA and quasar-client) already send the bearer. See control-api.md.
       responses:
         "200":
           description: OK.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AppList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [apps]
       summary: Create an app.
@@ -998,6 +1033,12 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    PathAppId:
+      name: app_id
+      in: path
+      required: true
+      description: "UI-P1: an app id in a path whose parameter is named app_id (PathId hardcodes name: id)."
+      schema: { type: string, format: uuid }
 
   responses:
     Unauthorized:
@@ -1035,6 +1076,10 @@ components:
     H264Profile:
       type: string
       enum: [constrained-baseline, baseline, main, high]
+    AppKind:
+      type: string
+      description: "UI-P1: presentation-only library classification. Nothing in scheduling, admission, profile/codec resolution, or the agent wire reads it."
+      enum: [game, desktop]
     Codec:
       type: string
       description: "Multi-codec: the WIRE session video codec (h265 is HEVC). Resolved server-side at launch; the client answers the single codec the host offers. Distinct from the profile catalog's codecs[].codec vocabulary, which spells HEVC 'hevc'."
@@ -1130,13 +1175,23 @@ components:
         codec: { allOf: [ { $ref: "#/components/schemas/Codec" } ], description: "Multi-codec: the resolved session video codec on session.stream; absent on an app's display_stream. Additive; h264 for every pre-multi-codec session. h264_profile applies only when codec is h264." }
         playout0_ms: { type: integer, description: "AS-02: tier-selected initial receiver playout target (ms) on session.stream; absent on an app's display_stream." }
     AppListItem:
+      # UI-P1: kind + favourite are added HERE, so App and AdminApp — which are allOf
+      # compositions over this schema — inherit both. There is no read shape that omits them.
       type: object
-      required: [id, name, description, cover_url, default_width, default_height, default_fps, default_bitrate_kbps, default_profile_id, profile_policy, enabled]
+      required: [id, name, description, cover_url, kind, favourite, default_width, default_height, default_fps, default_bitrate_kbps, default_profile_id, profile_policy, enabled]
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
         description: { type: string }
         cover_url: { type: [string, "null"] }
+        kind: { allOf: [ { $ref: "#/components/schemas/AppKind" } ], description: "UI-P1: presentation-only library classification (apps.kind). Always serialized; 'game' for every pre-UI-P1 row." }
+        favourite:
+          type: boolean
+          description: >-
+            UI-P1: whether THE CALLING USER has favourited this app. Always serialized. Resolved
+            per request from the bearer identity - never a stored property of the app, never
+            settable via AppWrite, never assertable by a client. Set/cleared via
+            PUT/DELETE /v1/me/favourites/{app_id}.
         default_width: { type: integer }
         default_height: { type: integer }
         default_fps: { type: integer }
@@ -1173,6 +1228,16 @@ components:
         name: { type: string }
         description: { type: string }
         cover_url: { type: [string, "null"] }
+        kind:
+          allOf: [ { $ref: "#/components/schemas/AppKind" } ]
+          description: >-
+            UI-P1, OPTIONAL. Absent = the server default on create, unchanged on patch - absence
+            is NEVER a zero value (the cb97bfb trap: an omitted field decoding to ""/0 and being
+            written clobbers the schema default). kind: "" is NOT "use the default"; it is
+            400 validation_failed, as is any value outside the enum. The DB CHECK is the
+            backstop, not the primary gate. Note crud.decodeJSON sets DisallowUnknownFields(),
+            so sending kind to a control plane without this amendment is a hard 400, not a
+            silent ignore - deploy the control plane before the client.
         enabled: { type: boolean }
         default_width: { type: integer }
         default_height: { type: integer }

@@ -117,6 +117,23 @@
 > §3.4 semantics of the codec-scoped history are documented at the migration-ledger line for 0032.
 > See `docs/design/plans/2026-07-22-multi-codec-hevc-av1-spec.md` §3/§3.4.
 
+> **Amendment — UI-P1 (app classification + per-user favourites), additive, signed off
+> 2026-07-27.** Via **migration 0034** (`0034_app_kind_favourites`): (1) one new column
+> **`apps.kind TEXT NOT NULL DEFAULT 'game' CHECK (kind IN ('game','desktop'))`** — a
+> **presentation-only** library classification (`control-api.md` `AppListItem.kind`). Nothing in
+> scheduling, admission, profile/codec resolution, or the agent wire reads it; the default makes
+> every existing row valid with **no backfill**. (2) one new table **`user_app_favourites`** — a
+> per-(user, app) join carrying no payload beyond `created_at`, whose composite primary key
+> `(user_id, app_id)` is both the uniqueness constraint and the idempotency key for
+> `PUT /v1/me/favourites/{app_id}`. **Purely additive** — a new defaulted column and a new table;
+> no existing table, column, type, constraint, or the session state machine changes. A favourite
+> is **presentation state, never access control and never a session authority**: it does not
+> affect what a user may launch, and `control-api.md`'s server-side role/ownership gates are
+> untouched. The breaking half of UI-P1 (`GET /v1/apps` becoming `RequireAuth`) is an API-surface
+> change with **no schema component** — see `control-api.md`. `agent-api.md`, `signaling.md`,
+> `input.md`, `native-client.md` are unchanged. See
+> `docs/design/plans/2026-07-27-ui-implementation-spec.md` §"Phase 1".
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
@@ -281,6 +298,7 @@ defaults the scheduler and pipeline need.
 | `name` | `TEXT` NOT NULL | display name |
 | `description` | `TEXT` NOT NULL DEFAULT `''` | |
 | `cover_url` | `TEXT` NULL | library art |
+| `kind` | `TEXT` NOT NULL DEFAULT `'game'` | *(UI-P1, migration 0034)* `CHECK (kind IN ('game','desktop'))`. **Presentation-only** library classification, surfaced as `control-api.md` `AppListItem.kind` so the client can split/filter the library. **Nothing in scheduling, admission, profile/codec resolution, or the agent wire reads it** — it is not an input to any decision. The default makes every existing row valid with no backfill. Optional on the write shape, where **absent means "default on create, unchanged on patch" — never a zero value** (`control-api.md`); the `CHECK` here is the backstop, not the primary gate. Widening the enum is a later migration (the `TEXT` + `CHECK` convention above). |
 | `runtime_spec` | `JSONB` NOT NULL DEFAULT `'{}'` | container launch spec the **node agent** consumes: `{ "image", "args":[], "env":{}, "mounts":[], "gpu":true }`. JSONB (not frozen columns) because this is agent-internal launch detail that will grow; the scheduler does **not** read it. |
 | `default_vram_mb` | `INT` NOT NULL DEFAULT `1024` | **DEPRECATED (#383)** — no longer read by the scheduler. Retained so existing rows and API clients are undisturbed; still accepted on write and returned on read, but placement ignores it. Admission now gates on `default_encode_slots` plus the live free-VRAM veto (`control-api.md` §Admission control). It was never enforceable — no VRAM cap is applied to a session — so it only ever encoded a guess. Slated for removal once a release has passed with no readers. |
 | `default_encode_slots` | `INT` NOT NULL DEFAULT `1` | encode sessions this app needs (normally 1). |
@@ -859,6 +877,43 @@ tuning.
 Migration `0018_host_encoder_certification`: creates the table + the lookup index in one
 `BEGIN; … COMMIT;` block. The down migration drops the table.
 
+## `user_app_favourites` (UI-P1)
+> *Additive amendment (migration 0034). A new join table; it changes no existing table
+> semantics. It is **presentation state** — which apps a user pinned in their library — and is
+> never access control, never a launch input, and never a session authority.*
+
+One row per (user, app) favourite. **The presence of the row is the fact**: there is no
+`favourited` boolean to keep in sync and no soft delete, so unfavouriting is a row delete and
+the table can never hold a "false" row that a reader must interpret.
+
+| column | type | notes |
+|---|---|---|
+| `user_id` | `UUID` NOT NULL → `users(id)` **ON DELETE CASCADE** | the owner. Always the bearer identity at the API (`control-api.md` §Favourites) — no endpoint accepts a `user_id`, so cross-user isolation is structural. |
+| `app_id` | `UUID` NOT NULL → `apps(id)` **ON DELETE CASCADE** | the favourited app. |
+| `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | when it was favourited. **Not exposed on the wire** — kept so a "recently favourited" ordering is a query change, not a future migration. A repeat `PUT` is `ON CONFLICT DO NOTHING` and therefore does **not** re-stamp it. |
+
+```
+PRIMARY KEY (user_id, app_id)
+```
+
+The composite primary key is **both** the uniqueness constraint and the **idempotency key**:
+`PUT /v1/me/favourites/{app_id}` is `INSERT … ON CONFLICT (user_id, app_id) DO NOTHING`, so
+favouriting twice is one row and one `204`.
+
+Index: `(app_id)`. Postgres indexes the primary key (hence the `(user_id, …)` leading edge for
+the per-user library join) but does **not** auto-index the *referencing* side of a foreign key —
+so without this index the `apps` cascade delete has to sequential-scan this table per deleted
+app. `DELETE /v1/apps/{id}` is a real operator path, so the index is part of the contract.
+
+**Both FKs are `ON DELETE CASCADE`, deliberately not `SET NULL`** — note this differs from the
+neighbouring `user_homes.user_id` / `user_homes.app_id`, which *are* `SET NULL`. The difference
+is that `user_homes` guards a **backing store**: a home row must survive its user's or app's
+deletion long enough for the GC path to reap the volume/directory it points at, so it is
+orphaned-then-tombstoned rather than deleted outright. A favourite guards nothing — there is no
+backing store to reap and no meaning to preserve in "somebody once favourited an app that no
+longer exists". It is derived presentation state whose only consumer is a per-user library view,
+so the correct behaviour on either parent's deletion is for the row to disappear.
+
 ## Session state machine (shared contract)
 This is the canonical lifecycle. `agent-api.md` and `control-api.md` use exactly these
 names. State is owned by the **control plane** (it writes the row); the agent *reports*
@@ -954,6 +1009,9 @@ control-plane/migrations/
   --  migrations/ is authoritative. The multi-codec amendment adds the two lines below.)
   0031_multi_codec.up.sql        -- (multi-codec) ADD sessions.codec (CHECK h264|h265|av1, DEFAULT 'h264') + stream_profiles.codecs JSONB NULL (per-profile codec-pref list, catalog vocab) + hosts.codecs JSONB NULL (host wire codec set; NULL ⇒ ['h264'])
   0032_codec_scoped_history.up.sql -- (multi-codec §3.4, codec-aware decode-failure verdicts) ADD user_device_profile_history.codec (CHECK ''|h264|h265|av1, DEFAULT ''); widen its UNIQUE to (user_id, device_key, profile_id, codec). codec='' = profile-level verdict (all pre-0032 rows, plus presentation_degrading fails and pass outcomes, which are codec-independent); codec IN ('h264','h265','av1') = a decode-side fail (client_unsupported / decode_degrading) scoped to the codec the session streamed. Eligibility (ProfileFailures) treats codec IN ('','h264') as profile-blocking (h264 is the guaranteed floor, so an h264 decode failure is a profile failure, pre-0032 behaviour); the launch codec resolver (clamp 4) skips a failed non-h264 codec so the session degrades to the next candidate / the h264 floor instead of the profile vanishing from the picker. A pass deletes the fail row for the codec that actually ran. The admin stream.codec override bypasses clamp 4 (the forced re-test whose sustained smooth run records the clearing pass is the recovery path for a fixed encoder).
+  -- (migration 0033 also predates this ledger's last refresh; the committed SQL in migrations/
+  --  is authoritative. The UI-P1 amendment adds the line below.)
+  0034_app_kind_favourites.up.sql -- (UI-P1) ADD apps.kind (CHECK game|desktop, DEFAULT 'game', presentation-only — no scheduler/agent reader); CREATE user_app_favourites (user_id, app_id, created_at) PK (user_id, app_id), both FKs ON DELETE CASCADE, + INDEX (app_id) for the apps-cascade delete. The down migration drops the table and the column.
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`

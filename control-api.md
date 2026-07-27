@@ -164,6 +164,58 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > `stream_profiles.codecs`, `hosts.codecs`, `user_device_profile_history.codec`) carry the wire and
 > storage halves. See `docs/design/plans/2026-07-22-multi-codec-hevc-av1-spec.md` §3.
 
+> **Amendment — UI-P1 (app classification + per-user favourites), signed off 2026-07-27.** Five
+> pieces for the library redesign. Four are additive; **piece (5) is breaking and is a security
+> fix, not a feature** — it gets its own block below. **(1)** The app read shape gains **`kind`**
+> (`"game" | "desktop"`, backed by `apps.kind`, `schema.md`), a **presentation-only** library
+> classification: nothing in scheduling, admission, profile/codec resolution, or the agent wire
+> reads it. It is added to **`AppListItem`**, so **`App` and `AdminApp` inherit it** — both are
+> `allOf` compositions over `AppListItem` (`openapi.yaml`), so there is no separate admin variant
+> to add it to and no read shape that omits it. **(2)** The app **write** shape (`AppWrite` —
+> `POST /v1/apps`, `PATCH /v1/apps/{id}`) gains an **optional** `kind`. **Absent means "server
+> default on create, unchanged on patch" — absence is NEVER a zero value.** An explicit
+> `kind: ""` is **not** "use the default"; it is `400 validation_failed`, as is any value outside
+> the enum. The DB `CHECK` is the backstop, not the primary gate. **(3)** `AppListItem` gains
+> **`favourite`** (boolean, **always serialized**): whether **the calling user** has favourited
+> this app. Resolved per request from the bearer identity — never a stored property of the app,
+> never settable via `AppWrite`, never assertable by a client. **(4)** Two new **`RequireAuth`**
+> routes, `PUT /v1/me/favourites/{app_id}` and `DELETE /v1/me/favourites/{app_id}` (§Library —
+> favourites), plus their two Authorization rows: **any authenticated account, explicitly not
+> admin**. Backed by the new `user_app_favourites` join table (`schema.md`, **migration 0034**,
+> which also adds `apps.kind`). **(5)** **`GET /v1/apps` changes from public to `RequireAuth`
+> (breaking — next block).** No new error code: `validation_failed` (400), `unauthorized` (401)
+> and `not_found` (404) are reused throughout. **`agent-api.md`, `signaling.md`, `input.md`,
+> `native-client.md` are unchanged** — a library classification and a per-user favourite never
+> reach a node agent. See `docs/design/plans/2026-07-27-ui-implementation-spec.md` §"Phase 1".
+
+> **Amendment — UI-P1 (5): `GET /v1/apps` now requires authentication. BREAKING, non-additive,
+> signed off 2026-07-27.** Recorded honestly rather than dressed up as additive.
+> **What was wrong.** `GET /v1/apps` was the one `/v1` route registered without the auth
+> middleware (`control-plane/internal/crud/handler.go:73` — a bare `mux.HandleFunc`, no
+> `requireAuth` wrapper) and it declared `security: []` (`openapi.yaml:242`). Any unauthenticated
+> caller who could reach the control plane received the **full app catalogue** — every app's
+> name, description, cover-art URL and stream defaults. On a self-hosted deployment that is an
+> information-disclosure defect, not a feature: this product has no anonymous browsing surface,
+> and the sibling read `GET /v1/apps/{id}` has always required a bearer.
+> **What changes.** The route is now `RequireAuth` (`security: [bearerAuth]`, `401` added to its
+> responses). An unauthenticated caller goes from `200` + the catalogue to `401`. Nothing else
+> about the endpoint changes — same path, same pagination parameters, same `200` body (plus the
+> additive `kind` / `favourite` keys from (1) and (3)).
+> **Blast radius — verified, not assumed.** Both known consumers already send the bearer: the web
+> SPA (`web/src/api/library.ts:28` — `listApps(token)` through the shared `apiFetch({ token })`)
+> and `quasar-client` (`core/src/control/mod.rs:259` — `self.send(HttpMethod::Get, "/v1/apps",
+> true, None)`, whose third argument is `auth`). **No known consumer breaks.** What does break is
+> an unauthenticated third-party scrape of the catalogue — which is the point.
+> **It also unblocks (3):** `favourite` becomes resolvable without inventing an optional-auth
+> middleware, because a caller now always has an identity and the per-user join is always
+> well-defined.
+> **The rest of the unauthenticated surface was audited in the same pass and is correct as-is:**
+> `POST /v1/auth/register`, `POST /v1/auth/login`, `POST /v1/auth/logout` (it revokes the
+> presented token, so it must accept an already-invalid one), `GET /agent/ws` and `GET /v1/signal`
+> (both authenticate **in-handler** — the per-node `node_secret` and the single-use signaling
+> token respectively, neither of which is a bearer header), and `GET /health`. **`GET /v1/apps`
+> was the only offender.** A future reader should know the sweep happened and need not repeat it.
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -231,7 +283,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/hosts`, `GET /v1/hosts/{id}` | **admin** | host/capacity oversight |
 | `POST /v1/hosts/{id}/drain`, `POST /v1/hosts/{id}/uncordon` | **admin** | *(P3-01)* host lifecycle — cordon a host out of service / return it |
 | `DELETE /v1/hosts/{id}` | **admin** | *(admin-delete)* forget an offline host — refuse-if-online-or-in-use |
-| `GET /v1/apps`, `GET /v1/apps/{id}` | user / public | the public library (list is unauthenticated) |
+| `GET /v1/apps`, `GET /v1/apps/{id}` | user | the library — **both reads require auth** *(UI-P1: the list was public until 2026-07-27; see the breaking-change amendment. `favourite` is resolved from the bearer identity, so an anonymous read could not answer it anyway)* |
 | `GET /v1/sessions/{id}`, `GET /v1/sessions`, `DELETE /v1/sessions/{id}` | **owner or admin** | resource-ownership check (`403` otherwise), not a blanket admin gate |
 | `POST /v1/sessions/{id}/swap` | **owner or admin** | *(P2-02)* same ownership check as `DELETE` |
 | `POST /v1/sessions/{id}/stats` | **owner or admin** | *(P4-01)* the client posts its own session's browser telemetry — same ownership check as `DELETE` |
@@ -242,6 +294,8 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `GET /v1/me/storage` | user (self) | *(P5-01)* the caller's own per-app storage usage |
+| `PUT /v1/me/favourites/{app_id}` | user (self) | *(UI-P1)* favourite an app; owner is the bearer identity — no endpoint takes a `user_id`. Idempotent `204`; `404` under the same visibility rule as `GET /v1/apps/{id}` |
+| `DELETE /v1/me/favourites/{app_id}` | user (self) | *(UI-P1)* unfavourite; idempotent **and unconditional** `204` for a well-formed UUID — deliberately never `404` |
 | `POST /v1/me/password` | user (self) | *(CP-01)* change the caller's own password; subject is the bearer identity, never a body field. Revokes all active tokens on success — client must re-authenticate |
 | `GET /v1/admin/settings` | **admin** | *(LP-SEC-01)* read instance settings (`registration_mode`, `storage_provider`, …) |
 | `PATCH /v1/admin/settings` | **admin** | *(LP-SEC-01)* update instance settings — how invites are enabled/disabled from the UI |
@@ -482,11 +536,14 @@ device id belongs to another user (no existence leak).
 ## Library
 
 ### `GET /v1/apps`
-Lists enabled apps (the library the user can launch).
+Lists enabled apps (the library the user can launch). **`RequireAuth`** — `401` without a valid
+bearer. *(UI-P1, breaking: this list was unauthenticated until 2026-07-27; see the amendment
+block at the top of this document for what was exposed and why it changed.)*
 ```json
 // 200
 { "items": [
     { "id": "<uuid>", "name": "Foo", "description": "...", "cover_url": "https://...",
+      "kind": "game", "favourite": true,
       "default_width": 1920, "default_height": 1080, "default_fps": 60, "default_bitrate_kbps": 15000,
       "default_profile_id": "1440p60", "profile_policy": "prefer",
       "display_stream": { "width": 2560, "height": 1440, "fps": 60, "bitrate_kbps": 20000 } }
@@ -497,13 +554,82 @@ app/global stream-profile policy when available, and otherwise falls back to the
 `default_*` stream fields. `runtime_spec` and resource defaults are **not** exposed to
 clients (agent-internal / scheduler-internal). Disabled apps are omitted.
 
+*(UI-P1)* `kind` (`"game" | "desktop"`) is the library classification, **presentation only** —
+it exists so the client can split and filter the library. Nothing in scheduling, admission,
+profile/codec resolution, or the agent wire reads it. It is defined on `AppListItem`, so the
+single-app read (`App`) and the admin read (`AdminApp`) inherit it — they are `allOf`
+compositions over the same shape.
+
+*(UI-P1)* `favourite` is **whether the calling user has favourited this app**, always
+serialized. It is resolved per request from the **bearer identity** — it is never a stored
+property of the app, never settable on the write shape, and never assertable by a client.
+Cross-user isolation is structural rather than a check: every favourite read and write is
+scoped to the bearer's `user_id`, and **no endpoint takes a `user_id`**, so there is no shape
+in which one user can read or set another's favourites. Because `favourite` sits on
+`AppListItem`, it is **required on every read shape that composes it** — including `AdminApp`
+(`GET /v1/admin/apps`), which must therefore join the acting admin's own favourites rather than
+serialize a placeholder. There is deliberately **no server-side `?kind=` filter** on this endpoint — the client filters the single page it already
+holds; a filter parameter would be a second way to express the same view for no gain. That is
+a decision, not an oversight.
+
 ### `GET /v1/apps/{id}`
-Single app, same fields as a list item. `404` if absent or disabled.
+Single app, same fields as a list item — including `kind` and the caller-resolved `favourite`.
+`404` if absent or disabled.
 
 > Creating/editing apps and managing hosts (`GET/POST/PATCH /v1/apps`, `GET /v1/hosts`) is the
 > **admin** surface (`role=admin`), built in P1-3 against the same `schema.md`. The read shapes
 > above are the public subset; admin write shapes are P1-3's to define within this contract's
 > conventions (no frozen-interface change — they're additive, admin-gated).
+
+**The app write shape and `kind` (UI-P1).** `kind` is **optional** on create and patch.
+**Absent = the schema default on create, unchanged on patch. Absence is never a zero value.**
+This is the `cb97bfb` trap made explicit: an omitted field that decodes to `""` / `0` and is
+then written **clobbers the column default** — that is how four Tower apps reached
+`default_encode_slots = 0` and silently bypassed admission. So `kind` must decode through a
+pointer (or an equivalent presence-aware decode), exactly like the numeric `default_*` fields.
+An explicit `kind: ""` is **not** "use the default": it is `400 validation_failed`, as is any
+value outside `('game','desktop')`. The DB `CHECK` is the backstop, never the primary gate.
+
+> **Rollout order: control plane before client.** `crud.decodeJSON` sets
+> `DisallowUnknownFields()` (`control-plane/internal/crud/handler.go:540`), so a client that
+> sends `kind` to a control plane **without** this amendment gets a hard `400 validation_failed`
+> — not a silent ignore. Deploy the control plane first; a new client against an old control
+> plane fails loudly on every app create/edit.
+
+### Favourites — owner-self surface *(UI-P1)*
+`RequireAuth`, **any authenticated account — explicitly not admin**. The owner is the **bearer
+identity**; `{app_id}` is the only path parameter and there is no `user_id` anywhere in the
+surface. The **presence of the row is the fact** — there is no boolean column, no soft delete,
+and the composite primary key `(user_id, app_id)` is simultaneously the uniqueness constraint
+and the idempotency key (`schema.md` `user_app_favourites`).
+
+**`PUT /v1/me/favourites/{app_id}` — favourite an app:**
+```json
+// 204 No Content — the app is now among the caller's favourites
+```
+- **Idempotent** (`INSERT … ON CONFLICT DO NOTHING`). A repeat `PUT` is another `204` and does
+  **not** re-stamp `created_at` — favouriting twice must not look like favouriting again.
+- `404 not_found` when the app id does not resolve **under the same visibility rule as
+  `GET /v1/apps/{id}`** (non-admin: absent *or* disabled; admin: absent). A `204` on a disabled
+  app would confirm the existence of something the caller cannot read.
+- `400 validation_failed` on a malformed UUID. `401` on a missing/invalid token.
+
+**`DELETE /v1/me/favourites/{app_id}` — unfavourite:**
+```json
+// 204 No Content — the app is not among the caller's favourites
+```
+- **Idempotent and unconditional** for a well-formed UUID: never-favourited, since-disabled and
+  since-deleted all return `204`. It **deliberately never `404`s** — the caller's intent ("this
+  is not one of my favourites") is satisfied either way, and an app delete cascades the row away
+  on its own, so a `404` here would be unactionable noise. Same posture as
+  `DELETE /v1/admin/invites/{id}` and `POST /v1/auth/logout`.
+- `400 validation_failed` on a malformed UUID. `401` on a missing/invalid token.
+
+> **No `GET /v1/me/favourites`.** `GET /v1/apps` already carries the joined per-item
+> `favourite` state, so a list endpoint would be a **second source of truth** for the same fact
+> — two shapes that can disagree, and a client that has to decide which one wins. The favourites
+> view is `GET /v1/apps` filtered client-side. This is a decision, not an oversight; revisit it
+> only if the catalogue outgrows a single page.
 
 ### `DELETE /v1/apps/{id}` — remove an app *(admin-delete)*
 Admin-only. Removes an app from the catalog entirely.
