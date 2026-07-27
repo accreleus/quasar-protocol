@@ -361,14 +361,16 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > rule that does nothing today and silently takes effect the moment the policy changes back.
 >
 > **(5) THE NEW FAILURE MODE, stated precisely.** `POST /v1/sessions` **rejects a `profile_id`
-> outside the app's allow-list with `409 conflict`, and no session row persists.** This is a new
-> *behaviour* on an existing endpoint, so it is worth being exact about what is and is not
-> additive: **no request shape, response shape, status code or error code changes** — `409 conflict`
-> was already emitted by this endpoint (profile overrides disabled) and is already in its declared
-> set. What is new is a condition under which it fires, and that condition is unreachable for an app
-> nobody has restricted. **We consider it additive**, on the same reading that made P2-01's new
-> admission rejections additive: a new rule on a launch path that, at the shipped configuration,
-> never triggers.
+> outside the app's allow-list with `409 profile_not_launchable_for_app`, and no session row
+> persists.** This is a new *behaviour* on an existing endpoint, so it is worth being exact about
+> what is and is not additive: **no request shape, response shape or status code changes** — `409`
+> was already emitted by this endpoint (profile overrides disabled, codec unsupported by the host)
+> and is already in its declared set. What is new is a condition under which it fires — a condition
+> unreachable for an app nobody has restricted — plus **one new error code**, which is additive
+> because `Error.code` is an open string with no enum: a client that does not know the code falls
+> through to its generic-409 branch exactly as it does today. **We consider it additive**, on the
+> same reading that made P2-01's new admission rejections additive: a new rule on a launch path
+> that, at the shipped configuration, never triggers.
 > **Why `409` and not `400` or `403`.** The id is valid, exists, and is user-visible — `400
 > validation_failed` is already this endpoint's answer for an **unknown** `profile_id`, and reusing
 > it would make "no such profile" and "this app does not offer it" indistinguishable to a client.
@@ -377,6 +379,15 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > caller gets the same answer. `409` puts it with its two neighbours: `profile_ineligible` (409 —
 > the *device* refuses a valid profile) and `conflict` (409 — the app's `force` policy refuses an
 > override).
+> **Why its OWN code and not the generic `conflict`.** On this endpoint `conflict` already carries
+> two unrelated conditions — profile overrides are disabled, and the placed host cannot encode the
+> requested codec — and a client cannot tell them apart except by message string, which is not part
+> of this contract. The three want different responses, and this one is the only **recoverable**
+> member: it means the caller's menu is *stale* (an operator narrowed the allow-list after it was
+> rendered), so the remedy is to re-read `GET /v1/me/profiles?app_id=…` and re-pick. That is the
+> same reasoning that gave `profile_ineligible` its own code, and it matches the house style of
+> every other distinct 409 on this API (`session_quota_exceeded`, `home_in_use`,
+> `session_not_swappable`, `swap_exceeds_reservation`).
 >
 > **The rule that must not be got wrong.** **Filtering the list in the UI is NOT enforcement.**
 > (2) exists so a client renders the right menu; (5) is the gate, and it is checked server-side
@@ -385,7 +396,15 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > client-side admin flag. The implicit path is closed too: a launch with **no** `profile_id`
 > resolves through the user preference / global default / recommendation chain, none of which knows
 > about the app, so a source outside the allow-list is **skipped** rather than used — otherwise the
-> implicit path would grant what the explicit path is rejected for.
+> implicit path would grant what the explicit path is rejected for. **And the `stream` override
+> path is closed:** `stream` is available to every authenticated caller (no role gate), so it
+> bypasses the *eligibility* gate but never this one — otherwise one extra field would defeat the
+> feature outright. Only `role=admin` bypasses it.
+>
+> **What this rule does NOT cover: `POST /v1/sessions/{id}/swap`.** It is a launch-time rule. A swap
+> re-checks only reservation fit, so a session launched on an unrestricted app keeps its wider
+> stream when swapped into a restricted one. That is forced by P2-07's no-resize / no-renegotiate
+> contract (issue #68) and is recorded in §Sessions rather than quietly left to be found.
 >
 > Backed by `schema.md` (`app_launch_profiles`, **migration 0037**). **Deleting a launch profile
 > CASCADES** its allow-list rows rather than being refused: an allow-list entry is a *restriction*
@@ -425,7 +444,10 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   the caller already has a live session of this managed-home app; the per-(user, app) home is
   single-writer), `profile_ineligible` (409, *AS10-03* — a user-facing launch selected a stream
   profile that is `ineligible` for the caller's device, or a non-user-facing profile without an
-  admin/explicit-override bypass), `restart_required` (409, *host-runtime-settings* — a `PATCH` to
+  admin/explicit-override bypass), `profile_not_launchable_for_app` (409, *UI-P5* — the selected
+  launch profile is valid and eligible but is not in the app's `launchable_profile_ids` allow-list;
+  the caller's menu is stale, so re-read `GET /v1/me/profiles?app_id=…` and re-pick),
+  `restart_required` (409, *host-runtime-settings* — a `PATCH` to
   `/v1/admin/hosts/{id}/settings` changed a restart-class knob while the host has live sessions
   but `restart_confirm` was not `true`; includes `{ "live_sessions": N }` in the error body),
   `rate_limited` (429), `no_host_available` (503,
@@ -521,7 +543,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `POST /v1/admin/hosts/{id}/encoder-certification/cells/{sid}/finalize` | **admin** | *(SPT-06)* derive the verdict from real agent metrics, upsert + teardown |
 | `POST /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}/complete` | **admin** | *(SPT-06)* close the run (release the per-host lock) |
 | `GET /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}` | **admin** | *(SPT-05)* poll a run's status/progress |
-| everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account. *(UI-P5: `POST /v1/sessions` additionally refuses a `profile_id` outside the app's allow-list with `409` — a per-app configuration rule, not a role check, which is why it is `409` and not the `403` this table's admin rows produce)* |
+| everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account. *(UI-P5: `POST /v1/sessions` additionally refuses a `profile_id` outside the app's allow-list with `409 profile_not_launchable_for_app` — a per-app configuration rule, not a role check, which is why it is `409` and not the `403` this table's admin rows produce. It is refused for **every** non-admin caller, including one supplying an explicit `stream` override, which carries no role gate here)* |
 
 ### First-admin bootstrap (decision)
 A fresh database has no admin, and `/v1/auth/register` deliberately mints **only**
@@ -1231,10 +1253,10 @@ it to concrete `width`/`height`/`fps`/`bitrate_kbps`/`h264_profile`/`playout0_ms
   live in `stream`; full profile metadata is at `GET /v1/me/profiles` keyed by this id.
 
 *(UI-P5)* **The app's launchable allow-list is enforced HERE.** A `profile_id` outside the app's
-allow-list is **`409 conflict`**, and **no session row persists** (the check runs before the
-scheduler, so there is nothing to roll back and no reservation to leak). The allow-list is
-`AdminApp.launchable_profile_ids` (§Library — per-app launchable launch profiles); it is empty and
-therefore inert for every app an operator has not restricted.
+allow-list is **`409 profile_not_launchable_for_app`**, and **no session row persists** (the check
+runs before the scheduler, so there is nothing to roll back and no reservation to leak). The
+allow-list is `AdminApp.launchable_profile_ids` (§Library — per-app launchable launch profiles); it
+is empty and therefore inert for every app an operator has not restricted.
 
 - **This is the enforcement, and the UI filter is not.** `GET /v1/me/profiles?app_id=…` returns the
   filtered menu so a client renders the right thing, but this endpoint checks the list itself,
@@ -1246,13 +1268,38 @@ therefore inert for every app an operator has not restricted.
   **skipped**, falling through to the next source; the recommendation is computed over the
   **filtered** catalogue. Without this, the implicit path would silently grant what the explicit
   path is rejected for. The app's own pin is never skipped — it is implicitly always included.
-- **Admin and the explicit-`stream` override bypass it**, exactly as they bypass the eligibility
-  gate and the override policy. `role=admin` is server-verified, never a client assertion.
+- **An explicit `stream` override does NOT bypass it.** This is the one place the override hatch
+  stops. `stream` is available to **every authenticated caller** — it carries no role gate on this
+  endpoint — so letting it through would make the allow-list opt-out-able by exactly the party it
+  constrains: one extra field would defeat the feature, and because an override also short-circuits
+  profile resolution, the disallowed chain's rungs, codec and `profile_id` would all be persisted
+  and dispatched. The override hatch beats the **eligibility gate** (a device-capability judgement
+  an operator may want to force past); it does not beat operator **configuration** of which chains
+  an app offers at all. The two claims are different: *"the user could already reach 1080p through
+  an override"* is not *"the user can launch a chain the operator removed."*
+- **Admin bypasses it**, exactly as admin bypasses the eligibility gate and the override policy.
+  `role=admin` is read from the users table server-side, never a client assertion.
 - **`force` apps are never restricted** by it: that policy pins the profile, so there is no menu
   for an allow-list to constrain.
-- **Why `409`** and not `400` or `403`: see the UI-P5 amendment block. Short version — the id is
-  valid and resolves (so not the `400` reserved for an unknown `profile_id`), and the refusal says
-  nothing about the caller's identity (so not the `403` this API reserves for the role gate).
+- **Why `409`, and why its own code** rather than `400`, `403` or the generic `conflict`: see the
+  UI-P5 amendment block. Short version — the id is valid and resolves (so not the `400` reserved
+  for an unknown `profile_id`), the refusal says nothing about the caller's identity (so not the
+  `403` this API reserves for the role gate), and it is the one 409 on this endpoint a client can
+  actually recover from by re-reading its menu (so not the `conflict` shared with "overrides
+  disabled" and "codec unsupported by host").
+- **KNOWN GAP — an app SWAP does not re-resolve the profile.** `POST /v1/sessions/{id}/swap`
+  validates only that the new app fits the held reservation; it does not re-check the allow-list,
+  so a session launched on an unrestricted app at `1440p60` and then swapped into an app whose
+  allow-list is `["720p60"]` keeps `profile_id = 1440p60` and the stream it was already running.
+  **This is deliberate, not an oversight.** A swap must not renegotiate: P2-07's contract is
+  explicitly no-resize (the reservation is fixed and the encode pipeline is never structurally
+  touched — re-pointing `interpipesrc.listen-to` is the whole operation), and changing the stream
+  mid-session would force a WebRTC renegotiation, which is the failure mode issue #68 exists to
+  prevent. The allow-list is therefore a **launch-time** rule, and it is stated here rather than
+  left to be discovered. It is not a privilege escalation: the wider stream was already granted at
+  launch by an app that offered it, and the swap target's own reservation fit is still enforced.
+  Narrowing it would mean either refusing such swaps or renegotiating, and both are contract
+  changes well beyond this amendment.
 
 *(UI-P4)* `profile_id` now names a **launch profile**, which is the object a user picks. The
 **rung** the launch actually resolved to is the separate, additive **`stream_profile_id`** field,
@@ -1480,6 +1527,12 @@ interpipe boundary while encode + `webrtcbin` stay up, so the browser stream nev
   swap either. The live free-VRAM veto is an *admission*-time check and is deliberately not
   applied to a swap — the session already holds its GPU and its memory, and refusing the swap
   would not release anything.
+- **The stream is NOT re-resolved** *(stated for UI-P5)*. Reservation fit is the only thing checked;
+  the session keeps its `profile_id`, `stream_profile_id` and `stream` across the swap. So a
+  session launched on an unrestricted app can end up running an app whose
+  `launchable_profile_ids` would not have offered that profile at launch. That follows directly
+  from this endpoint's no-resize / no-renegotiate contract — see §Sessions (UI-P5) for the full
+  reasoning and why narrowing it is a larger change than this amendment.
 - **Errors** (the session is left untouched in every rejection):
   - `409 session_not_swappable` — the session is not in a swappable state: top-level `state` is not
     `running`, or a swap is already in progress (`state_detail = "swapping"`).

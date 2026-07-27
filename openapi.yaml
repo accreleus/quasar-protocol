@@ -548,12 +548,15 @@ paths:
       summary: Launch a session; returns signaling coordinates.
       description: |
         UI-P5 adds ONE NEW FAILURE MODE on this existing endpoint: a profile_id outside the
-        app's launchable allow-list is 409 conflict, and no session row persists.
+        app's launchable allow-list is 409 profile_not_launchable_for_app, and no session row
+        persists.
 
-        NO EXISTING SHAPE, STATUS CODE OR ERROR CODE CHANGES - 409 conflict was already emitted
-        here (profile overrides disabled) and is already declared below. The new refusal is only
-        reachable for an app an operator has explicitly restricted; every pre-UI-P5 app has an
-        empty allow-list and is unaffected.
+        NO EXISTING SHAPE OR STATUS CODE CHANGES - 409 was already emitted here (profile
+        overrides disabled, codec unsupported by host) and is already declared below. What is
+        new is one error code, which is additive because Error.code is an open string with no
+        enum: a client that does not know it falls through to its generic-409 branch. The new
+        refusal is only reachable for an app an operator has explicitly restricted; every
+        pre-UI-P5 app has an empty allow-list and is unaffected.
 
         409 rather than 400 or 403, deliberately. The id is valid and resolves, so 400
         validation_failed - this endpoint's answer for an UNKNOWN profile_id - would make "no
@@ -564,9 +567,22 @@ paths:
         refuses a valid profile) and conflict (409, the app's `force` policy refuses an
         override).
 
+        Its OWN code rather than the generic conflict, because conflict on this endpoint already
+        carries two unrelated conditions (overrides disabled, codec unsupported by the placed
+        host) and this is the only recoverable one: it means the caller's menu is stale, so the
+        remedy is to re-read GET /v1/me/profiles?app_id= and re-pick.
+
         THE UI FILTER IS NOT THE ENFORCEMENT. GET /v1/me/profiles?app_id= returns the filtered
         menu, but this endpoint checks the allow-list itself, regardless of client - exactly as
-        admin endpoints are gated server-side regardless of client.
+        admin endpoints are gated server-side regardless of client. AN EXPLICIT stream OVERRIDE
+        DOES NOT BYPASS IT: stream carries no role gate here, so honouring it would let any
+        authenticated caller defeat the allow-list with one extra field. Only an admin bypasses
+        it (role read server-side).
+
+        KNOWN GAP: POST /v1/sessions/{id}/swap does NOT re-resolve the profile, so a session
+        launched on an unrestricted app keeps its wider stream when swapped into a restricted
+        one. Deliberate - P2-07 swaps are no-resize and must not renegotiate. The allow-list is
+        a launch-time rule.
       requestBody:
         required: true
         content:
@@ -1338,7 +1354,7 @@ components:
       type: object
       required: [code, message]
       properties:
-        code: { type: string, description: "e.g. validation_failed, unauthorized, forbidden, not_found, conflict, session_quota_exceeded, no_host_available, capacity_exhausted, restart_required, rate_limited, internal." }
+        code: { type: string, description: "e.g. validation_failed, unauthorized, forbidden, not_found, conflict, session_quota_exceeded, profile_ineligible, profile_not_launchable_for_app, no_host_available, capacity_exhausted, restart_required, rate_limited, internal. Open string, not an enum: new codes are additive and an unknown one falls through to a client's generic per-status branch." }
         message: { type: string }
         live_sessions: { type: integer, description: "Present on restart_required." }
     ErrorEnvelope:
