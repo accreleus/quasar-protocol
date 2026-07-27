@@ -158,6 +158,64 @@
 > `docs/design/plans/2026-07-27-ui-implementation-spec.md` §"Phase 3" and
 > `docs/design/plans/2026-07-27-admin-mockup-implementation-notes.md` §12.
 
+> **Amendment — UI-P4 (stream profiles + launch profiles). NOT purely additive. Requires Opus +
+> explicit human sign-off.** Via **migration 0036** (`0036_launch_profiles`, the *expand* half of an
+> expand/contract pair). The model splits one object into two: a **stream profile** is now one
+> encode **rung** (one codec at one resolution, frame rate and bitrate), and a **launch profile** is
+> an **ordered list of rungs**. A user picks a launch profile; the launch walks its rungs and takes
+> the first the placed host can encode and the client can decode.
+> **(1)** Two new tables, **`launch_profiles`** and **`launch_profile_rungs`** (ordered, see their
+> sections below).
+> **(2)** One new column **`stream_profiles.codec TEXT NULL CHECK (codec IN ('h264','hevc','av1'))`**
+> — the catalog vocabulary, matching `stream_profiles.codecs`, not the wire `h265`. NULL on every
+> pre-0036 row, non-NULL on every rung row created by the fan-out.
+> **(3)** One new column **`sessions.stream_profile_id TEXT NULL REFERENCES stream_profiles(id)`** —
+> the **rung** the launch resolved to. `sessions.profile_id` is unchanged and continues to hold the
+> **user's pick**, which is now a launch profile id.
+> **(4) Three foreign keys are repointed** from `stream_profiles(id)` to `launch_profiles(id)`:
+> `stream_profile_policy.global_default_profile_id`, `apps.default_profile_id`, and
+> **`user_profile_preferences.default_profile_id`**. The third is easy to miss and fails in the
+> worst possible way: it has 0 rows, so the migration passes and the tests stay green, and then the
+> first user preference set against a genuinely new launch profile is a 500 from an FK violation.
+> All three are repointed together.
+> **(5) `apps.profile_policy` loses the value `custom`**; the `CHECK` narrows to
+> `('inherit','prefer','force')`. **The up migration first asserts that no app is using it and
+> FAILS, naming the offending apps, if any is.** `custom` cannot be converted behaviour-neutrally: a
+> `custom` app resolves no profile and lands on the legacy tier path, where its effective settings
+> are `min(tier from the user's probe, the app defaults)` and *not* simply the app defaults, so no
+> automatic conversion reproduces it. A refused deploy is the correct outcome; the operator converts
+> those apps deliberately.
+> **(6) Ids are preserved as LAUNCH PROFILE ids.** `1080p60` stays `1080p60` and becomes a launch
+> profile; rungs get new ids `<launch-profile-id>-<codec>`. This keeps `sessions.profile_id` (676
+> rows on Tower), `user_device_profile_history.profile_id` (147) and
+> `host_encoder_certification.profile_id` (3) — all **un-FK'd `TEXT`**, none of which would have
+> failed loudly — pointing at an object that still exists and still means what it meant.
+> **(7) `user_device_profile_history` is not migrated.** Its rows keep their launch-profile-shaped
+> `profile_id`; a pre-0036 row with a non-empty `codec` bans every rung of that launch profile using
+> that codec, which is exactly its old meaning. Rows written from UI-P4 onward key decode-side
+> failures by **rung id**. No DDL change to that table.
+> **What 0036 deliberately does NOT do**, because it is the *expand* half: it does **not** drop
+> `stream_profiles.codecs`, does **not** delete the legacy `stream_profiles` rows, does **not** make
+> `stream_profiles.codec` NOT NULL, and does **not** give
+> `stream_profile_policy.global_default_profile_id` a value (it is NULL today, and setting it would
+> change the effective resolution of every `inherit` app for every user in one invisible step). A
+> separate **contract migration**, after a Tower soak, does the first three. The split is what lets
+> a bad *code* deploy on top of a good migration be recovered in one step, and what lets the
+> migration rehearsal diff before and after **in one database**.
+> **The down migration is a snapshot restore, not a computed collapse.** The fan-out is lossy in two
+> directions (a single h264 rung cannot be distinguished from "`codecs` was NULL" versus "the
+> default list was stored explicitly", and `future`/`unsupported` entries leave no trace in the
+> rungs), so `up` first copies the affected tables into `_backup_0036_*` tables and `down` restores
+> them verbatim. Two honesty clauses live in the migration header: **admin writes made after `up`
+> are lost by `down`**, and **launch profiles created after `up` are dropped with a `NOTICE`**
+> rather than lossily collapsed. Proof obligation: `pg_dump --data-only` of the affected tables
+> before `up` and after `down` must be byte-identical, run against a **Tower snapshot**, not an
+> empty database. Behaviour neutrality is a **separate** test from that round trip.
+> **`agent-api.md` is unchanged** — the agent receives a resolved `stream` block and a `codec` and
+> has never known what a profile is. `signaling.md`, `input.md`, `native-client.md` are unchanged.
+> See `docs/design/plans/2026-07-28-phase4-profile-restructure-respec.md` and `control-api.md`
+> §Stream profiles and launch profiles.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
@@ -333,6 +391,8 @@ defaults the scheduler and pipeline need.
 | `enabled` | `BOOLEAN` NOT NULL DEFAULT `true` | hidden from the public library when false. |
 | `managed_home` | `BOOLEAN` NOT NULL DEFAULT `false` | *(P5-01, migration 0008)* when true the control plane injects the caller's per-(user, app) home into `runtime_spec.mounts` at dispatch (assign **and** swap) and enforces the single-writer + quota rules (`control-api.md` §Storage). False = today's stateless behaviour, byte-identical dispatch. |
 | `home_container_path` | `TEXT` NOT NULL DEFAULT `'/home/quasar'` | *(P5-01, migration 0008)* container-side mount point for the managed home. |
+| `default_profile_id` | `TEXT` NULL → **`launch_profiles(id)`** | *(migration 0015; **FK repointed by UI-P4 / migration 0036** from `stream_profiles(id)`)* the **launch profile** this app pins or prefers, per `profile_policy`. The stored value is unchanged by the repoint, because existing ids are preserved as launch profile ids. |
+| `profile_policy` | `TEXT` NOT NULL DEFAULT `'inherit'` | *(migration 0015)* `CHECK (profile_policy IN ('inherit','prefer','force'))` **as of UI-P4 / migration 0036 — `'custom'` was removed** (`control-api.md` amendment B2). `inherit` = the user/global default decides; `prefer` = the app's `default_profile_id`, user may still override; `force` = the app's profile always. `custom` (the app opting out of profiles and carrying its own `default_width/height/fps/bitrate_kbps`) is gone: under the two-object model every app points at a launch profile, and `custom` was also the one mode that could not express a codec. **The `default_*` columns above stay** — they are the `display_stream` COALESCE fallback when no launch profile resolves, they are what `LaunchConsoleSession` uses unconditionally, and they are the ceiling on the `POST /v1/sessions` stream-override escape hatch, which is reachable for **any** app. |
 | `runtime_preset_id` | `UUID` NULL → `runtime_presets(id)` **ON DELETE RESTRICT** | *(UI-P3, migration 0035)* the shared runtime preset this app inherits its container configuration from. **`NULL` = the app carries everything itself = the pre-UI-P3 behaviour**, so no existing row changes. The preset is **never** flattened into `runtime_spec` on save — the merge happens server-side at launch (`control-api.md` §Runtime presets), which is what makes a preset edit reach every app already using it. `RESTRICT` is a backstop under the application-layer `409` on delete-in-use, not the gate; `SET NULL` would silently strip an app's image/env/mounts and let it launch with a smaller spec instead of failing. Indexed (`apps_runtime_preset_id_idx`) — Postgres does not auto-index the referencing side of a FK, and both the in-use check and the admin "Used by" list are per-preset lookups. |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | |
 
@@ -365,6 +425,69 @@ the admin editor edits them individually and the launch-time merge reads them in
 references — **including a disabled app**, which still holds the reference — is refused with
 `409 conflict` at the application layer (`control-api.md`). The FK is the backstop for every
 other path.
+
+## `stream_profiles` (migration 0015; reshaped by UI-P4)
+The encode-rung catalog. Created by migration 0015 and, before UI-P4, it *was* the profile a user
+picked. **As of UI-P4 a row is one rung: one codec at one resolution, frame rate and bitrate.** It
+is no longer user-facing; users pick a `launch_profiles` row, which lists these in preference
+order. This table has never had a prose section here (the pre-0015 catalog was in-code); only the
+columns UI-P4 touches are documented, and the committed `0015` SQL remains the definition of the
+rest.
+
+| column | type | notes |
+|---|---|---|
+| `id` | `TEXT` PK | pre-UI-P4 rows use the quality-tier id (`'1080p60'`); rung rows created by 0036's fan-out use `<launch-profile-id>-<codec>` (`'1080p60-h264'`). |
+| `codec` | `TEXT` NULL | *(UI-P4, migration 0036)* `CHECK (codec IN ('h264','hevc','av1'))` — the **catalog** vocabulary, matching `codecs` below; the wire spells HEVC `h265` and the rename is bridged in exactly one place server-side. **NULL on every pre-0036 row**, non-NULL on every rung. The **contract** migration makes it `NOT NULL` once the legacy rows are gone. |
+| `codecs` | `JSONB` NULL | *(multi-codec, migration 0031)* the pre-UI-P4 ordered `[{codec,status}]` preference list. **Retained by 0036 and read by nothing on the launch path after it** — the rung's `codec` is authoritative. It exists solely so a code-level revert onto a migrated database still finds the data it expects; the **contract** migration drops it. Its `launchable \| future \| unsupported` status enum is gone from the API (`control-api.md` amendment B3). |
+| `visibility` | `TEXT` NOT NULL | rung rows created by the fan-out are `'internal'`: a rung is never offered standalone, only as part of the launch profile that lists it. The launch profile carries the user-facing visibility. |
+| *(all other columns)* | | unchanged from 0015. Every rung created by the fan-out copies **every** one of them from its parent row **verbatim** (resolution, fps, bitrate, ABR floor, playout0, `h264_profile`, the eligibility thresholds, `hardware_encoder_required`, `browser_client`). **No per-codec tuning happens in the migration** — that is the operator-facing payoff of the restructure and is a deliberate data change afterwards, not something smuggled into a behaviour-neutral migration. |
+
+**Referenced by** `launch_profile_rungs.stream_profile_id` (`ON DELETE RESTRICT`) and
+`sessions.stream_profile_id`. Deleting a rung listed by any launch profile is `409 conflict` at the
+application layer; the `RESTRICT` is the backstop.
+
+## `launch_profiles` (UI-P4)
+> *New table, migration 0036. This is the object a user picks.*
+
+An ordered chain of encode rungs, best first. The launch walks them and takes the first the placed
+host can encode and the client can decode, so falling through a rung can change **resolution** as
+well as codec. Fall-through happens **at launch only**, never mid-session.
+
+| column | type | notes |
+|---|---|---|
+| `id` | `TEXT` PK | 0036 preserves the pre-UI-P4 `stream_profiles` ids here (`'1080p60'`, `'high'`, …). That is what keeps the three un-FK'd `TEXT` id columns elsewhere (`sessions.profile_id`, `user_device_profile_history.profile_id`, `host_encoder_certification.profile_id`) meaningful, and what keeps the in-code `conservativeDefaultID = "1080p60"` and the SPT-06 `lowerProfileRung` ladder correct without edit. |
+| `display_name` | `TEXT` NOT NULL | picker label. |
+| `description` | `TEXT` NOT NULL DEFAULT `''` | operator-facing note shown in the admin list and editor. |
+| `visibility` | `TEXT` NOT NULL DEFAULT `'user'` | `CHECK (visibility IN ('user','debug','internal'))`. Same semantics as the pre-UI-P4 `stream_profiles.visibility`, migrated from it. Debug/internal launch profiles are never returned by `GET /v1/me/profiles`. |
+| `sort_order` | `INT` NOT NULL DEFAULT `0` | catalog order, highest quality first. Migrated from the parent row's `sort_order`. |
+| `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | maintained by the shared `set_updated_at()` trigger. |
+
+**Referenced by** `apps.default_profile_id`, `stream_profile_policy.global_default_profile_id` and
+`user_profile_preferences.default_profile_id` — the **three** FKs 0036 repoints. Deleting a launch
+profile referenced by any of them is `409 conflict` at the application layer.
+
+**The H.264 floor is a write-time rule, not a constraint.** A launch profile must contain at least
+one rung whose codec is `h264`. It is enforced in the API (`400 validation_failed`), not by a
+`CHECK`, because the rule spans two tables. "And it must be **last**" is a **warning**, not a
+rejection: rejecting would make a migrated launch profile whose stored codec order puts h264 first
+permanently uneditable, and it would add no safety, because the guarantee is the resolver's
+unconditional floor — if no rung survives, the **last h264 rung dispatches bypassing every clamp**,
+including its own `hardware_encoder_required`.
+
+## `launch_profile_rungs` (UI-P4)
+> *New table, migration 0036. The ordered join. A table, not a `jsonb` column, so the rung
+> reference is a real FK with a defined refusal on delete.*
+
+| column | type | notes |
+|---|---|---|
+| `launch_profile_id` | `TEXT` NOT NULL → `launch_profiles(id)` **ON DELETE CASCADE** | deleting a launch profile takes its rung list with it; the rungs themselves are shared objects and survive. |
+| `stream_profile_id` | `TEXT` NOT NULL → `stream_profiles(id)` **ON DELETE RESTRICT** | `RESTRICT`, not `CASCADE`: silently removing a rung from every launch profile that lists it is exactly the kind of quiet quality change this contract exists to prevent. The application layer refuses the delete with `409` first. |
+| `position` | `INT` NOT NULL | `CHECK (position > 0)`. **Order is preference**, assigned by the server from the ordered id array the write shape carries; a client never sends positions. |
+
+`PRIMARY KEY (launch_profile_id, position)` and `UNIQUE (launch_profile_id, stream_profile_id)` (a
+rung may appear at most once in one launch profile). Indexed on `(stream_profile_id)` for the
+delete-in-use check and the admin "Used by" list — Postgres does not auto-index the referencing side
+of a FK.
 
 ## `hosts`
 One row per node agent (P1-A registration). At N=1 there is exactly one. Host-level
@@ -499,7 +622,8 @@ signaling (P1-D).
 | `bitrate_kbps` | `INT` NOT NULL | |
 | `h264_profile` | `TEXT` NOT NULL DEFAULT `'constrained-baseline'` | `CHECK (h264_profile IN ('constrained-baseline','main','high'))`. P1-11 negotiates this up; the Phase-0 floor is the default. Applies to the `h264` codec only (see `codec`). |
 | `codec` | `TEXT` NOT NULL DEFAULT `'h264'` | *(multi-codec, migration 0031)* `CHECK (codec IN ('h264','h265','av1'))`. The single video codec resolved server-side at launch (profile preference, clamped by host encoder + device decode + decode-failure history; guaranteed h264 floor) and sent to the agent in `session_assign.stream.codec` (`agent-api.md`). WIRE vocabulary: `h265` is HEVC (the in-code profile catalog's `hevc` maps to it in one place). Default `'h264'` so every pre-multi-codec / legacy / tier / override launch is unchanged. `h264_profile` above is meaningful only when this is `'h264'`. |
-| `profile_id` | `TEXT` NULL | AS10-03: the AS10-01 stream-profile id this session was launched from (e.g. `'1080p60'`); NULL for a legacy/tier/override launch. The `width`/`height`/`fps`/`bitrate_kbps`/`h264_profile` columns carry the resolved concrete values. Not FK-constrained — the profile catalog is an in-code table, not a DB table. |
+| `profile_id` | `TEXT` NULL | AS10-03: the profile id this session was launched from (e.g. `'1080p60'`); NULL for a legacy/tier/override launch. The `width`/`height`/`fps`/`bitrate_kbps`/`h264_profile` columns carry the resolved concrete values. **Not FK-constrained**, deliberately: terminal session history must survive a profile being deleted. *(UI-P4: this is now a **launch profile** id — the **user's pick**. The rung it resolved to is `stream_profile_id` below. The pre-UI-P4 note claiming "the profile catalog is an in-code table, not a DB table" was already stale: migration 0015 created `stream_profiles`.)* |
+| `stream_profile_id` | `TEXT` NULL → `stream_profiles(id)` | *(UI-P4, migration 0036)* the **rung** this session resolved to (e.g. `'1080p60-h264'`); NULL for every pre-0036 session and for any legacy/tier/override/console launch. `profile_id` answers *what did the user pick*, this answers *what did they get* — and because a rung carries its own resolution, the two can legitimately disagree about width, height, fps and bitrate. The `width`/`height`/`fps`/`bitrate_kbps`/`h264_profile`/`codec` columns remain the truth for the running session; this records which catalog row produced them. It is also the column the ABR floor and the AS10-06 stream-health evaluation must read, **not** `profile_id` — reading the floor off the launch profile works only while every rung inherits its parent's floor unchanged, and silently reads the wrong number the first time an admin tunes a per-rung bitrate, which is the entire point of the restructure. |
 | **reservation** | | what was reserved on assign. |
 | `reserved_vram_mb` | `INT` NOT NULL DEFAULT `0` | **DEPRECATED (#383)** — written as `0` for sessions created after the live-VRAM change; historical rows keep their values. Encode slots are now the only reservation dimension. |
 | `reserved_encode_slots` | `INT` NOT NULL DEFAULT `0` | |
@@ -1068,6 +1192,7 @@ control-plane/migrations/
   --  is authoritative. The UI-P1 amendment adds the line below.)
   0034_app_kind_favourites.up.sql -- (UI-P1) ADD apps.kind (CHECK game|desktop, DEFAULT 'game', presentation-only — no scheduler/agent reader); CREATE user_app_favourites (user_id, app_id, created_at) PK (user_id, app_id), both FKs ON DELETE CASCADE, + INDEX (app_id) for the apps-cascade delete. The down migration drops the table and the column.
   0035_runtime_presets.up.sql     -- (UI-P3) CREATE runtime_presets (name UNIQUE, description, image, args/env/mounts JSONB, managed_home, home_container_path, timestamps + set_updated_at trigger); ADD apps.runtime_preset_id UUID NULL REFERENCES runtime_presets(id) ON DELETE RESTRICT (NULL = the app carries everything itself = pre-UI-P3 behaviour, no backfill) + INDEX apps_runtime_preset_id_idx for the in-use check and the "Used by" list. The down migration drops the column FIRST (it is the dependent FK) then the table.
+  0036_launch_profiles.up.sql     -- (UI-P4, EXPAND half of an expand/contract pair; NOT purely additive) (a) snapshot stream_profiles / stream_profile_policy / user_profile_preferences / (apps.id, default_profile_id, profile_policy) into _backup_0036_* tables FIRST — the fan-out is lossy and `down` is a verbatim restore, not a computed collapse; (b) ASSERT no app has profile_policy='custom' and FAIL naming them if any does (it cannot be converted behaviour-neutrally: a custom app lands on the legacy tier path where its settings are min(tier, app defaults)), then narrow the CHECK to ('inherit','prefer','force'); (c) ADD stream_profiles.codec TEXT NULL CHECK (h264|hevc|av1) — catalog vocabulary; (d) CREATE launch_profiles (id TEXT PK, display_name, description, visibility CHECK user|debug|internal, sort_order, updated_at + set_updated_at trigger); (e) CREATE launch_profile_rungs (launch_profile_id -> launch_profiles ON DELETE CASCADE, stream_profile_id -> stream_profiles ON DELETE RESTRICT, position CHECK > 0, PK (launch_profile_id, position), UNIQUE (launch_profile_id, stream_profile_id), INDEX (stream_profile_id)); (f) FAN OUT by RULE, never by special-casing an id: per existing stream_profiles row create a launch profile with the SAME id, resolve NULL/empty/unparseable `codecs` to the in-code default [h264 launchable, hevc future, av1 future], keep only `launchable` entries IN STORED ORDER (reordering h264 to last would flip an already-enabled AV1 host and is forbidden here), synthesise a lone h264 rung when zero are launchable (today that profile still streams h264 via the resolver floor), and materialise each surviving codec as a NEW stream_profiles row id = '<parent>-<codec>' with visibility='internal' and EVERY other column copied verbatim; RAISE NOTICE per launch profile whose h264 rung is not last (rungs after it are unreachable); (g) ADD sessions.stream_profile_id TEXT NULL REFERENCES stream_profiles(id) — the resolved rung, vs profile_id which keeps the user's pick; (h) REPOINT THREE FKs to launch_profiles(id): stream_profile_policy.global_default_profile_id, apps.default_profile_id, AND user_profile_preferences.default_profile_id (the third has 0 rows, so omitting it passes every test and 500s on the first real user preference). Deliberately NOT done here: dropping stream_profiles.codecs, deleting the legacy stream_profiles rows, making codec NOT NULL, or giving the global default a value — the first three are the later CONTRACT migration, the fourth would change every `inherit` app's effective resolution at once. The down migration drops the three FKs, drops launch_profile_rungs + launch_profiles, drops sessions.stream_profile_id, restores stream_profiles / policy / preferences / the two apps columns from the _backup_0036_* snapshots, drops stream_profiles.codec, widens the profile_policy CHECK back, recreates the three FKs against stream_profiles(id), and drops the backups — emitting a NOTICE naming any launch profile created after `up` (it is dropped, not collapsed, because the fan-out cannot be inverted). Admin writes made after `up` are lost by `down`; both facts are stated verbatim in the migration file header.
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`

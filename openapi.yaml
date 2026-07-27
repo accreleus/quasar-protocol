@@ -9,9 +9,11 @@
 # server registers must appear here (and vice-versa). Do not hand-remove a path
 # to make that test pass — reconcile against the running router.
 #
-# Authoring note (2026-07-10): several registered routes are NOT yet in control-api.md
-# prose (admin/apps, admin/profile-policy, admin/stream-profiles, hosts/{id}/gpus,
-# me/profile-preferences, users, users/{id}). Their bodies here were transcribed from
+# Authoring note (2026-07-10, updated 2026-07-28): several registered routes are NOT yet in
+# control-api.md prose (admin/apps, hosts/{id}/gpus, users, users/{id}). UI-P4 closed part of
+# that gap: admin/profile-policy, admin/stream-profiles and me/profile-preferences are now in
+# the prose (control-api.md §Stream profiles and launch profiles). Their bodies here were
+# transcribed from
 # the web client's typed contract (web/src/api/types.ts) and validated live by the
 # conformance harness (deploy/run-apitest.sh) — but the prose contract still needs the
 # amendment + sign-off (see docs/design/plans/openapi-contract-drift-report.md). A few
@@ -856,27 +858,123 @@ paths:
   /v1/admin/stream-profiles:
     get:
       tags: [admin]
-      summary: "List stream profiles (the AS10-01 ladder). (Not yet in control-api.md prose.)"
+      summary: "List the encode rungs (UI-P4 stream profiles)."
       x-required-role: admin
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/AdminStreamProfilesResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [admin]
+      summary: "UI-P4: create an encode rung."
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/StreamProfileWrite" } } }
+      responses:
+        "201": { description: Created. , content: { application/json: { schema: { $ref: "#/components/schemas/StreamProfile" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /v1/admin/stream-profiles/{id}:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     patch:
       tags: [admin]
-      summary: "Edit a stream profile. (Not yet in control-api.md prose.)"
+      summary: "Edit an encode rung."
       x-required-role: admin
       requestBody:
         required: true
-        content: { application/json: { schema: { $ref: "#/components/schemas/StreamProfile" } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/StreamProfileWrite" } } }
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/StreamProfile" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [admin]
+      summary: "UI-P4: delete an encode rung. 409 while any launch profile lists it."
+      description: |
+        REFUSE-IF-IN-USE. 409 conflict while the rung appears in any launch_profile_rungs row. The
+        admin UI's disabled Delete button is a UX affordance, NEVER the enforcement - the same
+        posture as DELETE /v1/apps/{id} and DELETE /v1/admin/runtime-presets/{id}. The FK
+        (ON DELETE RESTRICT) is the backstop under this check, not the gate.
+      x-required-role: admin
+      responses:
+        "204": { description: Rung removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  # ─── admin: launch profiles (UI-P4) ──────────────────────────────────────
+  /v1/admin/launch-profiles:
+    get:
+      tags: [admin]
+      summary: "UI-P4: list launch profiles, each with its ordered rungs and its used_by."
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/AdminLaunchProfilesResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [admin]
+      summary: "UI-P4: create a launch profile."
+      description: |
+        The rung list must contain at least one rung whose codec is h264, or this is
+        400 validation_failed. "And it must be last" is a WARNING (h264_floor_not_last) carried in
+        the response's warnings[], never a rejection - see LaunchProfileWrite.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/LaunchProfileWrite" } } }
+      responses:
+        "201": { description: Created. , content: { application/json: { schema: { $ref: "#/components/schemas/LaunchProfile" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/admin/launch-profiles/{id}:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin]
+      summary: "UI-P4: read one launch profile with its ordered rungs and its used_by."
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/LaunchProfile" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: "UI-P4: edit a launch profile, including reordering its rungs (order IS preference)."
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/LaunchProfileWrite" } } }
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/LaunchProfile" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [admin]
+      summary: "UI-P4: delete a launch profile. 409 while anything references it."
+      description: |
+        REFUSE-IF-REFERENCED. 409 conflict while the launch profile is pointed at by any app
+        (apps.default_profile_id), by the global policy
+        (stream_profile_policy.global_default_profile_id), or by any user preference
+        (user_profile_preferences.default_profile_id). All three are foreign keys as of migration
+        0036; this 409 is the gate and the FKs are the backstop.
+      x-required-role: admin
+      responses:
+        "204": { description: Launch profile removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   # ─── admin: session oversight + trace ────────────────────────────────────
   /v1/admin/sessions:
@@ -1156,8 +1254,41 @@ components:
       enum: [game, desktop]
     Codec:
       type: string
-      description: "Multi-codec: the WIRE session video codec (h265 is HEVC). Resolved server-side at launch; the client answers the single codec the host offers. Distinct from the profile catalog's codecs[].codec vocabulary, which spells HEVC 'hevc'."
+      description: "Multi-codec: the WIRE session video codec (h265 is HEVC). Resolved server-side at launch; the client answers the single codec the host offers. Distinct from CatalogCodec, which spells HEVC 'hevc'."
       enum: [h264, h265, av1]
+    CatalogCodec:
+      type: string
+      description: >-
+        The CATALOG codec vocabulary used by stream profiles (rungs). Note 'hevc', not the wire
+        'h265' - the rename is bridged in exactly one place server-side and never on this surface.
+      enum: [h264, hevc, av1]
+    ProfilePolicy:
+      type: string
+      description: >-
+        How an app resolves its launch profile. UI-P4 REMOVED the value 'custom' (breaking): under
+        the two-object model every app points at a launch profile, and 'custom' was also the one
+        mode that could not express a codec. profile_policy:"custom" is now 400 validation_failed.
+        inherit = the user/global default decides; prefer = the app's default_profile_id, the user
+        may still override; force = the app's profile always.
+      enum: [inherit, prefer, force]
+    WriteWarning:
+      type: object
+      description: >-
+        UI-P4: a non-fatal advisory returned on an admin profile write. A warning NEVER fails the
+        request - it reports a configuration that is legal but almost certainly not what the
+        operator meant.
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [h264_floor_not_last, floor_not_least_demanding]
+          description: >-
+            h264_floor_not_last - every rung after the H.264 rung is unreachable, because H.264
+            passes every clamp. floor_not_least_demanding - the H.264 rung has a higher
+            min_offer_bandwidth_kbps or min_decode_height than a rung above it, or requires a
+            hardware encoder while a rung above it does not; a floor harder to satisfy than the
+            rung above it is a misconfiguration.
+        message: { type: string }
     SessionState:
       type: string
       enum: [pending, assigned, starting, running, stopping, stopped, failed]
@@ -1270,9 +1401,17 @@ components:
         default_height: { type: integer }
         default_fps: { type: integer }
         default_bitrate_kbps: { type: integer }
-        default_profile_id: { type: [string, "null"] }
-        profile_policy: { type: string, enum: [inherit, prefer, force, custom] }
-        display_stream: { $ref: "#/components/schemas/Stream" }
+        default_profile_id:
+          type: [string, "null"]
+          description: "UI-P4: the LAUNCH PROFILE this app pins or prefers, per profile_policy."
+        profile_policy: { $ref: "#/components/schemas/ProfilePolicy" }
+        display_stream:
+          allOf: [ { $ref: "#/components/schemas/Stream" } ]
+          description: >-
+            The stream advertised in the library. UI-P4: resolved through the launch profile's TOP
+            rung (position 1), falling back to the app's default_* columns when no launch profile
+            resolves. Advertised, not resolved - a launch may fall through to a lower rung and
+            stream at a different resolution; the session's own `stream` block is the truth.
         enabled: { type: boolean }
     AppList:
       type: object
@@ -1317,7 +1456,18 @@ components:
         default_height: { type: integer }
         default_fps: { type: integer }
         default_bitrate_kbps: { type: integer }
-        default_profile_id: { type: [string, "null"] }
+        default_profile_id:
+          type: [string, "null"]
+          description: "UI-P4: a LAUNCH PROFILE id. An id that does not resolve is 400 validation_failed."
+        profile_policy:
+          allOf: [ { $ref: "#/components/schemas/ProfilePolicy" } ]
+          description: >-
+            DRIFT FIX (UI-P4), not a new field - the Go handler has validated this on create and
+            patch since migration 0015 (crud/handler.go validProfilePolicy) while this schema
+            omitted the property entirely. OPTIONAL, with the same presence semantics as `kind`:
+            absent = the server default on create, unchanged on patch, and absence is NEVER a zero
+            value. UI-P4 removed 'custom' from the enum, so profile_policy:"custom" is now
+            400 validation_failed on a control plane carrying this amendment.
         runtime_spec: { $ref: "#/components/schemas/RuntimeSpec" }
         runtime_preset_id:
           type: [string, "null"]
@@ -1336,7 +1486,7 @@ components:
       type: object
       # health_state/health_reason are additive (present only when running/unsustainable);
       # every other key is always serialized (nullable ones present-but-null).
-      required: [id, user_id, app_id, host_id, state, state_detail, error_message, profile_id, stream, created_at, started_at, ended_at]
+      required: [id, user_id, app_id, host_id, state, state_detail, error_message, profile_id, stream_profile_id, stream, created_at, started_at, ended_at]
       properties:
         id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
@@ -1345,7 +1495,20 @@ components:
         state: { $ref: "#/components/schemas/SessionState" }
         state_detail: { type: [string, "null"] }
         error_message: { type: [string, "null"] }
-        profile_id: { type: [string, "null"] }
+        profile_id:
+          type: [string, "null"]
+          description: >-
+            The profile the session was launched from; null for a legacy/tier/override launch.
+            UI-P4: this is now a LAUNCH PROFILE id, i.e. the USER'S PICK. The rung it resolved to
+            is stream_profile_id.
+        stream_profile_id:
+          type: [string, "null"]
+          description: >-
+            UI-P4: the RUNG this launch resolved to (e.g. "1080p60-h264"). Always serialized; null
+            for every pre-UI-P4 session and for any legacy/tier/override/console launch. profile_id
+            answers "what did the user pick", this answers "what did they get" - and because a rung
+            carries its own resolution, the two can legitimately disagree about width/height/fps/
+            bitrate. The `stream` block below is always the truth for the running session.
         stream: { $ref: "#/components/schemas/Stream" }
         health_state:
           type: string
@@ -1721,22 +1884,68 @@ components:
     # ─── stream profiles / policy (AS10-01/02) ───────────────────────────────────
     StreamProfile:
       type: object
-      description: "A first-class stream profile (AS10-01). Codec-agnostic; codecs[] is the per-profile codec-preference list in the CATALOG vocabulary (codec: h264|hevc|av1, where HEVC is 'hevc' here, distinct from the wire Codec enum's 'h265'). H.264 ships launchable; HEVC/AV1 default to 'future' and are enabled per profile by an admin (multi-codec). h264 must stay launchable in a non-empty list (it is the resolution floor)."
-      required: [id, display_name, width, height, fps, codecs, h264_profile, nominal_bitrate_kbps, min_offer_bandwidth_kbps, recommended_offer_bandwidth_kbps, headroom_factor, abr_floor_kbps, max_startup_rtt_ms, min_decode_height, high_refresh_display, hardware_encoder_required, browser_client, playout0_ms, visibility]
+      description: >-
+        ONE ENCODE RUNG (UI-P4): a single codec at a single resolution, frame rate and bitrate.
+        NOT user-facing - a user picks a LaunchProfile, which lists these in preference order.
+        BREAKING vs the pre-UI-P4 shape: `codecs[]` and its launchable|future|unsupported status
+        enum are GONE, replaced by a single `codec`. A rung IS a codec, so there is nothing left
+        for a status to describe; a codec is offered because a rung using it exists in a launch
+        profile, and withdrawn by removing that rung.
+      required: [id, display_name, codec, width, height, fps, h264_profile, nominal_bitrate_kbps, min_offer_bandwidth_kbps, recommended_offer_bandwidth_kbps, headroom_factor, abr_floor_kbps, max_startup_rtt_ms, min_decode_height, high_refresh_display, hardware_encoder_required, browser_client, playout0_ms, visibility]
       properties:
-        id: { type: string }
+        id:
+          type: string
+          description: "Rungs created by migration 0036's fan-out use '<launch-profile-id>-<codec>', e.g. '1080p60-h264'."
         display_name: { type: string }
+        codec: { $ref: "#/components/schemas/CatalogCodec" }
         width: { type: integer }
         height: { type: integer }
         fps: { type: integer }
-        codecs:
+        h264_profile:
+          type: string
+          description: >-
+            Meaningful only when codec is h264. The browser (WebRTC) receiver rejects High on both
+            VA and NVENC, so a browser launch still negotiates down to constrained-baseline; this
+            records the rung's preference for a capable client.
+        nominal_bitrate_kbps: { type: integer }
+        min_offer_bandwidth_kbps: { type: integer }
+        recommended_offer_bandwidth_kbps: { type: integer }
+        headroom_factor: { type: number }
+        abr_floor_kbps: { type: integer }
+        max_startup_rtt_ms: { type: integer }
+        min_decode_height: { type: integer }
+        high_refresh_display: { type: string, enum: [none, recommended, required] }
+        hardware_encoder_required: { type: boolean }
+        browser_client: { type: string, enum: [recommended, supported, risky] }
+        playout0_ms: { type: integer }
+        visibility:
+          type: string
+          enum: [user, debug, internal]
+          description: "Rungs created by the fan-out are 'internal': a rung is never offered standalone, only via the launch profile that lists it."
+        used_by:
           type: array
-          items:
-            type: object
-            required: [codec, status]
-            properties:
-              codec: { type: string }
-              status: { type: string, enum: [launchable, future, unsupported] }
+          description: "Admin read only: the launch profiles listing this rung. Shown inside the editor as well as the list, because editing a shared object changes every consumer."
+          items: { $ref: "#/components/schemas/ProfileRef" }
+    ProfileRef:
+      type: object
+      description: "A minimal reference to a profile object, used in 'used by' lists."
+      required: [id, display_name]
+      properties:
+        id: { type: string }
+        display_name: { type: string }
+    StreamProfileWrite:
+      type: object
+      description: "UI-P4: admin create/edit shape for one encode rung."
+      required: [display_name, codec, width, height, fps, nominal_bitrate_kbps]
+      properties:
+        id:
+          type: string
+          description: "Required on POST (rung ids are operator-chosen text, not uuids); ignored on PATCH."
+        display_name: { type: string }
+        codec: { $ref: "#/components/schemas/CatalogCodec" }
+        width: { type: integer }
+        height: { type: integer }
+        fps: { type: integer }
         h264_profile: { type: string }
         nominal_bitrate_kbps: { type: integer }
         min_offer_bandwidth_kbps: { type: integer }
@@ -1757,6 +1966,90 @@ components:
         items:
           type: array
           items: { $ref: "#/components/schemas/StreamProfile" }
+
+    # ─── admin: launch profiles (UI-P4) ────────────────────────────────────────
+    # A LAUNCH PROFILE is an ORDERED CHAIN of stream profiles (rungs), best first. It is what a
+    # user picks, what the global default points at, and what an app pins. The launch walks the
+    # rungs and takes the first the placed host can encode and the client can decode, so falling
+    # through a rung can change RESOLUTION as well as codec. Fall-through happens AT LAUNCH ONLY,
+    # never mid-session (a mid-session resolution change is a WebRTC renegotiation, out of scope).
+    # Distinct from a RUNTIME PRESET (UI-P3), which says what container runs.
+    LaunchProfileRung:
+      type: object
+      required: [position, stream_profile]
+      properties:
+        position:
+          type: integer
+          minimum: 1
+          description: "Preference order, 1 = tried first. Server-assigned from the ordered id array on write; a client never sends positions."
+        stream_profile: { $ref: "#/components/schemas/StreamProfile" }
+    LaunchProfileUsedBy:
+      type: object
+      description: "Everything referencing this launch profile. Non-empty in any dimension means DELETE is 409."
+      required: [apps, global_default, user_preferences]
+      properties:
+        apps:
+          type: array
+          items:
+            type: object
+            required: [id, name]
+            properties:
+              id: { type: string, format: uuid }
+              name: { type: string }
+        global_default: { type: boolean, description: "True when stream_profile_policy.global_default_profile_id points here." }
+        user_preferences: { type: integer, description: "Count of user_profile_preferences rows pointing here." }
+    LaunchProfile:
+      type: object
+      required: [id, display_name, description, visibility, sort_order, rungs]
+      properties:
+        id: { type: string }
+        display_name: { type: string }
+        description: { type: string }
+        visibility:
+          type: string
+          enum: [user, debug, internal]
+          description: "Debug/internal launch profiles are never returned by GET /v1/me/profiles."
+        sort_order: { type: integer }
+        rungs:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/LaunchProfileRung" }
+        used_by: { $ref: "#/components/schemas/LaunchProfileUsedBy" }
+        warnings:
+          type: array
+          items: { $ref: "#/components/schemas/WriteWarning" }
+    LaunchProfileWrite:
+      type: object
+      description: >-
+        UI-P4 admin create/edit shape. THE H.264 FLOOR RULE - the rung list must contain at least
+        one rung whose codec is h264, or the write is 400 validation_failed. "And it must be LAST"
+        is a WARNING (h264_floor_not_last), not a rejection: rejecting would make a migrated launch
+        profile whose stored codec order puts h264 first permanently uneditable, and would add no
+        safety, because the guarantee is the resolver's unconditional floor (if no rung survives
+        the clamp chain, the last h264 rung dispatches bypassing EVERY clamp, including its own
+        hardware_encoder_required).
+      required: [display_name, rungs]
+      properties:
+        id: { type: string, description: "Required on POST; ignored on PATCH." }
+        display_name: { type: string }
+        description: { type: string }
+        visibility: { type: string, enum: [user, debug, internal] }
+        sort_order: { type: integer }
+        rungs:
+          type: array
+          minItems: 1
+          description: >-
+            ORDERED stream-profile ids, best first. ORDER IS PREFERENCE. A stream profile may
+            appear at most once (a duplicate is 400 validation_failed). An id that does not
+            resolve is 400 validation_failed at write time, never an FK error surfacing at launch.
+          items: { type: string }
+    AdminLaunchProfilesResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/LaunchProfile" }
     ProfileReason:
       type: object
       description: "A stable reason code + message explaining an eligibility decision (AS10-02)."
@@ -1768,35 +2061,89 @@ components:
       allOf:
         - { $ref: "#/components/schemas/StreamProfile" }
         - type: object
-          description: "Per-profile eligibility verdict from GET /v1/me/profiles (AS10-02)."
-          required: [eligibility, reasons]
+          description: >-
+            Per-RUNG eligibility verdict inside a LaunchProfileEvaluation (AS10-02 rules, UI-P4
+            grain). Before UI-P4 this was the top-level element of GET /v1/me/profiles; it is now
+            nested under a launch profile's rungs[].
+          required: [position, eligibility, reasons]
           properties:
+            position: { type: integer, minimum: 1 }
             eligibility: { type: string, enum: [eligible, risky, ineligible] }
             reasons:
               type: array
               items: { $ref: "#/components/schemas/ProfileReason" }
+    ProfileNominal:
+      type: object
+      description: >-
+        UI-P4: the TOP rung's numbers, echoed so a picker and the admin app-editor preview have
+        something to render. ADVERTISED, NOT RESOLVED - if a rung falls through, the session
+        streams something else, and the session's own `stream` block is the truth. Clients must
+        not treat this as a promise.
+      required: [width, height, fps, bitrate_kbps]
+      properties:
+        width: { type: integer }
+        height: { type: integer }
+        fps: { type: integer }
+        bitrate_kbps: { type: integer }
+    LaunchProfileEvaluation:
+      type: object
+      description: >-
+        UI-P4: a launch profile with its eligibility verdict and its per-rung verdicts. A launch
+        profile is `eligible` if ANY rung is - which INVERTS the pre-UI-P4 semantics on purpose, so
+        a 4K launch profile no longer vanishes for a client that cannot decode 4K; it is offered
+        and resolves to its H.264 floor rung. Counterweight: a launch profile whose TOP rung is
+        ineligible while a lower one is not is classified `risky`, NOT `eligible`, so it can never
+        become recommended_id - without that rule the inverted semantics would silently recommend
+        a "4K" profile that always streams 1080p.
+      required: [id, display_name, description, nominal, eligibility, reasons, rungs]
+      properties:
+        id: { type: string }
+        display_name: { type: string }
+        description: { type: string }
+        nominal: { $ref: "#/components/schemas/ProfileNominal" }
+        eligibility: { type: string, enum: [eligible, risky, ineligible] }
+        reasons:
+          type: array
+          items: { $ref: "#/components/schemas/ProfileReason" }
+        rungs:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/ProfileEvaluation" }
     ProfilesResponse:
       type: object
-      description: "GET /v1/me/profiles response (AS10-02): eligibility + recommendation."
+      description: >-
+        GET /v1/me/profiles response: eligibility + recommendation. BREAKING (UI-P4) - `profiles[]`
+        now holds LAUNCH PROFILES, which have no single top-level resolution. A consumer reading
+        profiles[].width breaks; quasar-client (ffi_control.rs, ffi.rs) hand-projects
+        width/height/fps off this shape and needs a re-pin, deliberately deferred to its own work.
       required: [recommended_id, confidence, notes, profiles]
       properties:
-        recommended_id: { type: string }
+        recommended_id: { type: string, description: "UI-P4: a LAUNCH PROFILE id." }
         confidence: { type: string, enum: [high, low] }
         notes:
           type: array
           items: { $ref: "#/components/schemas/ProfileReason" }
         profiles:
           type: array
-          items: { $ref: "#/components/schemas/ProfileEvaluation" }
+          items: { $ref: "#/components/schemas/LaunchProfileEvaluation" }
     ProfilePolicyResponse:
       type: object
       properties:
-        global_default_profile_id: { type: [string, "null"] }
+        global_default_profile_id:
+          type: [string, "null"]
+          description: >-
+            UI-P4: a LAUNCH PROFILE id (400 validation_failed for an id that is not a user-visible
+            launch profile). null means there is no global default and the per-user recommendation
+            decides - which is the shipped state; migration 0036 deliberately does NOT populate it,
+            because doing so would change the effective resolution of every `inherit` app for every
+            user in one invisible step.
         user_overrides_allowed: { type: boolean }
     ProfilePreferencesResponse:
       type: object
       properties:
-        default_profile_id: { type: [string, "null"] }
+        default_profile_id:
+          type: [string, "null"]
+          description: "UI-P4: the caller's preferred LAUNCH PROFILE; honoured only while user_overrides_allowed is true."
         global_default_profile_id: { type: [string, "null"] }
         user_overrides_allowed: { type: boolean }
 

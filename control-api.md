@@ -261,6 +261,80 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > token respectively, neither of which is a bearer header), and `GET /health`. **`GET /v1/apps`
 > was the only offender.** A future reader should know the sweep happened and need not repeat it.
 
+> **Amendment — UI-P4 (stream profiles + launch profiles). NOT PURELY ADDITIVE. Requires Opus +
+> explicit human sign-off.** This changes what a "profile" *means* across the whole API, so the
+> non-additive parts are stated first and are not buried.
+>
+> **What is breaking.**
+> **(B1)** `GET /v1/me/profiles` **changes what it returns**. It returned the stream-profile
+> catalogue, where every entry carried a single `width`/`height`/`fps`/`nominal_bitrate_kbps`.
+> It now returns **launch profiles**, which have no single resolution: each carries an ordered
+> `rungs[]` of stream profiles, any one of which may be the one a session actually resolves to.
+> A convenience `nominal` block echoes the **top rung's** numbers so a picker has something to
+> render, but it is **advertised, not resolved** — the truth for a running session is that
+> session's own `stream` block. A client that reads `profiles[].width` breaks.
+> **(B2)** `profile_policy` **loses the value `custom`**. The enum becomes
+> `inherit | prefer | force` on **both** the read shape (`AppListItem`, therefore `App` and
+> `AdminApp`) and the write shape (`AppWrite`), and `profile_policy: "custom"` is
+> `400 validation_failed`. Under the two-object model every app points at a launch profile;
+> `custom` existed only so an app could opt out of profiles entirely, and it was also the one
+> mode that could not express a codec.
+> **(B3)** The stream-profile object **loses `codecs[]` and gains `codec`** (a single catalog
+> codec, `h264 | hevc | av1`). The `launchable | future | unsupported` **status enum disappears**:
+> a rung is one codec, so there is nothing left for a status to describe. A codec is offered
+> because a rung using it exists in a launch profile, and withdrawn by removing that rung. The
+> multi-codec amendment's "flip `codecs[].status` to `launchable`" rollout switch is therefore
+> retired and replaced by "add or remove a rung".
+>
+> **What is additive.**
+> **(A1)** A new admin resource, **launch profiles**, with five routes under
+> `/v1/admin/launch-profiles`, all `RequireAuth → RequireAdmin`.
+> **(A2)** The existing admin stream-profile surface gains `POST` and `DELETE`
+> (`/v1/admin/stream-profiles`, `/v1/admin/stream-profiles/{id}`); rungs are now created and
+> deleted, not only edited. Both were already implemented for `GET`/`PATCH` but had never been
+> written into this prose — they are documented here for the first time, along with
+> `GET`/`PATCH /v1/admin/profile-policy`.
+> **(A3)** Every session body gains **`stream_profile_id`** (nullable): the **rung** the launch
+> resolved to. `profile_id` is unchanged and still carries the **user's pick**, which is now a
+> launch profile. Two different questions, two different fields.
+> **(A4)** Write responses on both admin objects may carry a **`warnings[]`** array. A warning is
+> never a failure; see the h264-floor rule below.
+> **(A5)** `openapi.yaml` gains `profile_policy` on **`AppWrite`**. This is a **drift fix, not a
+> new field**: the Go handler has always validated `req.ProfilePolicy` on create and patch
+> (`crud/handler.go:347,418`) while the schema omitted the property entirely.
+>
+> **Object ids.** Existing ids are preserved as **launch profile** ids (`1080p60` stays
+> `1080p60` and is now a launch profile); rungs get new ids of the form
+> `<launch-profile-id>-<codec>` (`1080p60-h264`). This keeps `sessions.profile_id`,
+> `user_device_profile_history.profile_id` and `host_encoder_certification.profile_id` (all
+> un-FK'd `TEXT`) pointing at something that still exists and still means what it meant.
+>
+> **The H.264 floor.** A launch profile **must** contain at least one rung whose codec is `h264`
+> (`400 validation_failed` otherwise, on create and on patch). "And it must be **last**" is a
+> **warning**, not a rejection: rejecting would make a migrated launch profile whose stored codec
+> order puts h264 first permanently uneditable, and it would add no safety, because the actual
+> guarantee is the resolve-time backstop — if no rung survives the clamp chain, the **last h264
+> rung dispatches unconditionally**, bypassing every clamp including its own
+> `hardware_encoder_required`. What "h264 not last" actually costs is that rungs after it are
+> unreachable, which is exactly what a warning is for.
+>
+> **Eligibility semantics invert, deliberately.** A launch profile is eligible if **any** rung is.
+> A 4K launch profile therefore no longer disappears for a client that cannot decode 4K: it is
+> offered and resolves to its H.264 1080p floor rung. This **is** a user-visible behaviour change
+> and is recorded as a decision, not discovered later. Mitigation: a launch profile whose **top**
+> rung is ineligible while a lower one is not is classified **`risky`**, not `eligible`, so it can
+> never become `recommended_id`.
+>
+> Backed by `schema.md` (`launch_profiles`, `launch_profile_rungs`, `stream_profiles.codec`,
+> `sessions.stream_profile_id`, three repointed foreign keys, **migration 0036**). **`agent-api.md`
+> is unchanged**: the agent still receives one resolved `stream` block and one `codec`; it has
+> never known what a profile is. `signaling.md`, `input.md`, `native-client.md` are unchanged.
+> **`quasar-client` is affected by (B1)** and its protocol pin is already five tags stale; the
+> re-pin is deliberately deferred to its own piece of work rather than done blind. No new error
+> code: `validation_failed` (400), `unauthorized` (401), `forbidden` (403), `not_found` (404) and
+> `conflict` (409) are reused throughout. See
+> `docs/design/plans/2026-07-28-phase4-profile-restructure-respec.md`.
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -329,6 +403,15 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `POST /v1/admin/runtime-presets` | **admin** | *(UI-P3)* create a runtime preset |
 | `PATCH /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* edit a runtime preset — takes effect on the **next launch** of every app using it, with no app edit |
 | `DELETE /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* delete a runtime preset — **refuse-if-in-use (`409`)**. The admin UI's disabled Delete button is a UX affordance, never the enforcement |
+| `GET /v1/admin/stream-profiles` | **admin** | *(AS10-01; prose added UI-P4)* list the encode rungs |
+| `POST /v1/admin/stream-profiles` | **admin** | *(UI-P4)* create an encode rung |
+| `PATCH /v1/admin/stream-profiles/{id}` | **admin** | *(AS10-01; prose added UI-P4)* edit an encode rung |
+| `DELETE /v1/admin/stream-profiles/{id}` | **admin** | *(UI-P4)* delete an encode rung — **refuse-if-listed-by-any-launch-profile (`409`)** |
+| `GET /v1/admin/launch-profiles`, `GET /v1/admin/launch-profiles/{id}` | **admin** | *(UI-P4)* read the launch profiles, each with its ordered rungs and its `used_by` list |
+| `POST /v1/admin/launch-profiles` | **admin** | *(UI-P4)* create a launch profile — must contain an h264 rung |
+| `PATCH /v1/admin/launch-profiles/{id}` | **admin** | *(UI-P4)* edit a launch profile, including reordering its rungs (order **is** preference) |
+| `DELETE /v1/admin/launch-profiles/{id}` | **admin** | *(UI-P4)* delete a launch profile — **refuse-if-referenced (`409`)** by any app, the global policy, or any user preference |
+| `GET /v1/admin/profile-policy`, `PATCH /v1/admin/profile-policy` | **admin** | *(AS10-03; prose added UI-P4)* read/update the global default launch profile and whether users may override |
 | `GET /v1/hosts`, `GET /v1/hosts/{id}` | **admin** | host/capacity oversight |
 | `POST /v1/hosts/{id}/drain`, `POST /v1/hosts/{id}/uncordon` | **admin** | *(P3-01)* host lifecycle — cordon a host out of service / return it |
 | `DELETE /v1/hosts/{id}` | **admin** | *(admin-delete)* forget an offline host — refuse-if-online-or-in-use |
@@ -339,7 +422,8 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/sessions/{id}/metrics` | **admin** | *(P4-01)* per-session telemetry read (oversight) |
 | `POST /v1/me/devices` | user (self) | *(P4-01)* upsert the caller's own device capability; owner is the bearer identity, never a body field |
 | `GET /v1/me/devices` | user (self) | *(AS10-08; **LP-SEC-01**)* read the caller's own devices — **now the full list** (was AS10-08 latest-only); owner is the bearer identity |
-| `GET /v1/me/profiles` | user (self) | *(AS10-02)* stream profile eligibility + recommendation for the caller's device; advisory, owner is the bearer identity |
+| `GET /v1/me/profiles` | user (self) | *(AS10-02; **UI-P4**: now evaluates **launch profiles**, each with its per-rung verdicts)* eligibility + recommendation for the caller's device; owner is the bearer identity |
+| `PATCH /v1/me/profile-preferences` | user (self) | *(AS10-03; prose added UI-P4)* the caller's preferred **launch profile**; honoured only while the global policy allows user overrides |
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `GET /v1/me/storage` | user (self) | *(P5-01)* the caller's own per-app storage usage |
@@ -599,9 +683,19 @@ block at the top of this document for what was exposed and why it changed.)*
   ], "next_cursor": null }
 ```
 `display_stream` is the user-facing stream advertised in the library: it resolves the
-app/global stream-profile policy when available, and otherwise falls back to the legacy
+app/global profile policy when available, and otherwise falls back to the legacy
 `default_*` stream fields. `runtime_spec` and resource defaults are **not** exposed to
 clients (agent-internal / scheduler-internal). Disabled apps are omitted.
+
+*(UI-P4)* `default_profile_id` now names a **launch profile**, and `profile_policy` is
+`inherit | prefer | force` — **`custom` is gone** (see the UI-P4 amendment block). `display_stream`
+resolves through the launch profile's **top rung** (`position = 1`), which is the advertised
+setting; a launch may fall through to a lower rung and stream at a different resolution, and the
+session's own `stream` block is the truth for that. The **`default_*` columns stay**: they remain
+the COALESCE fallback here when no launch profile resolves (an `inherit` app while the global
+default is unset), they are what `LaunchConsoleSession` uses unconditionally, and they are the
+ceiling on the documented `POST /v1/sessions` stream-override escape hatch, which is reachable for
+**any** app and not only a formerly-`custom` one.
 
 *(UI-P1)* `kind` (`"game" | "desktop"`) is the library classification, **presentation only** —
 it exists so the client can split and filter the library. Nothing in scheduling, admission,
@@ -778,6 +872,119 @@ decode/re-encode round trip.
 
 ---
 
+## Stream profiles and launch profiles *(UI-P4, admin)*
+
+Two objects, and keeping them distinct is the entire point of this section. A third noun,
+**runtime preset** (above), configures *what container runs*; these two configure *how the stream
+is encoded*. Blurring any of the three in a field name, a route or UI copy is the specific mistake
+this naming exists to prevent.
+
+- **Stream profile** = **one encode rung**: one codec, one resolution, one frame rate, one bitrate,
+  one ABR floor, one playout0, one hardware-encoder requirement, one browser-support hint, plus its
+  eligibility thresholds. "AV1 1440p60 at 9 Mbps" is one row. **Not user-facing** — no user ever
+  picks one directly, and they are never returned outside an admin read or a launch profile's
+  `rungs[]`.
+- **Launch profile** = an **ordered list of stream profiles**, best first. This is what a user
+  picks, what the global default points at, what a user preference points at, and what an app pins.
+  "High" is AV1 1440p60, then HEVC 1440p60, then H.264 1080p60.
+
+Resolution can rise with codec efficiency because each rung carries its **own** resolution **and**
+its own bitrate. Falling through a rung can therefore change resolution as well as codec. That is
+intended, and it is the whole reason for the two objects.
+
+**Fall-through happens at LAUNCH ONLY, never mid-session.** A mid-session resolution change is a
+WebRTC renegotiation and is deliberately out of scope; the one-offer-per-session invariant is
+unaffected by this feature.
+
+### Stream profiles — `/v1/admin/stream-profiles`
+
+```json
+// GET /v1/admin/stream-profiles → 200
+{ "items": [
+  { "id": "1440p60-av1", "display_name": "AV1 · 1440p60",
+    "codec": "av1",
+    "width": 2560, "height": 1440, "fps": 60,
+    "nominal_bitrate_kbps": 9000, "abr_floor_kbps": 3500,
+    "min_offer_bandwidth_kbps": 11000, "recommended_offer_bandwidth_kbps": 13500,
+    "headroom_factor": 1.5, "max_startup_rtt_ms": 0, "min_decode_height": 1440,
+    "high_refresh_display": "none", "hardware_encoder_required": true,
+    "browser_client": "recommended", "playout0_ms": 50,
+    "h264_profile": "high", "visibility": "internal",
+    "used_by": [ { "id": "high", "display_name": "High" } ] }
+] }
+```
+
+- **`codec`** is a single value from the **catalog** vocabulary `h264 | hevc | av1`. Note `hevc`,
+  not the wire `h265`; the rename is bridged in exactly one place server-side and never on this
+  surface. **This replaces the old `codecs[]` list and its `launchable | future | unsupported`
+  status enum, both of which are gone** (amendment B3). A rung *is* a codec.
+- **`h264_profile`** stays on the rung and applies to the `h264` codec only. The browser (WebRTC)
+  receiver rejects High on both VA and NVENC, so a browser launch still negotiates down to the
+  constrained-baseline floor; the rung records the preference for a capable client. Unchanged.
+- `POST` creates, `PATCH /{id}` edits, `DELETE /{id}` removes. **`DELETE` is `409 conflict` while
+  the rung is listed by any launch profile.** The admin UI's disabled Delete button is a UX
+  affordance, never the enforcement.
+- `used_by` lists the launch profiles that list this rung, and is shown **inside the editor** as
+  well as the list: editing a shared object changes every consumer, and that is worth seeing
+  before you type.
+
+### Launch profiles — `/v1/admin/launch-profiles`
+
+```json
+// GET /v1/admin/launch-profiles → 200
+{ "items": [
+  { "id": "high", "display_name": "High",
+    "description": "The 1440p rung for modern codecs, 1080p on H.264.",
+    "visibility": "user", "sort_order": 20,
+    "rungs": [ { "position": 1, "stream_profile": { "id": "1440p60-av1",  "...": "..." } },
+               { "position": 2, "stream_profile": { "id": "1440p60-hevc", "...": "..." } },
+               { "position": 3, "stream_profile": { "id": "1080p60-h264", "...": "..." } } ],
+    "used_by": { "apps": [ { "id": "<uuid>", "name": "Steam" } ],
+                 "global_default": true, "user_preferences": 2 },
+    "warnings": [] }
+] }
+```
+
+- **Order is preference.** The write shape takes an **ordered array of stream-profile ids**; the
+  server assigns `position` from that order. A client does not send positions.
+- A stream profile may appear **at most once** in one launch profile (`400 validation_failed` on a
+  duplicate).
+- **The H.264 floor rule.** A launch profile **must** contain at least one rung whose `codec` is
+  `h264`: `400 validation_failed` otherwise. **"And it must be last" is a warning, not a
+  rejection** — see the amendment block for why. Two warning codes:
+  - `h264_floor_not_last` — every rung after the H.264 rung is unreachable, because H.264 passes
+    every clamp.
+  - `floor_not_least_demanding` — the H.264 rung has a higher `min_offer_bandwidth_kbps` or
+    `min_decode_height` than a rung above it, or requires a hardware encoder while a rung above it
+    does not. A floor that is harder to satisfy than the rung above it is a misconfiguration.
+- `DELETE /{id}` is **`409 conflict`** while the launch profile is referenced by any app
+  (`apps.default_profile_id`), by the global policy
+  (`stream_profile_policy.global_default_profile_id`), or by any user preference
+  (`user_profile_preferences.default_profile_id`). All three are foreign keys as of migration 0036;
+  the `409` is the application-layer gate and the FK is the backstop, not the other way round.
+
+### `GET` / `PATCH /v1/admin/profile-policy`
+
+```json
+{ "global_default_profile_id": null, "user_overrides_allowed": true }
+```
+`global_default_profile_id` names a **launch profile** (`400 validation_failed` for an id that is
+not a user-visible launch profile). `null` means there is no global default and the per-user
+recommendation from `GET /v1/me/profiles` decides — which is the shipped state, and migration 0036
+deliberately does **not** populate it, because doing so would change the effective resolution of
+every `inherit` app for every user in one invisible step.
+
+### `GET` / `PATCH /v1/me/profile-preferences`
+
+```json
+{ "default_profile_id": "high", "global_default_profile_id": null, "user_overrides_allowed": true }
+```
+`default_profile_id` names a **launch profile**, owner is the bearer identity, and it is honoured
+only while `user_overrides_allowed` is true. The two policy fields are echoed read-only so a client
+can render "your admin has pinned everyone to the default" without a second call.
+
+---
+
 ## Sessions (launch + lifecycle)
 
 ### `POST /v1/sessions` — launch
@@ -797,6 +1004,7 @@ is the single hinge to `signaling.md`.
   "session": {
     "id": "<uuid>", "app_id": "<uuid>", "state": "assigned",
     "profile_id": "1080p60",
+    "stream_profile_id": "1080p60-h264",
     "stream": { "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 15000, "h264_profile": "constrained-baseline", "codec": "h264" },
     "created_at": "..."
   },
@@ -892,6 +1100,41 @@ it to concrete `width`/`height`/`fps`/`bitrate_kbps`/`h264_profile`/`playout0_ms
   (launch + `GET`); it is `null` for a legacy/tier/override launch. The resolved concrete values
   live in `stream`; full profile metadata is at `GET /v1/me/profiles` keyed by this id.
 
+*(UI-P4)* `profile_id` now names a **launch profile**, which is the object a user picks. The
+**rung** the launch actually resolved to is the separate, additive **`stream_profile_id`** field,
+also persisted and echoed in every session body, and also `null` on a legacy/tier/override launch.
+`profile_id` answers "what did the user pick"; `stream_profile_id` answers "what did they get".
+Because a rung carries its own resolution, those two can legitimately disagree about width, height,
+fps and bitrate, and **`stream` is always the truth** for a live session.
+
+#### Rung resolution *(UI-P4)*
+> *Supersedes the codec-only clamp chain in §Codec resolution below, which described the same walk
+> when the only thing that varied was the codec.*
+
+The launch walks the resolved launch profile's **rungs**, in `position` order, and takes the first
+that survives every clamp. Placement is deliberately **codec-blind**: the scheduler does not filter
+hosts by rung, the session is admitted against the **top rung** (the highest-demand one, so
+admission can never admit what it would have refused), and the rung resolves **after** placement,
+where the host is known. The resolved rung is then written back in the single post-schedule stream
+update the certification cap already performs.
+
+| # | clamp | rule |
+|---|---|---|
+| 0 | admin/diagnostic `stream.codec` override | selects the first rung with that codec; no such rung ⇒ `400 validation_failed`; host cannot encode it ⇒ `409 conflict` (unchanged: host encoder capability is physics) |
+| 1 | host encoder set | reject a rung whose codec is not in the placed host's reported wire codec set (`agent-api.md` `capacity.codecs`; an agent reporting nothing is h264-only) |
+| 2/3 | client decode probe | reject a rung whose codec is hard-gated and unproven (`h265`/`av1` need an explicit `true`; a stale or absent probe means no). **Additionally** reject a rung whose `min_decode_height` exceeds the probe's measured decode height — new, because a rung now carries its own resolution |
+| 4 | decode-failure history | reject a rung this (user, device) previously failed to decode. **Keyed by rung id** for rows written from UI-P4 onward; a pre-UI-P4 row keyed `(launch profile, codec)` bans every rung of that launch profile using that codec, which is exactly its old meaning |
+| 5 | hardware encoder | reject a rung with `hardware_encoder_required` when the placed host has no hardware encoder. Explicit as a clamp for the first time: it was previously only an eligibility input, where host capability is usually unknown |
+| — | **floor** | if **no** rung survives, dispatch the **last h264 rung**, bypassing clamps 0 through 5 **including its own `hardware_encoder_required`**. The user picked the launch profile, eligibility already approved it, and a session that cannot resolve anything is a failed launch rather than a degraded one. Same silent-downgrade-to-H.264 posture as Sunshine/Moonlight |
+
+**Why clamp 4 had to change grain.** Two rungs may share a codec at different resolutions, which is
+legal under the floor rule and is the normal shape of a real launch profile, and a
+`(launch profile, codec)` key cannot tell them apart. Decode failure is also resolution-dependent
+(which is why `min_decode_height` exists), so a failure recorded on an AV1 4K rung would otherwise
+permanently and wrongly clamp the AV1 1080p rung of the same launch profile on that device.
+Presentation-side failures and passes still record at **launch-profile** grain, because they are
+genuinely codec- and resolution-independent, and they are what feeds the eligibility check.
+
 #### `client_type` — Path-B identity binding (SPT-05)
 > *Additive amendment — one optional top-level string request field; changes no existing shape
 > (absent ⇒ today's behavior exactly). No schema column, no frozen `protocol/` contract touched
@@ -942,6 +1185,12 @@ cannot encode returns **`409 conflict`** and no session persists (host encoder c
 physics). Authorization is unchanged: codec resolution is server-side and the override is honoured
 per the caller's role exactly like the other `stream.*` overrides; the codec field is never a
 client-asserted capability or an access-control input.
+
+> **UI-P4 retires this paragraph.** `codecs[]` and its `launchable | future | unsupported` status
+> enum no longer exist. An admin enables a codec by **adding a rung** using it to a launch profile
+> and disables it by **removing that rung** (§Stream profiles and launch profiles). The h264-floor
+> requirement survives the change of mechanism: a launch profile must contain an h264 rung. The
+> paragraph is kept below as the record of how the rollout switch worked before UI-P4.
 
 **Enabling a codec (admin).** A profile ships with hevc/av1 at status `future` (not launchable), so
 the default catalog resolves h264 for everyone. An admin turns a codec on per profile by setting its
@@ -1389,6 +1638,60 @@ probe it is the conservative default (`1080p60`) and `confidence` is `low`.
   nominal frame rate makes that profile risky and prevents recommendation, but does not
   make an otherwise eligible profile unlaunchable.
 - Debug/internal profiles (`720p30`) are **never** returned.
+
+#### What this endpoint returns after UI-P4 *(BREAKING — read this before the shape above)*
+
+It returns **launch profiles**, not stream profiles. The body above is the pre-UI-P4 shape and is
+retained as the record of what changed. The new shape:
+
+```json
+// 200
+{
+  "recommended_id": "balanced",
+  "confidence": "high" | "low",
+  "notes": [ { "code": "probe_missing", "message": "..." } ],
+  "profiles": [
+    {
+      "id": "high", "display_name": "High",
+      "description": "The 1440p rung for modern codecs, 1080p on H.264.",
+      "nominal": { "width": 2560, "height": 1440, "fps": 60, "bitrate_kbps": 9000 },
+      "eligibility": "risky",
+      "reasons": [ { "code": "decode_height_too_low", "message": "..." } ],
+      "rungs": [
+        { "position": 1, "id": "1440p60-av1",  "codec": "av1",
+          "width": 2560, "height": 1440, "fps": 60, "...": "...",
+          "eligibility": "ineligible", "reasons": [ { "code": "codec_not_supported", "message": "..." } ] },
+        { "position": 2, "id": "1440p60-hevc", "codec": "hevc", "...": "...",
+          "eligibility": "ineligible", "reasons": [ { "code": "codec_not_supported", "message": "..." } ] },
+        { "position": 3, "id": "1080p60-h264", "codec": "h264", "...": "...",
+          "eligibility": "eligible", "reasons": [] }
+      ]
+    }
+  ]
+}
+```
+
+- **A launch profile is `eligible` if ANY rung is.** This inverts the old semantics on purpose: a
+  4K launch profile no longer vanishes for a client that cannot decode 4K, it is offered and
+  resolves to its H.264 floor rung. Refusing to start is worse than starting lower.
+- **A launch profile whose TOP rung is ineligible while a lower one is not is `risky`, not
+  `eligible`.** `recommended_id` only ever picks a fully eligible entry, so a launch profile that
+  is *going* to fall through can never become the recommendation. Without this rule the inverted
+  semantics would silently recommend a "4K" profile that always streams 1080p.
+- **`nominal` echoes the TOP rung's numbers and is advertised, not resolved.** It exists so a
+  picker and the admin app-editor preview have something to render. It is **not** what the session
+  will stream if a rung falls through; the session's own `stream` block is. Clients must not treat
+  it as a promise.
+- Each entry in `rungs[]` is a full stream profile plus its own `eligibility` and `reasons`, so a
+  client can say *"you will get the H.264 1080p rung on this device, because your browser cannot
+  decode HEVC"* instead of implying 1440p. Reason codes are the same stable, append-only set.
+- Debug/internal **launch profiles** are never returned. A rung's own `visibility` is `internal`
+  by construction and is not a filter here: rungs are returned as part of the launch profile that
+  lists them, never standalone.
+- **Client impact.** Any consumer reading `profiles[].width` breaks. Known consumer:
+  `quasar-client` (`ffi_control.rs`, `ffi.rs`) hand-projects `width`/`height`/`fps` off the
+  evaluation. Its protocol pin is already five tags stale; the re-pin is deferred to its own piece
+  of work rather than done blind alongside this change.
 
 ---
 
