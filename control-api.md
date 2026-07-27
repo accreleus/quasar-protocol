@@ -188,6 +188,51 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > `native-client.md` are unchanged** — a library classification and a per-user favourite never
 > reach a node agent. See `docs/design/plans/2026-07-27-ui-implementation-spec.md` §"Phase 1".
 
+> **Amendment — UI-P3 (runtime presets), additive, signed off 2026-07-27.** A **runtime preset**
+> is a reusable container configuration — image, launch arguments, environment, mounts, and the
+> managed-home storage defaults — that many apps inherit instead of repeating.
+> **(0) The name is load-bearing.** The operator asked for an "App Launch Profile"; that name
+> **collides with UI-P4's launch profiles**, which are the quality/encode chain, an entirely
+> unrelated object one admin page away. **Runtime preset**, **stream profile** and **launch
+> profile** are three distinct nouns and stay distinct in the table, the API, the docs and the UI
+> copy. "Preset" also says *inherit-and-override* without implying an ordered chain, which is
+> exactly what this is and exactly what a launch profile is not.
+> **(1)** A new **admin-only resource**, `runtime_presets`, with five routes under
+> `/v1/admin/runtime-presets` (§Runtime presets) and their Authorization rows. Every one is
+> `RequireAuth → RequireAdmin`, server-enforced. **(2)** `AdminApp` gains **`runtime_preset_id`**
+> (nullable uuid) and `AppWrite` gains the same field, **optional and tri-state on patch**
+> (absent = unchanged, explicit `null` = clear, uuid = set). It sits on **`AdminApp`, not
+> `AppListItem`** — a preset is container configuration like `runtime_spec`, not library
+> presentation, so it is not part of the public read shape. **(3) `NULL` means the app carries
+> everything itself, which is exactly today's behaviour**, so every existing app is unchanged and
+> this is purely additive (`schema.md`, **migration 0035**).
+> **(4) The merge is server-side and happens AT LAUNCH, never in the admin UI on save.** This is
+> the load-bearing decision of the feature: if the UI flattened a preset into the app on save,
+> editing the preset later would not reach apps already using it and the object would be a
+> template, not a shared configuration. The control plane merges on the existing per-launch
+> `runtime_spec` assembly path, so **editing a preset changes the next launch of every app using
+> it, with no app edit**. **(5) Merge rules** (`schema.md` carries the same list):
+> **env** — preset first, app second, **a key set on both takes the app's value**;
+> **mounts** — appended, preset first, **no dedupe** (two mounts on one container path is a real
+> misconfiguration and must surface, not be silently resolved);
+> **args** — appended, preset first;
+> **image** — the app overrides when set, blank inherits;
+> **managed_home / home_container_path** — the preset provides the default, the app may override.
+> **(6) Delete-in-use is `409 conflict`, enforced server-side.** The admin UI disables its Delete
+> button when "Used by" is non-empty; that is a UX affordance and **never** the enforcement (the
+> same posture as `DELETE /v1/apps/{id}`'s refuse-if-in-use). No new error code:
+> `validation_failed` (400), `unauthorized` (401), `forbidden` (403), `not_found` (404) and
+> `conflict` (409) are all reused.
+> **`agent-api.md` is UNCHANGED, and deliberately so.** The agent still receives exactly one
+> opaque, already-flattened `app` object in `session_assign` / `session_swap_app` — a preset is
+> invisible from the agent side by construction, and there is no new wire field on that contract.
+> `signaling.md`, `input.md` and `native-client.md` are likewise unchanged. Rollout order, as for
+> UI-P1: **control plane before client** — `crud.decodeJSON` sets `DisallowUnknownFields()`, so a
+> client sending `runtime_preset_id` to a control plane without this amendment is a hard `400`,
+> not a silent ignore. See
+> `docs/design/plans/2026-07-27-ui-implementation-spec.md` §"Phase 3" and
+> `docs/design/plans/2026-07-27-admin-mockup-implementation-notes.md` §12.
+
 > **Amendment — UI-P1 (5): `GET /v1/apps` now requires authentication. BREAKING, non-additive,
 > signed off 2026-07-27.** Recorded honestly rather than dressed up as additive.
 > **What was wrong.** `GET /v1/apps` was the one `/v1` route registered without the auth
@@ -280,6 +325,10 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `POST /v1/apps` | **admin** | create an app |
 | `PATCH /v1/apps/{id}` | **admin** | edit an app |
 | `DELETE /v1/apps/{id}` | **admin** | *(admin-delete)* remove an app from the catalog — refuse-if-in-use |
+| `GET /v1/admin/runtime-presets`, `GET /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* read the shared runtime presets, each with its `used_by` app list |
+| `POST /v1/admin/runtime-presets` | **admin** | *(UI-P3)* create a runtime preset |
+| `PATCH /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* edit a runtime preset — takes effect on the **next launch** of every app using it, with no app edit |
+| `DELETE /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* delete a runtime preset — **refuse-if-in-use (`409`)**. The admin UI's disabled Delete button is a UX affordance, never the enforcement |
 | `GET /v1/hosts`, `GET /v1/hosts/{id}` | **admin** | host/capacity oversight |
 | `POST /v1/hosts/{id}/drain`, `POST /v1/hosts/{id}/uncordon` | **admin** | *(P3-01)* host lifecycle — cordon a host out of service / return it |
 | `DELETE /v1/hosts/{id}` | **admin** | *(admin-delete)* forget an offline host — refuse-if-online-or-in-use |
@@ -644,6 +693,88 @@ Admin-only. Removes an app from the catalog entirely.
   `schema.md` (`sessions.app_id` → `ON DELETE CASCADE`, `user_homes.app_id` → `ON DELETE SET NULL`,
   migration `0014`).
 - **Errors:** `404 not_found` (no such app); `409 conflict` (in use by a non-terminal session).
+
+### Runtime presets *(UI-P3, admin)*
+A **runtime preset** is a reusable container configuration many apps inherit instead of
+repeating: image, launch arguments, environment, mounts, and the managed-home storage defaults.
+`apps.runtime_preset_id` points at one; **`null` means the app carries everything itself, which
+is exactly the pre-UI-P3 behaviour.**
+
+> **Not a launch profile.** UI-P4's *launch profiles* are the quality/encode chain and *stream
+> profiles* are its rungs. A runtime preset configures **what container runs**; a launch profile
+> configures **how the stream is encoded**. They are unrelated objects that happen to sit one
+> admin page apart, so the vocabulary must never be blurred — in the API, the docs, or the UI.
+
+All five routes are **`RequireAuth → RequireAdmin`**, server-enforced.
+
+**`GET /v1/admin/runtime-presets`** — list every preset:
+```json
+// 200
+{ "items": [
+    { "id": "<uuid>", "name": "Steam (Proton)", "description": "...",
+      "image": "ghcr.io/quasar/steam:latest",
+      "args": ["-silent"], "env": { "PROTON_VERSION": "9.0" },
+      "mounts": ["/data/steam-cache:/cache"],
+      "managed_home": true, "home_container_path": "/home/quasar",
+      "used_by": [ { "id": "<uuid>", "name": "Weston Smoke" } ],
+      "created_at": "...", "updated_at": "..." } ] }
+```
+`used_by` is **resolved per read, never stored** — the apps whose `runtime_preset_id` is this
+preset. It is what makes the admin UI's "Used by" row and its disabled-Delete affordance
+possible; it is not the enforcement (see `DELETE` below). It is `[]` for an unused preset.
+
+**`GET /v1/admin/runtime-presets/{id}`** — one preset, same shape, wrapped in
+`{ "runtime_preset": … }`. `404` if absent.
+
+**`POST /v1/admin/runtime-presets`** — create. Only `name` is required; **every other field
+absent falls through to the server default and is never written as a zero value**. `args` and
+`mounts` must be arrays of strings and `env` an object of string values (`400` otherwise);
+`home_container_path` must be absolute. A duplicate `name` is `409 conflict`. Returns `201` with
+`{ "runtime_preset": … }`.
+
+**`PATCH /v1/admin/runtime-presets/{id}`** — edit. **Absent means unchanged**, never "reset to
+default". The edit **takes effect on the next launch of every app using the preset, with no app
+edit** — that is the entire point of the object (see the merge rules below). `404` if absent,
+`409` on a name collision.
+
+**`DELETE /v1/admin/runtime-presets/{id}`** — delete, **refuse-if-in-use**:
+- `409 conflict` while **any** app references the preset, *including a disabled one* — a disabled
+  app still holds the reference and would still be silently reconfigured. Point the apps
+  elsewhere (`PATCH /v1/apps/{id} {"runtime_preset_id": null}`) first.
+- The DB foreign key is `ON DELETE RESTRICT` (`schema.md`) as a **backstop**, not the gate:
+  `SET NULL` would silently strip an app's image/env/mounts and let it launch with a smaller
+  spec instead of failing, which is precisely the class of silent misconfiguration this feature
+  exists to prevent.
+- `204` on success, `404` if absent.
+
+**The app write shape and `runtime_preset_id`.** `AppWrite` gains an **optional**
+`runtime_preset_id`. On create, absent/`null` = no preset. On patch it is **tri-state**: absent =
+unchanged, explicit `null` = clear the reference (the app goes back to carrying everything
+itself), a uuid = set it. A uuid that does not resolve is `400 validation_failed` at write time —
+never an FK error surfacing at launch. It is returned on **`AdminApp`** only: a preset is
+container configuration like `runtime_spec`, not library presentation, so no public read shape
+carries it. The value returned is the app's **own stored column** — the read shape shows the
+operator what they typed, never a pre-flattened merge.
+
+**Merge rules — resolved server-side at launch.** The control plane flattens the preset and the
+app's own runtime configuration into the single opaque spec the node agent receives, on the same
+per-launch path that already assembles `runtime_spec`. **The agent sees no difference: exactly
+one flattened `app` object, and `agent-api.md` is unchanged.** Flattening is deliberately *not*
+done in the admin UI on save — that would freeze a copy per app and an edit to the preset would
+reach nobody.
+
+| field | rule |
+|---|---|
+| `env` | preset first, app second. **A key present on both takes the app's value** — the app is the more specific object. |
+| `mounts` | **appended**, preset first, **no dedupe**. Two mounts on the same container path is a real misconfiguration and must **surface**, not be silently resolved by the server picking one. |
+| `args` | appended, preset first. Argument order is meaningful; the app's follow the preset's. |
+| `image` | the app overrides when set; **blank or absent inherits the preset's**. |
+| `managed_home` / `home_container_path` | the preset provides the **default**; the app may override. `apps.managed_home` is `NOT NULL DEFAULT false` with no "unset", so an app can turn a managed home **on** when its preset has none but cannot turn a preset's **off** — a preset that provisions a per-user home is a storage guarantee for everything inheriting it. An app whose `home_container_path` is still the schema default has expressed no preference and takes the preset's path. |
+
+Any other key in the app's `runtime_spec` (`gpu`, and anything added later) passes through
+untouched. **An app with no preset dispatches a `runtime_spec` byte-identical to before this
+feature existed** — the no-preset path returns the stored JSONB verbatim, without even a
+decode/re-encode round trip.
 
 ---
 

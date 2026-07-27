@@ -134,6 +134,30 @@
 > `input.md`, `native-client.md` are unchanged. See
 > `docs/design/plans/2026-07-27-ui-implementation-spec.md` §"Phase 1".
 
+> **Amendment — UI-P3 (runtime presets), additive, signed off 2026-07-27.** Via **migration
+> 0035** (`0035_runtime_presets`): (1) one new table **`runtime_presets`** — a reusable container
+> configuration (image, launch arguments, environment, mounts, and the managed-home storage
+> defaults) that many apps inherit instead of repeating; (2) one new nullable column
+> **`apps.runtime_preset_id UUID NULL REFERENCES runtime_presets(id) ON DELETE RESTRICT`**.
+> **`NULL` means the app carries everything itself, which is exactly the pre-UI-P3 behaviour**, so
+> every existing row is unchanged and **no backfill** is needed. **Purely additive** — a new table
+> and a new nullable column; no existing table, column, type, constraint, default, or the session
+> state machine changes.
+> **The name is deliberate and not interchangeable.** A *runtime preset* configures **what
+> container runs**. UI-P4's *launch profiles* (an ordered chain of *stream profiles*) configure
+> **how the stream is encoded**. Three distinct nouns; blurring them in a column name, an API
+> field or UI copy is the specific mistake this naming exists to avoid.
+> **The preset is merged into the app SERVER-SIDE AT LAUNCH, never flattened on save** — that is
+> what makes editing a preset reach every app already using it. The merge rules (env: app wins on
+> a conflicting key; mounts: appended, preset first, **no dedupe**; args: appended, preset first;
+> image: app overrides, blank inherits; managed_home/home_container_path: preset default, app may
+> override) live in `control-api.md` §Runtime presets and are implemented in the control plane's
+> launch-time app resolution. **`agent-api.md` is unchanged**: the agent still receives one
+> opaque, already-flattened `app` object, and an app with no preset dispatches a `runtime_spec`
+> **byte-identical** to before. `signaling.md`, `input.md`, `native-client.md` are unchanged. See
+> `docs/design/plans/2026-07-27-ui-implementation-spec.md` §"Phase 3" and
+> `docs/design/plans/2026-07-27-admin-mockup-implementation-notes.md` §12.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
@@ -309,7 +333,38 @@ defaults the scheduler and pipeline need.
 | `enabled` | `BOOLEAN` NOT NULL DEFAULT `true` | hidden from the public library when false. |
 | `managed_home` | `BOOLEAN` NOT NULL DEFAULT `false` | *(P5-01, migration 0008)* when true the control plane injects the caller's per-(user, app) home into `runtime_spec.mounts` at dispatch (assign **and** swap) and enforces the single-writer + quota rules (`control-api.md` §Storage). False = today's stateless behaviour, byte-identical dispatch. |
 | `home_container_path` | `TEXT` NOT NULL DEFAULT `'/home/quasar'` | *(P5-01, migration 0008)* container-side mount point for the managed home. |
+| `runtime_preset_id` | `UUID` NULL → `runtime_presets(id)` **ON DELETE RESTRICT** | *(UI-P3, migration 0035)* the shared runtime preset this app inherits its container configuration from. **`NULL` = the app carries everything itself = the pre-UI-P3 behaviour**, so no existing row changes. The preset is **never** flattened into `runtime_spec` on save — the merge happens server-side at launch (`control-api.md` §Runtime presets), which is what makes a preset edit reach every app already using it. `RESTRICT` is a backstop under the application-layer `409` on delete-in-use, not the gate; `SET NULL` would silently strip an app's image/env/mounts and let it launch with a smaller spec instead of failing. Indexed (`apps_runtime_preset_id_idx`) — Postgres does not auto-index the referencing side of a FK, and both the in-use check and the admin "Used by" list are per-preset lookups. |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | |
+
+## `runtime_presets` (UI-P3)
+> *Additive amendment (migration 0035). A new table; it changes no existing table semantics.*
+
+A reusable container configuration many apps inherit instead of repeating. **This is not a
+launch profile** — launch/stream profiles (UI-P4) are the quality/encode chain and have nothing
+to do with this table. A runtime preset says *what container runs*; a launch profile says *how
+the stream is encoded*.
+
+The four container fields mirror the shape of `apps.runtime_spec`
+(`{image, args, env, mounts}`) but as first-class columns rather than one opaque blob, because
+the admin editor edits them individually and the launch-time merge reads them individually.
+
+| column | type | notes |
+|---|---|---|
+| `id` | `UUID` PK | |
+| `name` | `TEXT` NOT NULL UNIQUE | display name; unique so an operator cannot end up with two presets they cannot tell apart. A collision is `409 conflict`. |
+| `description` | `TEXT` NOT NULL DEFAULT `''` | what this preset is for, shown when picking one on an app. |
+| `image` | `TEXT` NOT NULL DEFAULT `''` | the container image apps inherit. An app that sets its own `runtime_spec.image` overrides it; blank/absent on the app inherits this. |
+| `args` | `JSONB` NOT NULL DEFAULT `'[]'` | launch arguments. **Prepended** to the app's own at launch (preset first). |
+| `env` | `JSONB` NOT NULL DEFAULT `'{}'` | environment. Merged under the app's at launch — **a key set on the app wins**. |
+| `mounts` | `JSONB` NOT NULL DEFAULT `'[]'` | mounts. **Prepended** to the app's own, with **no dedupe**: two mounts on one container path is a real misconfiguration and must surface rather than be silently resolved. |
+| `managed_home` | `BOOLEAN` NOT NULL DEFAULT `false` | storage **default** for inheriting apps. `apps.managed_home` is `NOT NULL DEFAULT false` with no "unset", so an app can turn a managed home **on** when its preset has none but cannot turn a preset's **off** — a preset that provisions a per-user home is a storage guarantee for everything inheriting it. |
+| `home_container_path` | `TEXT` NOT NULL DEFAULT `'/home/quasar'` | container-side mount point default. An app still at the schema default has expressed no preference and takes this; an app with its own non-default path keeps it. |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | `updated_at` is maintained by the shared `set_updated_at()` trigger. |
+
+**Referenced by** `apps.runtime_preset_id` (`ON DELETE RESTRICT`). Deleting a preset that any app
+references — **including a disabled app**, which still holds the reference — is refused with
+`409 conflict` at the application layer (`control-api.md`). The FK is the backstop for every
+other path.
 
 ## `hosts`
 One row per node agent (P1-A registration). At N=1 there is exactly one. Host-level
@@ -1012,6 +1067,7 @@ control-plane/migrations/
   -- (migration 0033 also predates this ledger's last refresh; the committed SQL in migrations/
   --  is authoritative. The UI-P1 amendment adds the line below.)
   0034_app_kind_favourites.up.sql -- (UI-P1) ADD apps.kind (CHECK game|desktop, DEFAULT 'game', presentation-only — no scheduler/agent reader); CREATE user_app_favourites (user_id, app_id, created_at) PK (user_id, app_id), both FKs ON DELETE CASCADE, + INDEX (app_id) for the apps-cascade delete. The down migration drops the table and the column.
+  0035_runtime_presets.up.sql     -- (UI-P3) CREATE runtime_presets (name UNIQUE, description, image, args/env/mounts JSONB, managed_home, home_container_path, timestamps + set_updated_at trigger); ADD apps.runtime_preset_id UUID NULL REFERENCES runtime_presets(id) ON DELETE RESTRICT (NULL = the app carries everything itself = pre-UI-P3 behaviour, no backfill) + INDEX apps_runtime_preset_id_idx for the in-use check and the "Used by" list. The down migration drops the column FIRST (it is the dependent FK) then the table.
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`

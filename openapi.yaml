@@ -350,6 +350,80 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+  # ─── admin: runtime presets (UI-P3) ──────────────────────────────────────
+  /v1/admin/runtime-presets:
+    get:
+      tags: [admin]
+      summary: "UI-P3: list runtime presets, each with its used_by app list."
+      description: |
+        A runtime preset is a reusable container configuration (image, args, env, mounts,
+        managed-home defaults) that many apps inherit instead of repeating. It is NOT a launch
+        profile - UI-P4's launch profiles are the quality/encode chain. RequireAuth ->
+        RequireAdmin, server-enforced.
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/RuntimePresetsResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [admin]
+      summary: "UI-P3: create a runtime preset."
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/RuntimePresetWrite" } } }
+      responses:
+        "201": { description: Created. , content: { application/json: { schema: { $ref: "#/components/schemas/RuntimePresetEnvelope" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/admin/runtime-presets/{id}:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin]
+      summary: "UI-P3: a single runtime preset, with its used_by app list."
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/RuntimePresetEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: "UI-P3: edit a runtime preset (takes effect on the next launch of every app using it)."
+      description: |
+        Absent fields are UNCHANGED, never reset to default. The edit reaches every app already
+        using the preset with no app edit, because the merge is server-side at launch rather than
+        flattened on save. 409 on a name collision.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/RuntimePresetWrite" } } }
+      responses:
+        "200": { description: Updated. , content: { application/json: { schema: { $ref: "#/components/schemas/RuntimePresetEnvelope" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [admin]
+      summary: "UI-P3: delete a runtime preset (refuse-if-in-use)."
+      description: |
+        409 conflict while ANY app references the preset, INCLUDING a disabled one - a disabled
+        app still holds the reference and would still be silently reconfigured. Point the apps
+        elsewhere (PATCH /v1/apps/{id} {"runtime_preset_id": null}) first. The admin UI disabling
+        its Delete button when used_by is non-empty is a UX affordance and never the enforcement;
+        the DB FK (ON DELETE RESTRICT) is the backstop under this 409, not the gate.
+      x-required-role: admin
+      responses:
+        "204": { description: Runtime preset removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
   /v1/admin/activity:
     get:
       tags: [admin]
@@ -1245,6 +1319,18 @@ components:
         default_bitrate_kbps: { type: integer }
         default_profile_id: { type: [string, "null"] }
         runtime_spec: { $ref: "#/components/schemas/RuntimeSpec" }
+        runtime_preset_id:
+          type: [string, "null"]
+          format: uuid
+          description: >-
+            UI-P3, OPTIONAL. The shared runtime preset this app inherits its container
+            configuration from. On create, absent/null = no preset = the app carries everything
+            itself (today's behaviour). On patch it is TRI-STATE: absent = unchanged, explicit
+            null = clear the reference, a uuid = set it. A uuid that does not resolve is
+            400 validation_failed at write time, never an FK error surfacing at launch. NOT a
+            launch profile - see RuntimePreset. Note crud.decodeJSON sets DisallowUnknownFields(),
+            so sending this to a control plane without the UI-P3 amendment is a hard 400 - deploy
+            the control plane before the client.
 
     Session:
       type: object
@@ -1466,7 +1552,7 @@ components:
         - { $ref: "#/components/schemas/App" }
         - type: object
           description: "Admin-visible app shape: includes runtime_spec + resource/storage defaults (P2-08, P5-01)."
-          required: [default_vram_mb, default_encode_slots, runtime_spec, managed_home, home_container_path]
+          required: [default_vram_mb, default_encode_slots, runtime_spec, managed_home, home_container_path, runtime_preset_id]
           properties:
             default_vram_mb:
               type: integer
@@ -1479,6 +1565,17 @@ components:
             runtime_spec: { type: object, additionalProperties: true }
             managed_home: { type: boolean, description: "P5-01: whether this app provisions a per-user managed home directory." }
             home_container_path: { type: string, description: "P5-01: container path where the home is mounted (default /home/quasar)." }
+            runtime_preset_id:
+              type: [string, "null"]
+              format: uuid
+              description: >-
+                UI-P3: the runtime preset this app inherits its container configuration from, or
+                null when the app carries everything itself (the pre-UI-P3 behaviour). Always
+                serialized. This is the app's OWN stored column - the preset is NEVER flattened
+                into runtime_spec here; the merge happens server-side at launch, so this read
+                shape shows the operator exactly what they configured. Admin-only, like
+                runtime_spec: a preset is container configuration, not library presentation, so it
+                is deliberately NOT on AppListItem.
     AdminAppsResponse:
       type: object
       required: [items, next_cursor]
@@ -1487,6 +1584,90 @@ components:
           type: array
           items: { $ref: "#/components/schemas/AdminApp" }
         next_cursor: { type: [string, "null"] }
+
+    # ─── admin: runtime presets (UI-P3) ─────────────────────────────────────────
+    # A RUNTIME PRESET is a reusable container configuration (image, args, env, mounts,
+    # managed-home defaults) that many apps inherit instead of repeating. It is NOT a launch
+    # profile: UI-P4's launch profiles are the quality/encode chain, an unrelated object. A
+    # runtime preset says WHAT CONTAINER RUNS; a launch profile says HOW THE STREAM IS ENCODED.
+    # The preset is merged into the app SERVER-SIDE AT LAUNCH, never flattened on save - that is
+    # what makes a preset edit reach every app already using it. The node agent sees no
+    # difference (agent-api.md is unchanged: still one opaque flattened `app` object).
+    PresetUser:
+      type: object
+      description: "One app inheriting a runtime preset."
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+    RuntimePreset:
+      type: object
+      required: [id, name, description, image, args, env, mounts, managed_home, home_container_path, used_by, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, description: "Unique. A collision on create/patch is 409 conflict." }
+        description: { type: string }
+        image: { type: string, description: "Inherited by apps whose own runtime_spec.image is blank/absent; an app that sets one overrides it." }
+        args:
+          type: array
+          items: { type: string }
+          description: "Prepended to the app's own launch arguments at launch (preset first)."
+        env:
+          type: object
+          additionalProperties: { type: string }
+          description: "Merged UNDER the app's environment at launch - a key set on the app wins."
+        mounts:
+          type: array
+          items: { type: string }
+          description: >-
+            Prepended to the app's own mounts at launch (preset first), with NO DEDUPE. Two mounts
+            on the same container path is a real misconfiguration and must surface rather than be
+            silently resolved by the server picking one.
+        managed_home:
+          type: boolean
+          description: >-
+            Storage default for inheriting apps. apps.managed_home has no "unset", so an app can
+            turn a managed home ON when its preset has none but cannot turn a preset's OFF.
+        home_container_path:
+          type: string
+          description: "Container-side mount point default; an app with its own non-default path keeps it."
+        used_by:
+          type: array
+          items: { $ref: "#/components/schemas/PresetUser" }
+          description: >-
+            The apps inheriting this preset - RESOLVED PER READ, never stored. It is what the
+            admin UI's "Used by" row and its disabled-Delete affordance render; it is NOT the
+            enforcement (DELETE returns 409 while it is non-empty). [] for an unused preset.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    RuntimePresetEnvelope:
+      type: object
+      required: [runtime_preset]
+      properties:
+        runtime_preset: { $ref: "#/components/schemas/RuntimePreset" }
+    RuntimePresetsResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/RuntimePreset" }
+    RuntimePresetWrite:
+      type: object
+      required: [name]
+      description: >-
+        Admin create/edit shape. Only name is required; EVERY other absent field falls through to
+        the server default on create and is left UNCHANGED on patch - absence is never a zero
+        value written over the stored one.
+      properties:
+        name: { type: string }
+        description: { type: string }
+        image: { type: string }
+        args: { type: array, items: { type: string } }
+        env: { type: object, additionalProperties: { type: string } }
+        mounts: { type: array, items: { type: string } }
+        managed_home: { type: boolean }
+        home_container_path: { type: string, description: "Must be absolute (400 otherwise)." }
 
     # ─── hosts: GPU availability ────────────────────────────────────────────────
     GPUAvailability:
