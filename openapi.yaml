@@ -1726,7 +1726,16 @@ components:
       properties:
         name: { type: string }
         description: { type: string }
-        cover_url: { type: [string, "null"] }
+        cover_url:
+          type: [string, "null"]
+          description: >-
+            UI-P7 amendment (2026-07-28, control-api.md §"The app write shape and cover_url"):
+            enforced, not just documented. Once the app has an app_artwork record this write is
+            REFUSED whole-request with 409 conflict, never silently dropped and never a partial
+            update of the request's other fields. Only meaningful while the app has no artwork
+            record (see AppListItem.cover_url), and even then a non-null/non-empty value must be
+            http/https or a schemeless same-origin path — any other scheme is
+            400 validation_failed.
         kind:
           allOf: [ { $ref: "#/components/schemas/AppKind" } ]
           description: >-

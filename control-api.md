@@ -2688,6 +2688,32 @@ middleware at route registration. Hiding the Artwork panel from a non-admin UI i
 access control (invariant #6): a valid non-admin token is `403` on all five admin routes, and a
 missing token is `401`.
 
+### The app write shape and `cover_url` (UI-P7 amendment, 2026-07-28)
+
+`AppWrite.cover_url` (`POST /v1/apps`, `PATCH /v1/apps/{id}`) predates this feature and stays a
+plain optional string — no schema shape change — but its write semantics are now **enforced**,
+closing a gap a review found between this contract and the code:
+
+- **Ownership.** Once an app has an `app_artwork` record (any `source`, including `none`),
+  `cover_url` is owned **exclusively** by the routes above. A direct write in the same `PATCH` is
+  refused **whole-request** with `409 conflict` — never silently dropped, and never a partial
+  update that applies the request's other fields while quietly keeping the old `cover_url`. An app
+  with **no** artwork record is unaffected: the pre-existing direct-write allowance (`AppListItem
+  .cover_url`'s "honoured only while the app has no artwork record") still works exactly as
+  documented there, and this endpoint never touches `app_artwork` — the two write paths cannot
+  race each other into a torn state.
+- **Format.** A non-null, non-empty direct `cover_url` must be `http`/`https` or a schemeless
+  (same-origin) path; anything else (`javascript:`, `data:`, `file:`, ...) is `400
+  validation_failed`. This does not change what a *legitimate* direct write looks like — an
+  operator was always pointing this at a real browsable URL or their own static asset — it only
+  closes a scheme-injection surface the contract left unstated. It is narrower than, and does not
+  replace, the SSRF/redirect/content-sniff guard the artwork routes themselves apply to a
+  provider-supplied or admin-pasted URL (above): a direct `AppWrite` write is never fetched
+  server-side, so there is nothing to dial, only a string the browser later loads as an `<img
+  src>` — the "never hotlinked" goal this whole feature exists for (§Cached locally, never
+  hotlinked) applies here too, which is why an off-box `http(s)` value remains an admin's own
+  choice to make, not one the server can silently launder into a local copy.
+
 ---
 
 ## How the client uses this (end-to-end)
