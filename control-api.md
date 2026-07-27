@@ -922,11 +922,20 @@ unaffected by this feature.
   receiver rejects High on both VA and NVENC, so a browser launch still negotiates down to the
   constrained-baseline floor; the rung records the preference for a capable client. Unchanged.
 - `POST` creates, `PATCH /{id}` edits, `DELETE /{id}` removes. **`DELETE` is `409 conflict` while
-  the rung is listed by any launch profile.** The admin UI's disabled Delete button is a UX
-  affordance, never the enforcement.
+  the rung is listed by any launch profile *or* while any session recorded it as the rung it
+  resolved to.** The admin UI's disabled Delete button is a UX affordance, never the enforcement.
 - `used_by` lists the launch profiles that list this rung, and is shown **inside the editor** as
   well as the list: editing a shared object changes every consumer, and that is worth seeing
   before you type.
+- **`session_count`** (additive, admin read only, omitted when zero) is the **second** `used_by`
+  dimension: the number of sessions whose `stream_profile_id` is this rung. It exists because
+  `sessions.stream_profile_id` is a plain foreign key with **no `ON DELETE` clause** — deliberately
+  `NO ACTION`, since `ON DELETE SET NULL` would erase which rung a historical session actually got,
+  which is the whole reason the column exists. One historical session therefore refuses the delete
+  at the database, and a rung named by session history is effectively **permanent**. A client must
+  treat a non-zero `session_count` exactly like a non-empty `used_by` when deciding whether to
+  offer Delete; a rung with only session references can be removed from every launch profile but
+  never deleted.
 
 ### Launch profiles — `/v1/admin/launch-profiles`
 

@@ -1926,6 +1926,16 @@ components:
           type: array
           description: "Admin read only: the launch profiles listing this rung. Shown inside the editor as well as the list, because editing a shared object changes every consumer."
           items: { $ref: "#/components/schemas/ProfileRef" }
+        session_count:
+          type: integer
+          description: >-
+            Admin read only, ADDITIVE, omitted when zero: how many session rows record this rung as
+            the one they resolved to. This is the SECOND "used by" dimension and it also blocks
+            DELETE - sessions.stream_profile_id is a plain foreign key with no ON DELETE clause
+            (NO ACTION on purpose: ON DELETE SET NULL would erase which rung a historical session
+            actually got, which is the entire reason the column exists), so one historical session
+            refuses the delete at the database. A client must treat a non-zero session_count exactly
+            like a non-empty used_by when deciding whether to offer Delete.
     ProfileRef:
       type: object
       description: "A minimal reference to a profile object, used in 'used by' lists."
