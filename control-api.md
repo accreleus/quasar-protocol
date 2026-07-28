@@ -2238,9 +2238,22 @@ call. Built by joining the existing `session_metrics` JSONB (normalized to taxon
 > certification composes entirely from the existing session lifecycle + `session_metrics` upstream
 > message. See `docs/stream-perf/contract-amendment.md` §B.*
 
-Records the measured, sustainable encode envelope of a concrete (host, GPU, encoder, profile,
-bench-bitrate) configuration, so the scheduler can avoid default-starting a profile a host cannot
-hold in real time. **As-built (SPT-06): script-orchestrated, not control-plane-autonomous** — a
+Records the measured, sustainable encode envelope of a concrete (host, GPU, encoder, **rung**,
+bench-bitrate) configuration, so the scheduler can avoid default-starting something a host cannot
+hold in real time.
+
+> **Migration 0041 re-keyed this on the RUNG (`stream_profile_id`), not the launch profile.**
+> Encode cost is codec- and resolution-dependent and a Phase-4 launch profile chains rungs for up
+> to all three codecs, so a verdict measured on the h264 rung was being applied to an AV1 or HEVC
+> launch at the same launch profile and bitrate. Wire effect, all **additive**: `stream_profile_id`
+> (and `codec` where a codec is implied) appear on the certification row, the run cell plan, and the
+> cell/finalize responses; `stream_profile_id` is accepted on the `/cells` and `/finalize` request
+> bodies and on the list filter. `profile_id` keeps its place and its meaning as *the launch profile
+> the bench ran under* — a request that sends only `profile_id` still works and resolves that
+> chain's first h264 rung, which is exactly what the bench streamed before. Backing DDL:
+> `schema.md` §`host_encoder_certification`, migration `0041`.
+
+**As-built (SPT-06): script-orchestrated, not control-plane-autonomous** — a
 bench session needs a real WebRTC peer to drive frame flow, so the harness
 (`deploy/run-spt06-certify.sh`) supplies a Chrome-for-Testing peer and drives the loop: open a run
 → per-cell (launch → CFT peer drives → finalize) → complete. The control plane still owns the
@@ -2250,13 +2263,14 @@ a browser itself.
 ### `GET /v1/admin/hosts/{id}/encoder-certification` — read verdicts (admin)
 Returns the **latest** `host_encoder_certification` row per configuration for the host (the
 upsert-latest table means "latest" is just "the row"). Optional filters
-`?gpu_index=&encoder=&profile_id=` narrow the set; `?max_age_s=` treats anything older as omitted
-(the staleness horizon below).
+`?gpu_index=&encoder=&profile_id=&stream_profile_id=` narrow the set; `?max_age_s=` treats anything
+older as omitted (the staleness horizon below).
 ```json
 // 200
 { "host_id": "<uuid>",
   "certifications": [
     { "gpu_index": 0, "encoder": "va", "profile_id": "1080p60",
+      "stream_profile_id": "1080p60-h264",
       "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 8000,
       "verdict": "unsafe",
       "encode_ms_p50": 19.2, "encode_ms_p95": 20.1, "encode_ms_max": 24.8,
@@ -2270,20 +2284,29 @@ An uncertified host (no rows) returns `{ "host_id": "<uuid>", "certifications": 
 "uncertified" (no cap).
 
 ### Run lifecycle (admin, script-orchestrated)
-**1. `POST .../runs` — open a run.** Body optionally scopes rungs/encoders/bitrates; absent ⇒ the
-host's default matrix. Reserves the per-host lock, returns the cell plan:
+**1. `POST .../runs` — open a run.** Body optionally scopes launch profiles/encoders/bitrates;
+absent ⇒ the host's default matrix. `profiles` names LAUNCH profiles and each is **expanded into
+its rungs** (0041), so a multi-codec chain is measured per codec rather than at whichever rung the
+bench happened to pick; a rung id may also be named directly to certify one codec. An id that
+resolves to neither is skipped. Reserves the per-host lock, returns the cell plan:
 ```json
 // request (all fields optional)
 { "gpu_index": 0, "encoder": "va", "profiles": ["1080p60","1080p45","720p60"],
   "bitrates_kbps": [4000,6000,8000,12000] }
 // 202 — run opened
 { "run_id": "<uuid>", "host_id": "<uuid>", "status": "running", "started_at": "...",
-  "cells": [ { "profile_id": "1080p60", "bitrate_kbps": 8000 } ] }
+  "cells": [ { "profile_id": "1080p60", "stream_profile_id": "1080p60-h264",
+               "codec": "h264", "bitrate_kbps": 8000 } ] }
 ```
-**2. `POST .../cells` — launch one cell.** Body `{run_id, profile_id, bitrate_kbps}`. Launches a
-Diagnostics session pinned to the target host/GPU and returns its `session_id` + signaling token
-so the harness can attach a CFT peer. Subject to normal admission control (a fully reserved GPU →
-`409`, not a stolen slot).
+**2. `POST .../cells` — launch one cell.** Body
+`{run_id, stream_profile_id, bitrate_kbps}` (`profile_id` alone is still accepted and resolves that
+launch profile's first h264 rung). Launches a Diagnostics session pinned to the target host/GPU,
+**streaming the rung's own codec** — a verdict must be measured on the codec it is filed under — and
+returns its `session_id` + signaling token so the harness can attach a CFT peer. Subject to normal
+admission control (a fully reserved GPU → `409`, not a stolen slot). A rung whose codec the pinned
+host cannot encode is refused up front rather than failing opaquely; a stream profile that is not a
+rung, or a rung no launch profile lists, is `400` (neither can ever be launched, so neither can be
+meaningfully certified).
 
 **3. (harness) connects a CFT peer** to that session so frames flow + decode.
 
@@ -2315,9 +2338,17 @@ fabricates a false `unsafe`.
 
 At session start, resolving the **default** profile for a launch on a target host (host + GPU +
 active encoder already chosen by placement):
+0. **(0041) Resolve the RUNG first.** The cap is keyed on the rung, so it cannot be evaluated
+   before the launch profile's rung walk has said which rung is being started. If the cap then
+   fires, the rung is re-resolved over the lower launch profile. The walk consumes no
+   certification input, so this ordering cannot change which rung a given chain produces, and the
+   SPT-07 probe envelope is still applied to the FINAL rung's bitrate in the single
+   post-placement write.
 1. Look up the latest `host_encoder_certification` row for `(host_id, gpu_index, encoder,
-   profile_id)`. A row older than a staleness horizon (default 7 days, tunable) counts as
-   **uncertified**.
+   stream_profile_id)`, at the bitrate that rung would actually dispatch at. A row older than a
+   staleness horizon (default 7 days, tunable) counts as **uncertified**. A verdict for a
+   *different* rung of the same launch profile — another codec, another resolution — is **not** a
+   verdict about this launch and is never read as one.
 2. **The cap:** do not default-start a profile whose certified `encode_ms_p95 > 0.70 ×
    budget_ms` (`budget_ms = 1000.0 / fps`) on the target host — equivalently, `verdict='unsafe'`
    is not a default start.

@@ -3235,12 +3235,13 @@ components:
     CertRow:
       type: object
       description: "One certification verdict row (cert_handler.go certRowResp)."
-      required: [id, gpu_index, encoder, profile_id, width, height, fps, bitrate_kbps, verdict, encode_ms_p50, encode_ms_p95, encode_ms_max, output_fps, drop_rate, live_write_stable, sample_window_ms, sample_count, measured_at]
+      required: [id, gpu_index, encoder, profile_id, stream_profile_id, width, height, fps, bitrate_kbps, verdict, encode_ms_p50, encode_ms_p95, encode_ms_max, output_fps, drop_rate, live_write_stable, sample_window_ms, sample_count, measured_at]
       properties:
         id: { type: string, format: uuid }
         gpu_index: { type: integer }
-        encoder: { type: string }
-        profile_id: { type: string }
+        encoder: { type: string, description: "Encode backend family (va|nvenc|openh264|vulkan) — NOT the codec." }
+        profile_id: { type: string, description: "Launch profile the bench ran under (context, not key)." }
+        stream_profile_id: { type: string, description: "The certified RUNG — the key dimension since migration 0041." }
         width: { type: integer }
         height: { type: integer }
         fps: { type: integer }
@@ -3271,13 +3272,19 @@ components:
       properties:
         gpu_index: { type: integer }
         encoder: { type: string }
-        profiles: { type: array, items: { type: string } }
+        profiles:
+          type: array
+          description: "Launch-profile ids; each is expanded into its rungs (migration 0041). A rung id may be named directly. Unknown ids are skipped."
+          items: { type: string }
         bitrates_kbps: { type: array, items: { type: integer } }
     CertCellPlan:
       type: object
-      required: [profile_id, bitrate_kbps]
+      description: "One planned bench cell: a RUNG x bitrate point (migration 0041)."
+      required: [profile_id, stream_profile_id, codec, bitrate_kbps]
       properties:
-        profile_id: { type: string }
+        profile_id: { type: string, description: "Launch profile the rung belongs to." }
+        stream_profile_id: { type: string, description: "The rung to certify; pass this to /cells and /finalize." }
+        codec: { type: string, enum: [h264, h265, av1] }
         bitrate_kbps: { type: integer }
     CertRun:
       type: object
@@ -3312,21 +3319,24 @@ components:
         summary_unsafe: { type: integer }
     CertCellRequest:
       type: object
-      description: "POST .../encoder-certification/cells body (cert_handler.go certCellReq)."
-      required: [gpu_index, encoder, profile_id, bitrate_kbps]
+      description: "POST .../encoder-certification/cells body (cert_handler.go certCellReq). One of stream_profile_id or profile_id is required."
+      required: [gpu_index, encoder, bitrate_kbps]
       properties:
         gpu_index: { type: integer }
         encoder: { type: string }
-        profile_id: { type: string }
+        profile_id: { type: string, description: "Launch profile; on its own it resolves that chain's first h264 rung." }
+        stream_profile_id: { type: string, description: "The RUNG to certify (preferred since migration 0041)." }
         bitrate_kbps: { type: integer }
     CertCell:
       type: object
       description: "POST .../encoder-certification/cells response (cert_handler.go certCellResp)."
-      required: [session_id, host_id, profile_id, bitrate_kbps, width, height, fps, budget_ms, signaling_url, signaling_token]
+      required: [session_id, host_id, profile_id, stream_profile_id, codec, bitrate_kbps, width, height, fps, budget_ms, signaling_url, signaling_token]
       properties:
         session_id: { type: string, format: uuid }
         host_id: { type: string, format: uuid }
         profile_id: { type: string }
+        stream_profile_id: { type: string }
+        codec: { type: string, enum: [h264, h265, av1], description: "The codec the bench session streams — what the verdict will be filed under." }
         bitrate_kbps: { type: integer }
         width: { type: integer }
         height: { type: integer }
@@ -3337,10 +3347,12 @@ components:
     CertFinalize:
       type: object
       description: "POST .../encoder-certification/cells/{session_id}/finalize (cert_handler.go certFinalizeResp)."
-      required: [session_id, profile_id, bitrate_kbps, verdict, encode_ms_p50, encode_ms_p95, encode_ms_max, output_fps, drop_rate, live_write_stable, sample_count]
+      required: [session_id, profile_id, stream_profile_id, codec, bitrate_kbps, verdict, encode_ms_p50, encode_ms_p95, encode_ms_max, output_fps, drop_rate, live_write_stable, sample_count]
       properties:
         session_id: { type: string, format: uuid }
         profile_id: { type: string }
+        stream_profile_id: { type: string }
+        codec: { type: string, enum: [h264, h265, av1] }
         bitrate_kbps: { type: integer }
         verdict: { type: string }
         encode_ms_p50: { type: number }

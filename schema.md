@@ -1115,7 +1115,8 @@ default-start on that host.
 | `host_id` | `UUID` NOT NULL → `hosts(id)` ON DELETE CASCADE | the host the bench ran on; cascade so forgetting a host reaps its certifications (identical posture to `gpus`/`session_metrics`). |
 | `gpu_index` | `INT` NOT NULL | the GPU index on that host (matches `gpus.index`; **not** an FK to `gpus.id` — certification is keyed by the stable host+index the agent reports, so a GPU row re-creation does not orphan a still-valid measurement). |
 | `encoder` | `TEXT` NOT NULL | the encode element family the verdict is for — `CHECK (encoder IN ('va','nvenc','openh264'))`. Matches the `QUASAR_ENCODER` selector. Widening (e.g. an AV1 element) is a later migration, mirroring how `session_metrics.source` widened in 0014. |
-| `profile_id` | `TEXT` NOT NULL | the AS10-01 stream-profile id the bench targeted (e.g. `'1080p60'`). Same id space as `sessions.profile_id`; **not** FK-constrained (the profile catalog is in-code, not a DB table). |
+| `profile_id` | `TEXT` NOT NULL | the LAUNCH PROFILE the bench ran under (e.g. `'1080p60'`). Same id space as `sessions.profile_id`; **not** FK-constrained. **CONTEXT, NOT KEY since 0041** — a launch profile is a chain of rungs and has no single encode cost, so it identifies the run, not the measurement. |
+| `stream_profile_id` | `TEXT` NOT NULL → `stream_profiles(id)` ON DELETE CASCADE | **(migration 0041)** the RUNG that was streamed and measured, i.e. one concrete (resolution, fps, codec). This is the key dimension the verdict is actually about, and what `sessions.stream_profile_id` records for a live session. `CASCADE` (not the `NO ACTION` `sessions.stream_profile_id` uses) because a session row is history that must survive its rung while a certification row is a measurement *of* the rung and is meaningless without it. |
 | `width` | `INT` NOT NULL | resolved bench resolution (self-describing even if the profile catalog later re-tunes a rung). |
 | `height` | `INT` NOT NULL | |
 | `fps` | `INT` NOT NULL | the bench target fps — the frame budget is `1000.0 / fps` ms. |
@@ -1135,15 +1136,40 @@ default-start on that host.
 
 **Upsert-latest, not append-only.** Unlike `session_metrics`, this table holds the **current
 capability verdict** per configuration. A re-certification of the same (host, gpu_index, encoder,
-profile_id, bitrate_kbps) tuple **replaces** the prior row (upsert on the unique key below,
-bumping `updated_at`/`measured_at`). Uniqueness:
+stream_profile_id, bitrate_kbps) tuple **replaces** the prior row (upsert on the unique key below,
+bumping `updated_at`/`measured_at`). `profile_id` rides along and is refreshed on conflict but is
+not part of the key: one rung may be listed by more than one chain, and re-certifying it under a
+different chain must update the single measurement rather than fork it. Uniqueness:
 
 ```
-UNIQUE (host_id, gpu_index, encoder, profile_id, bitrate_kbps)
+UNIQUE (host_id, gpu_index, encoder, stream_profile_id, bitrate_kbps)   -- migration 0041
 ```
 
-Index: `(host_id, gpu_index, encoder, profile_id)` — serves the scheduler's per-launch lookup
-across all bench bitrates, and the admin per-host read.
+Index: `(host_id, gpu_index, encoder, stream_profile_id)` — serves the scheduler's per-launch
+lookup across all bench bitrates, and the admin per-host read.
+
+**Why the key is the rung and not `(profile_id, codec)` (migration 0041).** The 0018 key had no
+codec dimension at all: `encoder` is the backend *family* (`va`/`nvenc`/`openh264`/`vulkan`), not
+the codec. Encode cost is codec- **and** resolution-dependent, and since the Phase-4 restructure a
+launch profile chains rungs for up to all three codecs — `launch_profile_rungs` is unique on
+`(launch_profile_id, stream_profile_id)`, so a chain may legally hold two rungs of the same codec
+at different resolutions. `(profile_id, codec)` is therefore only unambiguous while every chain is
+single-resolution, which the model does not promise. This is the same conclusion Phase 4 reached
+for the other wrong-grained per-profile table: migration 0032 re-keyed
+`user_device_profile_history` on `(profile, codec)`, and Phase 4 then moved decode-failure history
+to rung grain for exactly this reason.
+
+**The 0041 data migration.** Every pre-0041 row is an H.264 measurement — the SPT-06 bench sets no
+codec on its bench session and the `sessions` INSERT coalesces an empty codec to `h264` — so rows
+are re-pointed at the **first h264 rung by position** of the launch profile they name. 0036's
+fan-out cloned every column of the legacy stream profile into that rung, so a migrated row's
+`width`/`height`/`fps` still match its new key exactly. A row naming no launch profile with an
+h264 rung cannot be interpreted at the new grain and is **deleted** (a missing cert is the
+optimistic "uncertified" case, so dropping one can only remove a cap, never add one); the whole
+pre-migration table is snapshotted to `_backup_0041_host_encoder_certification` first, and the down
+path restores from it. The down direction is lossy where two rungs of one chain were certified at
+the same bitrate — the 0018 key cannot represent both — and resolves it by keeping the newest
+measurement, which is that key's own upsert-latest rule.
 
 **Plain Postgres only — no `CREATE EXTENSION`, no `create_hypertable`.** There is no time-series
 growth concern because it is upsert-latest (bounded by hosts × GPUs × encoders × rungs × bench
@@ -1161,6 +1187,10 @@ tuning.
 
 Migration `0018_host_encoder_certification`: creates the table + the lookup index in one
 `BEGIN; … COMMIT;` block. The down migration drops the table.
+Migration `0019_encoder_cert_vulkan`: widens the `encoder` CHECK to admit `'vulkan'`.
+Migration `0041_cert_rung_key`: adds `stream_profile_id`, migrates the existing rows onto it,
+swaps the unique key and the lookup index onto the rung, and snapshots the pre-migration table for
+its down path.
 
 ## `user_app_favourites` (UI-P1)
 > *Additive amendment (migration 0034). A new join table; it changes no existing table
