@@ -2837,8 +2837,23 @@ components:
       allOf:
         - { $ref: "#/components/schemas/Session" }
         - type: object
+          description: >-
+            A Session plus the admin-only display names of the rows it references.
+            All three name fields are additive and OMITTED when the join resolves
+            nothing; the client falls back to the truncated id.
           properties:
             latest_metrics: { $ref: "#/components/schemas/LatestMetrics" }
+            username:
+              type: string
+              description: "users.username for user_id. Omitted when the user row is gone."
+            app_name:
+              type: string
+              description: "apps.name for app_id. Omitted when the app row is gone."
+            host_name:
+              type: string
+              description: >-
+                hosts.node_name for host_id. Omitted while the session is
+                unassigned (host_id is null) and when the host row is gone.
     AdminSessionsResponse:
       type: object
       properties:

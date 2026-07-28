@@ -1852,6 +1852,27 @@ series. The admin session **list** (`GET /v1/admin/sessions`) may additionally c
 additive `latest_metrics` object per item (the most-recent merged sample) so the list view shows
 current values without an N+1 fan-out; absent when a session has no telemetry yet.
 
+> **Amendment — #385 item 7 (admin session display names), additive, admin-gated.**
+> `AdminSession` additionally carries `username`, `app_name` and `host_name` — the display names of
+> the `user_id` / `app_id` / `host_id` the session references. **Additive and omit-when-absent:** no
+> existing field changes shape, and a client that ignores them sees the response it saw before.
+> ```json
+> { "items": [ { "id": "743a921f-…", "user_id": "7622e7d4-…", "username": "deltest",
+>                "app_id": "e808ef43-…", "app_name": "Redout: Enhanced Edition",
+>                "host_id": "741dc00a-…", "host_name": "tower", "state": "running", "…": "…" } ],
+>   "next_cursor": null }
+> ```
+> - Resolved by a **`LEFT JOIN`** on the admin read path only. Each field is **omitted** when the
+>   join resolves nothing, and the client falls back to the truncated id — a session whose app or
+>   host row has been deleted must still appear in an operator's oversight view, not vanish from it.
+>   `host_name` is additionally omitted while the session is unassigned (`host_id` is `null`), which
+>   is the routine case, not an edge.
+> - **Admin-gated, and deliberately not on the user-facing `Session`.** `GET /v1/sessions` and
+>   `GET /v1/sessions/{id}` are unchanged: the owner-facing session body does not begin disclosing
+>   other rows' names. This is the documented additive/admin-gated exception in §Authorization.
+> - Restores the signed-off `admin-sessions` mockup, which has always specified the User cell as
+>   *id + username stacked* and the App cell as the app's name.
+
 ### `POST /v1/me/devices` — upsert the caller's device capability
 The client posts its login-time connection + decode-capability probe. Owner is the **bearer
 identity** (never a body field); a user can only write their own devices. Upsert on
