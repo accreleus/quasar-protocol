@@ -893,6 +893,72 @@ paths:
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  # ─── admin: encrypted secrets ────────────────────────────────────────────
+  # The reusable secrets facility. Values are AES-256-GCM encrypted in Postgres
+  # under a master key that lives ONLY in the environment (QUASAR_SECRET_KEY),
+  # and are decrypted at the point of use.
+  #
+  # THE WIRE IS WRITE-ONLY. No response on any route below ever contains a
+  # secret value. GET returns declarations plus configured/readable/origin and a
+  # MASKED hint (last 4 characters, and nothing at all for a short value). There
+  # is deliberately no "reveal" endpoint: a stored credential is for the server
+  # to use, and an admin who needs the value again re-issues it at the provider.
+  /v1/admin/secrets:
+    get:
+      tags: [admin]
+      summary: List the secrets this deployment declares, and their state (never a value).
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SecretsEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/secrets/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+        description: "A declared secret name, e.g. artwork.steamgriddb.api_key. An undeclared name is 404, not a new row."
+    put:
+      tags: [admin]
+      summary: Set or replace a secret's value (write-only).
+      description: >-
+        Encrypts and stores the value. Answers 409 conflict when no master key is configured
+        (QUASAR_SECRET_KEY unset), and a DIFFERENT 409 message when the configured master key
+        does not match what is already stored - those are different operator problems and are
+        deliberately not collapsed into one answer. The response is the same status shape as
+        GET and never echoes the value.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: { type: string, minLength: 1, description: "The plaintext credential. Never returned by any endpoint." }
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SecretEnvelope" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [admin]
+      summary: Clear a stored secret.
+      description: >-
+        Removes the stored value. Any environment-variable fallback the secret declares then
+        takes effect again, so clearing cannot lock an operator out of a feature they had
+        working before the admin UI existed.
+      x-required-role: admin
+      responses:
+        "204": { description: Secret cleared. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /v1/admin/invites:
     get:
       tags: [admin]
@@ -2043,6 +2109,75 @@ components:
         expires_at: { type: [string, "null"], format: date-time }
         created_at: { type: string, format: date-time }
 
+    # ─── admin: encrypted secrets ─────────────────────────────────────────────
+    SecretStatus:
+      type: object
+      description: >-
+        One declared secret and its current state. This schema has NO field that can hold a
+        value, by construction - adding one would be the bug it exists to prevent.
+      required: [name, label, description, env_var, docs_url, configured, readable, hint, env_set, origin, key_version, updated_by, updated_at]
+      properties:
+        name: { type: string, description: "Stable identifier, dotted and namespaced by feature (artwork.steamgriddb.api_key)." }
+        label: { type: string, description: "Operator-facing name." }
+        description: { type: string, description: "What setting it enables." }
+        env_var: { type: string, description: "The environment variable that supplies the same credential as a FALLBACK, or empty when there is none." }
+        docs_url: { type: string, description: "Where to obtain the credential. May be empty." }
+        configured:
+          type: boolean
+          description: "True when a value is stored in the database, whether or not this control plane can decrypt it."
+        readable:
+          type: boolean
+          description: >-
+            False when a value is stored but the master key is missing or wrong. Distinguishing
+            this from 'not configured' is the point: the operator's fix is completely different.
+        hint:
+          type: string
+          description: >-
+            Masked tail of the STORED value - last 4 characters, and EMPTY for a value short
+            enough that 4 characters would be a meaningful fraction of it. Never a full value.
+        env_set:
+          type: boolean
+          description: "Whether the fallback environment variable is present on the server. PRESENCE only; the value is never reported."
+        origin:
+          type: string
+          enum: [none, database, environment]
+          description: >-
+            Which source is actually IN EFFECT. 'database' wins over 'environment' when both
+            are present, so an admin typing a key into the UI is never silently overridden by a
+            stale env var. A stored-but-unreadable secret reports 'none' rather than falling
+            through to the environment - silently using a different credential than the one an
+            admin configured is the surprise this facility exists to prevent.
+        key_version: { type: integer, description: "Master-key version the stored value was written under; 0 when nothing is stored." }
+        updated_by: { type: [string, "null"], format: uuid }
+        updated_at: { type: [string, "null"], format: date-time }
+        problem:
+          type: string
+          description: "Operator-facing explanation when readable is false. Never contains any part of a value."
+    SecretsEnvelope:
+      type: object
+      required: [secrets, master_key_configured, key_versions]
+      properties:
+        secrets:
+          type: array
+          items: { $ref: "#/components/schemas/SecretStatus" }
+        master_key_configured:
+          type: boolean
+          description: >-
+            False when QUASAR_SECRET_KEY is unset. This is a SUPPORTED state, not a fault: the
+            control plane boots normally and secret-backed features report themselves
+            unavailable. The UI reads this to explain that storing secrets is unavailable
+            rather than offering a field whose save always fails.
+        key_versions:
+          type: array
+          items: { type: integer }
+          description: "Master-key versions this control plane can decrypt with, so a version mismatch is diagnosable."
+    SecretEnvelope:
+      type: object
+      required: [secret, master_key_configured]
+      properties:
+        secret: { $ref: "#/components/schemas/SecretStatus" }
+        master_key_configured: { type: boolean }
+
     # ─── admin: apps ──────────────────────────────────────────────────────────
     AppArtwork:
       type: object
@@ -2078,7 +2213,7 @@ components:
         updated_at: { type: string, format: date-time }
     AppArtworkEnvelope:
       type: object
-      required: [artwork, provider_configured, provider_name]
+      required: [artwork, provider_configured, provider_name, provider_origin]
       properties:
         artwork:
           oneOf: [ { $ref: "#/components/schemas/AppArtwork" }, { type: "null" } ]
@@ -2089,7 +2224,24 @@ components:
             Whether a third-party artwork provider is configured on this deployment. False is the
             SHIPPED DEFAULT. The admin UI reads this to explain why the provider-backed controls
             are unavailable, rather than offering a button that silently does nothing.
+            Resolved PER REQUEST from the encrypted secrets store, so a key set from the admin UI
+            flips this without a control-plane restart.
         provider_name: { type: string, description: "Empty when no provider is configured." }
+        provider_origin:
+          type: string
+          enum: [none, database, environment, static]
+          description: >-
+            Where the credential in effect came from: 'database' (an admin set it through
+            /v1/admin/secrets), 'environment' (the legacy QUASAR_STEAMGRIDDB_API_KEY), 'static'
+            (a provider supplied directly at construction - embedded/test wiring only, never the
+            shipped server) or 'none'. An operator upgrading a deployment that already had the
+            env var must be able to SEE that it is still what is being used.
+        provider_problem:
+          type: string
+          description: >-
+            Why the provider is unavailable despite something being configured - e.g. a stored
+            API key the master key cannot decrypt. Empty when there is nothing to explain. Never
+            contains any part of a credential.
     AppArtworkWrite:
       type: object
       description: "Exactly one intent per request; an empty body is 400 validation_failed."
@@ -2100,7 +2252,7 @@ components:
         rematch: { type: boolean, description: "Re-run automatic matching now instead of waiting for the background sweep." }
     AppArtworkCandidates:
       type: object
-      required: [candidates, provider_configured, provider_name]
+      required: [candidates, provider_configured, provider_name, provider_origin]
       properties:
         candidates:
           type: array
@@ -2119,6 +2271,10 @@ components:
                   operator opened is not the library.
         provider_configured: { type: boolean }
         provider_name: { type: string }
+        provider_origin:
+          type: string
+          enum: [none, database, environment, static]
+          description: "Where the credential in effect came from. See AppArtworkEnvelope.provider_origin."
     AdminApp:
       allOf:
         - { $ref: "#/components/schemas/App" }

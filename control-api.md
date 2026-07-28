@@ -521,6 +521,9 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `POST /v1/me/password` | user (self) | *(CP-01)* change the caller's own password; subject is the bearer identity, never a body field. Revokes all active tokens on success — client must re-authenticate |
 | `GET /v1/admin/settings` | **admin** | *(LP-SEC-01)* read instance settings (`registration_mode`, `storage_provider`, …) |
 | `PATCH /v1/admin/settings` | **admin** | *(LP-SEC-01)* update instance settings — how invites are enabled/disabled from the UI |
+| `GET /v1/admin/secrets` | **admin** | *(secrets facility)* list the declared secrets + configured/readable/origin + a **masked** hint — never a value |
+| `PUT /v1/admin/secrets/{name}` | **admin** | *(secrets facility)* set/replace a secret's value; write-only on the wire, response is the status shape |
+| `DELETE /v1/admin/secrets/{name}` | **admin** | *(secrets facility)* clear a stored secret; any declared env-var fallback takes effect again |
 | `POST /v1/admin/invites` | **admin** | *(LP-SEC-01)* mint an invite; plaintext code + magic link returned once |
 | `GET /v1/admin/invites` | **admin** | *(LP-SEC-01)* list minted invites (never plaintext) |
 | `DELETE /v1/admin/invites/{id}` | **admin** | *(LP-SEC-01)* revoke an invite |
@@ -685,6 +688,92 @@ existing token-revocation path. Gated by `RequireAuth` like the other `/v1/me` r
 `registration_mode` validated against `{closed, invite_only, open}` (`400 validation_failed`
 otherwise); persisted to the `instance_settings` singleton (`schema.md`). Takes effect
 immediately — no redeploy. `403` for non-admin (precedes any lookup).
+
+## Encrypted secrets — the reusable operator-credential facility (2026-07-28)
+
+> **Amendment — additive, admin-gated, requires sign-off.** Adds `GET /v1/admin/secrets`,
+> `PUT /v1/admin/secrets/{name}` and `DELETE /v1/admin/secrets/{name}`. No existing shape
+> changes. Cover artwork's SteamGridDB key is consumer #1; the facility is general, because
+> more operator credentials are coming and each one must not reinvent the crypto.
+
+Operator credentials (API keys, passwords, tokens) live **encrypted** in the
+`instance_secrets` table (`schema.md`) and are decrypted **only at the point of use**. The
+master key is `QUASAR_SECRET_KEY` in the environment and is never in the database, so a
+database dump is not enough to read a stored credential.
+
+### The wire is write-only
+
+**No response on any of these routes ever contains a secret value.** There is deliberately no
+"reveal" endpoint: a stored credential is for the server to use, and an admin who needs the
+value again re-issues it at the provider. A `GET` returns, per declared secret:
+
+| field | meaning |
+|---|---|
+| `configured` | a value is stored — **whether or not** this control plane can decrypt it |
+| `readable` | `false` when a value is stored but the master key is missing or wrong |
+| `hint` | the **last 4 characters** of the stored value, and **empty** when the value is short enough that 4 characters would be a meaningful fraction of it |
+| `env_set` | whether the declared fallback env var is **present** — presence only, never its value |
+| `origin` | which source is actually in effect: `database`, `environment` or `none` |
+| `key_version` | which master-key version wrote the row |
+| `problem` | why `readable` is `false`, in operator-facing words; never any part of a value |
+
+### Precedence: the database wins, the environment is the fallback
+
+`origin: "database"` outranks `origin: "environment"`. An admin who types a key into the UI must
+not be silently overridden by a stale env var — a control that appears to save and then does
+nothing is the worst outcome available. Because the env var remains the fallback, an existing
+deployment upgrades with **no change** (nothing is stored yet, so the env var is used), and
+clearing the stored secret falls **back** to the env var rather than off a cliff. Both facts are
+visible: `origin` says which one is live, and `env_set` says the other exists.
+
+A **stored-but-unreadable** secret reports `origin: "none"` and does *not* fall through to the
+environment. Silently using a different credential than the one an admin configured is precisely
+the surprise this facility exists to prevent.
+
+### Key management, and the two failures that must not look alike
+
+- **Unset master key.** `master_key_configured: false`. This is a **supported state and the
+  default**: the control plane boots normally, everything unrelated works, and secret-backed
+  features report themselves unavailable. A key is *never* generated and persisted on first
+  boot — a generated key would diverge across a multi-node deployment and make a database
+  backup unrestorable without the node that invented it.
+- **Wrong master key.** `configured: true, readable: false`, with a `problem` naming the master
+  key specifically. `PUT` answers `409 conflict` with a *recovery* message ("restore the
+  original `QUASAR_SECRET_KEY`, or set this secret again"), which is a different message from
+  the *setup* one returned when no key is configured at all. Collapsing these two into "not
+  configured" is the exact confusion the facility is written against.
+- **Rotation** is not implemented, but is not designed out: every row records the
+  `key_version` that wrote it, and `QUASAR_SECRET_KEY_PREVIOUS` supplies decrypt-only
+  predecessors, so a rotated deployment keeps reading old rows and a re-encrypt sweep can be
+  added with no schema or wire change.
+- **Losing the master key means the stored values are unrecoverable** and must be re-entered.
+  That is the design, not a defect: see `docs/configuration.md`.
+
+### The routes
+
+```json
+// GET /v1/admin/secrets — 200
+{ "secrets": [ { "name": "artwork.steamgriddb.api_key", "label": "SteamGridDB API key",
+                 "env_var": "QUASAR_STEAMGRIDDB_API_KEY", "configured": true, "readable": true,
+                 "hint": "9f2c", "env_set": false, "origin": "database", "key_version": 1,
+                 "updated_by": "<uuid|null>", "updated_at": "..." } ],
+  "master_key_configured": true, "key_versions": [1] }
+
+// PUT /v1/admin/secrets/{name} — request
+{ "value": "<the credential>" }
+// 200 — the SAME status shape as GET. The value is not echoed.
+{ "secret": { "...": "..." }, "master_key_configured": true }
+
+// DELETE /v1/admin/secrets/{name} — 204
+```
+
+An **undeclared** name is `404`, not a new row: this is a registry of secrets the build knows
+how to use, not an arbitrary admin-writable key/value store. An empty `value` is `400` — `""`
+is indistinguishable from unset at every later read, so storing it would be a silent way to
+break a feature; `DELETE` is how you clear one.
+
+`RequireAuth → RequireAdmin` on all three, enforced by the middleware at route registration
+(invariant #6). A valid non-admin token is `403` on every one.
 
 ### `POST /v1/admin/invites` — mint a magic one-time link (admin)
 `RequireAuth → RequireAdmin`.
@@ -2622,8 +2711,9 @@ supplied, and the bytes were already verified to sniff as JPEG/PNG/WebP before b
 
 ### `GET /v1/admin/apps/{id}/artwork` *(admin)*
 
-Returns `{ artwork, provider_configured, provider_name }`. `artwork` is `null` when the app has
-no record — the gradient-tile state. `artwork.source` is one of:
+Returns `{ artwork, provider_configured, provider_name, provider_origin, provider_problem? }`.
+`artwork` is `null` when the app has no record — the gradient-tile state. `artwork.source` is
+one of:
 
 | `source` | meaning |
 |---|---|
@@ -2636,6 +2726,22 @@ provider call, so a desktop app is never queried at all: a games database will n
 or Firefox, and asking costs a request and leaks the app name for a guaranteed miss. An
 unmatched *game* records `none` too, so the next sweep does not re-ask. A provider **error**,
 by contrast, records nothing — a transient outage must never be cached as "this app has no art".
+
+### Where the provider API key comes from *(2026-07-28 amendment)*
+
+The key is **not** read once at boot. It is resolved on **every use** from the encrypted
+secrets store (`artwork.steamgriddb.api_key`, see *Encrypted secrets* above), falling back to
+`QUASAR_STEAMGRIDDB_API_KEY`. Consequences worth stating:
+
+- A key set from the admin UI takes effect **with no control-plane restart** — the search
+  controls become available on the next request, and the background sweep picks it up on its
+  next tick.
+- An existing deployment that already set the env var keeps working untouched.
+- `provider_origin` (`database` | `environment` | `static` | `none`) says which one is live, so
+  an operator never has to guess. `provider_problem` explains a configured-but-unusable key
+  (e.g. the master key does not match it) instead of it reading as "no provider configured".
+- `QUASAR_ARTWORK_PROVIDER=none` still switches the provider off outright, and a key typed into
+  the admin UI does **not** override it.
 
 ### `POST /v1/admin/apps/{id}/artwork/search` *(admin)*
 
