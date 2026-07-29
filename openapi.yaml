@@ -967,6 +967,33 @@ paths:
         to EVERY ROLE, admin included; an admin who wants to launch an app they have restricted
         grants themselves the entitlement (POST /v1/admin/apps/{id}/entitlements), which is one
         call and leaves an audit row.
+
+        STEAM LIBRARY DISCOVERY PHASE 3 ADDS TWO 409 CONDITIONS, BOTH ADDITIVE (409 was already
+        declared on this endpoint, and Error.code is an open string).
+
+        home_in_use is NOT a new code - P5-01 has emitted it since managed homes shipped. What
+        Phase 3 changes is WHAT IT KEYS ON and WHAT IT CARRIES. The single-writer rule is per
+        (user, HOME-OWNING app), and a derived tile does not own a home: it borrows its parent's.
+        So the guard resolves parent_app_id ?? id before counting, and a user with a Steam
+        session live is refused on EVERY tile derived from it, and vice versa. IT IS ONE LOCK,
+        held by the parent's home, and the launcher tile is simply its most visible holder. Two
+        Steam clients on one steamapps tree is a documented corruption class (a mid-write death
+        marks the install unclean and forces a full re-verify), so this is correctness, not a
+        limitation to engineer around. The body now carries session_id, the conflicting session.
+        THE CLIENT MUST RENDER IT AS "Steam is already running - go to your session", NAMING THE
+        LAUNCHER TILE (what the user sees in their library) RATHER THAN A PARENT APP ID, and
+        never as a generic launch failure: from the user's side they clicked a game and were told
+        a different app is in the way.
+
+        home_not_provisioned (409) IS a new code. A derived tile provisions nothing - the launch
+        path calls RequireHome, which reads and never creates - so a user with no home for
+        (user, parent) on any host is refused BEFORE placement, and NO user_homes ROW IS CREATED.
+        The message names the parent app: "launch <Steam app> once on a host to create your
+        library, then try again." Deliberately stricter than the existing locality preference: a
+        derived tile is pinned HARD to the host holding the home (via the existing PinHostID
+        machinery) and cannot fall back to a free host, because a session that refuses to start
+        is recoverable in one click while a session that silently creates a second empty Steam
+        library is a support ticket and a wasted disk.
       requestBody:
         required: true
         content:
@@ -1791,8 +1818,42 @@ components:
       enum: [constrained-baseline, baseline, main, high]
     AppKind:
       type: string
-      description: "UI-P1: presentation-only library classification. Nothing in scheduling, admission, profile/codec resolution, or the agent wire reads it."
-      enum: [game, desktop]
+      description: >-
+        UI-P1: presentation-only library classification. Nothing in scheduling, admission,
+        profile/codec resolution, or the agent wire reads it.
+        STEAM LIBRARY DISCOVERY PHASE 3 WIDENED THIS ENUM TO ADD 'launcher' (migration 0044) -
+        additive, no existing value is removed or redefined. It is the category the Steam
+        provider app is filed under once it has derived children; it stays in the library
+        rather than being hidden. THE PRESENTATION-ONLY PROMISE ABOVE IS UNCHANGED AND IS LOAD
+        BEARING: library discovery is triggered by AdminApp.library_provider and never by kind,
+        so an operator changing this dropdown can never stop a background job. The single
+        server-side reader is artwork resolution, which short-circuits 'desktop' AND 'launcher'
+        to source='none' - presentation deciding presentation, see control-api.md
+        §Cover artwork.
+        FORWARD COMPATIBILITY: a client pinned to a protocol before this amendment holds a
+        closed two-value union and will receive kind: "launcher". Nothing crashes - a TS union
+        is erased at runtime and the library's kind filter simply never matches - so the tile
+        appears under "All" and under no segment. Benign, but a degradation; re-pin the client.
+      enum: [game, desktop, launcher]
+    AppOrigin:
+      type: string
+      description: >-
+        Steam library discovery Phase 3 (apps.origin, migration 0044): how this app row came to
+        exist. 'manual' = an operator created it, which is every app predating 0044 and every
+        app an admin creates. 'discovered' = a library-discovery sync created it (Phase 4;
+        nothing writes it yet). PROVENANCE, NOT AUTHORITY - both launch identically. It is
+        READ-ONLY and admin-only: see AdminApp.origin.
+      enum: [manual, discovered]
+    LibraryProvider:
+      type: string
+      description: >-
+        Steam library discovery Phase 3 (apps.library_provider, migration 0044): this app IS the
+        configured client for external library provider X, so a user's installs under its
+        managed home can be discovered. "" = not a provider app, which is every app predating
+        0044. Distinct from ExternalSource, which says the app IS a provider TITLE; a derived
+        tile carries external_source and never library_provider. Enumerated + a DB CHECK for the
+        same reason as AppKind; widening the enum is a later migration.
+      enum: ["", steam]
     ExternalSource:
       type: string
       description: >-
@@ -1914,9 +1975,22 @@ components:
       type: object
       required: [code, message]
       properties:
-        code: { type: string, description: "e.g. validation_failed, unauthorized, forbidden, not_found, conflict, session_quota_exceeded, profile_ineligible, profile_not_launchable_for_app, no_host_available, capacity_exhausted, restart_required, rate_limited, internal. Open string, not an enum: new codes are additive and an unknown one falls through to a client's generic per-status branch." }
+        code: { type: string, description: "e.g. validation_failed, unauthorized, forbidden, not_found, conflict, session_quota_exceeded, home_in_use, home_not_provisioned, profile_ineligible, profile_not_launchable_for_app, no_host_available, capacity_exhausted, restart_required, rate_limited, internal. Open string, not an enum: new codes are additive and an unknown one falls through to a client's generic per-status branch." }
         message: { type: string }
         live_sessions: { type: integer, description: "Present on restart_required." }
+        session_id:
+          type: string
+          format: uuid
+          description: >-
+            Steam library discovery Phase 3, ADDITIVE: present on home_in_use when the guard could
+            name the CONFLICTING live session - the one already holding the home. It is here so
+            the client can offer "go to your running session" with a link instead of a dead-end
+            toast. OMITTED rather than empty when the conflict is known but the session is not, so
+            a client branches on presence and never renders a link to nowhere.
+            Load-bearing once derived tiles exist: the lock is held by the PARENT's home, so a
+            user who clicks a game tile can be refused because a DIFFERENT app (the Steam
+            launcher, or another game from the same install) is running, and without the session
+            id the refusal reads as a bug. See control-api.md §Derived tiles.
     ErrorEnvelope:
       type: object
       required: [error]
@@ -2000,7 +2074,7 @@ components:
       # UI-P1: kind + favourite are added HERE, so App and AdminApp — which are allOf
       # compositions over this schema — inherit both. There is no read shape that omits them.
       type: object
-      required: [id, name, description, cover_url, hero_url, kind, external_source, external_id, favourite, default_width, default_height, default_fps, default_bitrate_kbps, default_profile_id, profile_policy, enabled]
+      required: [id, name, description, cover_url, hero_url, kind, parent_app_id, external_source, external_id, favourite, default_width, default_height, default_fps, default_bitrate_kbps, default_profile_id, profile_policy, enabled]
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
@@ -2024,7 +2098,22 @@ components:
             independently of cover_url (a title may have one crop and not the other); a client
             falls back hero_url -> cover_url -> gradient. Read-only: not accepted on AppWrite,
             written only by the artwork service.
-        kind: { allOf: [ { $ref: "#/components/schemas/AppKind" } ], description: "UI-P1: presentation-only library classification (apps.kind). Always serialized; 'game' for every pre-UI-P1 row." }
+        kind: { allOf: [ { $ref: "#/components/schemas/AppKind" } ], description: "UI-P1: presentation-only library classification (apps.kind). Always serialized; 'game' for every pre-UI-P1 row. Phase 3 added 'launcher' - see AppKind." }
+        parent_app_id:
+          type: [string, "null"]
+          format: uuid
+          description: >-
+            Steam library discovery Phase 3, ADDITIVE (apps.parent_app_id, migration 0044): the
+            app this tile is DERIVED from, or null for a normal app - which is every app
+            predating 0044. Always serialized. A derived tile carries identity and presentation
+            only and borrows everything executable (image, runtime_spec, managed home, resource
+            defaults, mounts) from its parent at launch; see control-api.md §Derived tiles.
+            ON THE PUBLIC READ SHAPE DELIBERATELY, unlike origin and library_provider, and for
+            one concrete reason: the single-writer lock is held by the PARENT's home, so with any
+            tile in a family live, every other tile in that family answers
+            409 home_in_use. The client needs parent_app_id to mark the siblings of a live
+            session as blocked instead of letting the user discover it by clicking. That is a
+            presentation nicety - THE ENFORCEMENT IS THE SERVER'S 409, never this field.
         external_source:
           allOf: [ { $ref: "#/components/schemas/ExternalSource" } ]
           description: >-
@@ -2144,6 +2233,45 @@ components:
             so a stored "480 -foo" would reach the Steam client as two extra arguments. The
             handler is the primary gate; the DB CHECK (apps_external_id_ck) carries the same regex
             as the backstop and is the one that also covers an admin editing the value later.
+        parent_app_id:
+          type: [string, "null"]
+          format: uuid
+          description: >-
+            Steam library discovery Phase 3, OPTIONAL. The app this tile is DERIVED from. On
+            create, absent/null = a normal app (today's behaviour). On patch it is TRI-STATE,
+            exactly like runtime_preset_id: absent = unchanged, explicit null = clear (the tile
+            becomes a normal app), a uuid = set it. A uuid that does not resolve is
+            400 validation_failed at write time, never an FK error surfacing at launch.
+            SETTING IT PUTS THE ROW UNDER THE DERIVED-TILE SHAPE RULE, which is a database CHECK
+            (apps_derived_shape_ck) and not a convention: the tile must carry
+            runtime_spec = '{}', managed_home = false, runtime_preset_id = null,
+            library_provider = "", and a non-empty external_source + external_id. A write that
+            violates any of those is 400 validation_failed at the handler, with the CHECK as the
+            backstop that also survives a later direct edit.
+            THE TILE STORES NO RUNTIME OF ITS OWN ON PURPOSE. Merging at launch rather than
+            flattening at save is what makes an edit to the parent - an image bump, a new GPU
+            flag, a new mount - reach every derived tile with no re-sync and no stale copies. It
+            is the same decision as UI-P3's runtime presets, and it is the reason the validated
+            Tower experiment (which hardcoded a host path into a tile's runtime_spec.mounts)
+            cannot ship. A parent may not itself be derived: one level, never a chain.
+            One tile per (parent_app_id, external_source, external_id) fleet-wide - a duplicate
+            is 409 conflict, from the apps_parent_external_uk unique index.
+            Note crud.decodeJSON sets DisallowUnknownFields(), so sending this to a control plane
+            without this amendment is a hard 400 - deploy the control plane before the client.
+        library_provider:
+          allOf: [ { $ref: "#/components/schemas/LibraryProvider" } ]
+          description: >-
+            Steam library discovery Phase 3, OPTIONAL, with the same presence semantics as
+            external_source: absent = the server default ("") on create, UNCHANGED on patch -
+            absence is NEVER a zero value (the cb97bfb trap) - and an explicit "" IS valid, as a
+            deliberate un-marking. Any other value outside the enum is 400 validation_failed.
+            MARKING AN APP HERE IS THE ENTIRE TRIGGER FOR DISCOVERY (Phase 4), so an absent field
+            silently overwriting the column on an unrelated PATCH would turn scanning off for a
+            whole instance without anyone touching the setting.
+            It is refused on a derived tile (parent_app_id set) - a tile cannot be a provider -
+            and it is INDEPENDENT of kind: an admin UI may suggest kind='launcher' alongside it,
+            but nothing server-side reads kind, and gating discovery on kind would let a
+            presentation dropdown silently stop a background job.
         enabled: { type: boolean }
         default_width: { type: integer }
         default_height: { type: integer }
@@ -2718,8 +2846,34 @@ components:
         - { $ref: "#/components/schemas/App" }
         - type: object
           description: "Admin-visible app shape: includes runtime_spec + resource/storage defaults (P2-08, P5-01)."
-          required: [default_vram_mb, default_encode_slots, runtime_spec, managed_home, home_container_path, runtime_preset_id, launchable_profile_ids]
+          required: [default_vram_mb, default_encode_slots, runtime_spec, managed_home, home_container_path, runtime_preset_id, launchable_profile_ids, origin, library_provider]
           properties:
+            origin:
+              allOf: [ { $ref: "#/components/schemas/AppOrigin" } ]
+              description: >-
+                Steam library discovery Phase 3, ADDITIVE. Always serialized; 'manual' for every
+                app predating migration 0044.
+                READ-ONLY: it is deliberately NOT on AppWrite. An admin create is 'manual' by
+                construction and only the Phase 4 reconciler writes 'discovered', so accepting it
+                on write would let an operator mislabel a hand-made tile as discovered - and the
+                reconciler keys its create/suppress behaviour off provenance, so a lie here is a
+                lie to a background job rather than a cosmetic one.
+                Admin-only, like runtime_preset_id: it is operator/provenance detail, not library
+                presentation, so it is not on AppListItem.
+            library_provider:
+              allOf: [ { $ref: "#/components/schemas/LibraryProvider" } ]
+              description: >-
+                Steam library discovery Phase 3, ADDITIVE. Always serialized; "" for every app
+                predating migration 0044.
+                THIS - AND ONLY THIS - IS THE TRIGGER FOR LIBRARY DISCOVERY (Phase 4). It is
+                operator-set and NEVER inferred from the image name, because image names change
+                and a wrong inference here starts a filesystem scan of somebody's home. It is
+                also NOT `kind`: an admin editor may reasonably suggest kind='launcher' when this
+                is set to steam, but no server path may branch on kind (control-api.md
+                §Derived tiles).
+                A derived tile must carry "" - a tile cannot itself be a provider, and the DB
+                CHECK enforces it. Admin-only, like runtime_preset_id: operator configuration,
+                not library presentation.
             default_vram_mb:
               type: integer
               deprecated: true

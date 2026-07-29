@@ -167,7 +167,9 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > **Amendment — UI-P1 (app classification + per-user favourites), signed off 2026-07-27.** Five
 > pieces for the library redesign. Four are additive; **piece (5) is breaking and is a security
 > fix, not a feature** — it gets its own block below. **(1)** The app read shape gains **`kind`**
-> (`"game" | "desktop"`, backed by `apps.kind`, `schema.md`), a **presentation-only** library
+> (`"game" | "desktop"` — **widened to add `"launcher"` by the Steam library discovery Phase 3
+> amendment below; the presentation-only promise in this sentence is unchanged and is what that
+> amendment leans on**, backed by `apps.kind`, `schema.md`), a **presentation-only** library
 > classification: nothing in scheduling, admission, profile/codec resolution, or the agent wire
 > reads it. It is added to **`AppListItem`**, so **`App` and `AdminApp` inherit it** — both are
 > `allOf` compositions over `AppListItem` (`openapi.yaml`), so there is no separate admin variant
@@ -530,6 +532,88 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > rather than batched to the end, because the client's library listing narrows here. See
 > `docs/design/plans/2026-07-29-steam-library-discovery-spec.md` §6 and §13 "Phase 2".
 
+> **Amendment — Steam library discovery, Phase 3 (derived tiles + the `launcher` kind).
+> Additive, but requires Opus + explicit human sign-off on TWO counts** — it widens a **frozen
+> enum** and it adds an app shape whose rules are enforced by a database `CHECK` rather than by
+> anything a later reader can renegotiate. No existing field changes meaning, no existing status
+> code is removed, and no route is added or removed. **Migration 0044.**
+>
+> **(1) `AppKind` gains `launcher`: `("game" | "desktop" | "launcher")`.** The Steam provider app
+> stays in the user's library once its games are discovered, filed under a Launcher category,
+> rather than being hidden (operator decision). Widening an enum is additive **for writers and
+> not for readers** — every consumer holds a *closed* set — which is why this needs sign-off
+> despite adding nothing.
+>
+> > **The forward-compatibility consequence, stated plainly.** A client pinned to a protocol
+> > **before** this amendment has `AppKind` as a closed two-value union and **will receive
+> > `kind: "launcher"`** from a newer server. Nothing crashes: a TypeScript union is erased at
+> > runtime, and the library filter's predicate (`kind !== "all" && a.kind !== kind`) simply never
+> > matches — so the Launcher tile appears under **All** and under **no segment**. **That is a
+> > benign degradation, but it is a degradation**, and it is why the `quasar-client` pin bump is
+> > scheduled **with this phase** rather than batched to the end.
+>
+> **`kind` STAYS PRESENTATION-ONLY, AND THAT PROMISE IS NOW LOAD-BEARING.** A third value invites
+> `AND kind = 'launcher'` in a scan query or a launch path. **No server path may branch on
+> `apps.kind`.** Discovery is triggered by `library_provider = 'steam'` **and nothing else**;
+> gating it on `kind` would turn an additive enum widening into a **semantics change on an
+> existing field** — a materially larger sign-off — and would create a failure mode where an
+> operator flips a presentation dropdown and a background job silently stops. An admin editor may
+> *suggest* `launcher` when `library_provider` is set; it must not enforce it.
+>
+> **The one exception is the artwork short-circuit, and it stays exactly as narrow as it is.**
+> `launcher` joins `desktop` in it (§Cover artwork): a games database has no entry for the Steam
+> client, and the evidence is direct — the fuzzy matcher's 7-for-7 failure list on the live
+> catalogue is **headed by "Steam (Dev)" matching "Steam Dev Days"**. This is presentation
+> deciding presentation, not `kind` acquiring teeth.
+>
+> **(2) The derived-tile app shape.** `AppListItem` gains **`parent_app_id`** (uuid or null, always
+> serialized) and `AdminApp` gains **`origin`** (`"manual" | "discovered"`, read-only) and
+> **`library_provider`** (`"" | "steam"`). `AppWrite` accepts `parent_app_id` (tri-state on patch,
+> like `runtime_preset_id`) and `library_provider` (explicit `""` valid, like `external_source`) —
+> **but never `origin`**, which is provenance the server sets and the Phase 4 reconciler reads.
+>
+> **A derived tile carries identity and presentation only and borrows everything executable from
+> its parent at launch.** Its shape is a database `CHECK` (`apps_derived_shape_ck`):
+> `runtime_spec = '{}'`, `managed_home = false`, `runtime_preset_id IS NULL`,
+> `library_provider = ''`, and a non-empty `external_source` + `external_id`.
+>
+> > **Why the tile stores no runtime of its own.** Merging at launch rather than flattening at
+> > save is what makes an edit to the Steam app — an image bump, a new GPU flag, a new mount —
+> > propagate to **every** derived tile with no re-sync and no stale copies. It is the same
+> > decision UI-P3 made for runtime presets, for the same reason. It is a `CHECK` and not a
+> > convention because **a validated Tower experiment hardcoded a host path into a tile's
+> > `runtime_spec.mounts`**; the constraint exists so that cannot ship, and so it survives an
+> > admin editing the row directly.
+>
+> The tile's contribution to execution is exactly one thing: an env override,
+> `STEAM_STARTUP_FLAGS = "-bigpicture -applaunch <external_id>"`, merged over the parent's
+> `runtime_spec.env` at dispatch (parent first, tile second, **tile wins** — the same order
+> UI-P3 established). **The tile's own resource columns are never read**: admission resolves
+> `default_vram_mb` / `default_encode_slots` from the **parent**, because `cb97bfb` is a live
+> incident of exactly the opposite and a derived tile is precisely the shape that took.
+> `apps_parent_external_uk` makes one tile per `(parent_app_id, external_source, external_id)`
+> **fleet-wide**, which is what keeps the catalogue bounded regardless of user count.
+>
+> **(3) Two `409`s on `POST /v1/sessions`, one widened and one new.** `home_in_use` is **not** a
+> new code (P5-01 has emitted it since managed homes shipped); what changes is that it now keys on
+> the **home-owning** app rather than on the tile, and that its body carries **`session_id`**.
+> `home_not_provisioned` **is** new. Both are `409`, both are additive (`409` is already declared
+> on this endpoint and `Error.code` is an open string), and §Derived tiles below carries the rules
+> and the client requirement.
+>
+> Backed by `schema.md` (migration 0044: the five `apps` columns, the widened `apps_kind_check`,
+> `apps_derived_shape_ck`, `apps_parent_external_uk`, `apps_external_ref_idx`) and `openapi.yaml`
+> (`AppKind`, the new `AppOrigin` / `LibraryProvider`, `AppListItem.parent_app_id`,
+> `AdminApp.origin` / `.library_provider`, `AppWrite.parent_app_id` / `.library_provider`,
+> `Error.session_id`). **`agent-api.md` is byte-identical** — a derived tile is invisible from the
+> agent side by construction, exactly as a runtime preset is: the agent still receives one opaque,
+> already-merged `app` object in `session_assign` / `session_swap_app`. `signaling.md`, `input.md`,
+> `native-client.md` are unchanged. **Rollout order: control plane before client**
+> (`crud.decodeJSON` sets `DisallowUnknownFields()`, so a client sending `parent_app_id` to a
+> control plane without this amendment is a hard `400`, not a silent ignore), and the client
+> re-pin is scheduled **with this phase** because of the `AppKind` widening above. See
+> `docs/design/plans/2026-07-29-steam-library-discovery-spec.md` §1–§5, §4.5 and §13 "Phase 3".
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -551,7 +635,12 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   in a state that can be app-swapped), `swap_exceeds_reservation` (409, *P2-02* — the new app needs
   more than the session's held reservation), `home_in_use` (409, *P5-01* —
   the caller already has a live session of this managed-home app; the per-(user, app) home is
-  single-writer), `profile_ineligible` (409, *AS10-03* — a user-facing launch selected a stream
+  single-writer. *Steam library discovery Phase 3:* the key is the **home-owning** app, so a
+  derived tile collides with its parent and with its siblings, and the body carries `session_id`,
+  the conflicting session — see §Derived tiles), `home_not_provisioned` (409, *Steam library
+  discovery Phase 3* — a derived tile was launched by a user who has no home for the **parent**
+  app on any host; the tile provisions nothing, so no home is created and no `user_homes` row is
+  written), `profile_ineligible` (409, *AS10-03* — a user-facing launch selected a stream
   profile that is `ineligible` for the caller's device, or a non-user-facing profile without an
   admin/explicit-override bypass), `profile_not_launchable_for_app` (409, *UI-P5* — the selected
   launch profile is valid and eligible but is not in the app's `launchable_profile_ids` allow-list;
@@ -564,6 +653,9 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   matching GPU is online but its free encode slots / VRAM cannot satisfy the request right now),
   `internal` (500). **Retryable:** `no_host_available`, `capacity_exhausted`, `rate_limited`
   (and `session_quota_exceeded` / `home_in_use` once one of the caller's sessions ends).
+  **`home_not_provisioned` is NOT retryable** — retrying reproduces it forever. It is resolved by
+  a user *action* (launch the parent app once, so its home exists), which is why the message names
+  the parent rather than saying "try again".
   *Superseded:* `capacity_unavailable` (409) — the original Phase-1 launch capacity-rejection;
   retained for compatibility but **no longer emitted** (the launch path now returns the more
   specific 503 `no_host_available` / `capacity_exhausted`, see §Admission control). At N=1 it
@@ -1018,11 +1110,24 @@ default is unset), they are what `LaunchConsoleSession` uses unconditionally, an
 ceiling on the documented `POST /v1/sessions` stream-override escape hatch, which is reachable for
 **any** app and not only a formerly-`custom` one.
 
-*(UI-P1)* `kind` (`"game" | "desktop"`) is the library classification, **presentation only** —
+*(UI-P1; widened by Steam library discovery Phase 3)* `kind`
+(`"game" | "desktop" | "launcher"`) is the library classification, **presentation only** —
 it exists so the client can split and filter the library. Nothing in scheduling, admission,
 profile/codec resolution, or the agent wire reads it. It is defined on `AppListItem`, so the
 single-app read (`App`) and the admin read (`AdminApp`) inherit it — they are `allOf`
-compositions over the same shape.
+compositions over the same shape. `"launcher"` (Phase 3, migration 0044) is the category the
+Steam **provider app** is filed under once it has derived children; it does **not** mean
+"launchable" and it is **not** the discovery trigger — that is `AdminApp.library_provider`, and
+nothing server-side branches on `kind`. A pre-Phase-3 client holding a closed two-value union
+receives `"launcher"` harmlessly: the tile shows under "All" and under no segment.
+
+*(Steam library discovery, Phase 3)* `parent_app_id` (uuid or `null`, **always serialized**) is
+the app this tile is **derived** from — `null` for a normal app, which is every app predating
+migration 0044. It is on the public read shape, unlike `origin` and `library_provider`, for one
+concrete reason: the single-writer lock belongs to the **parent's** home, so while any tile in a
+family is live every sibling answers `409 home_in_use`. The client needs this field to mark those
+siblings blocked rather than let the user find out by clicking. **That is presentation; the
+enforcement is the server's `409`** (§Derived tiles).
 
 *(Steam library discovery, Phase 1)* `external_source` (`"" | "steam"`) and `external_id` say
 **which provider title this app is** — "this app *is* Steam appid 570". Both are **always
@@ -1087,7 +1192,9 @@ then written **clobbers the column default** — that is how four Tower apps rea
 `default_encode_slots = 0` and silently bypassed admission. So `kind` must decode through a
 pointer (or an equivalent presence-aware decode), exactly like the numeric `default_*` fields.
 An explicit `kind: ""` is **not** "use the default": it is `400 validation_failed`, as is any
-value outside `('game','desktop')`. The DB `CHECK` is the backstop, never the primary gate.
+value outside `('game','desktop','launcher')` *(Steam library discovery Phase 3 widened the enum;
+`'launcher'` is accepted on create and patch and round-trips on every read shape)*. The DB `CHECK`
+is the backstop, never the primary gate.
 
 > **Rollout order: control plane before client.** `crud.decodeJSON` sets
 > `DisallowUnknownFields()` (`control-plane/internal/crud/handler.go:540`), so a client that
@@ -2870,6 +2977,158 @@ idempotent). Response:
 
 ---
 
+## Derived tiles (Steam library discovery, Phase 3)
+
+> *Additive amendment (migration 0044), requires Opus + explicit human sign-off — it also carries
+> the `AppKind` widening. DDL companion: `schema.md` `apps.parent_app_id` / `origin` /
+> `library_provider`, `apps_derived_shape_ck`, `apps_parent_external_uk`. It sits here, beside
+> §Storage, because everything that is hard about it is a **storage** question.*
+
+A **derived tile** is an `apps` row with `parent_app_id` set. It carries **identity and
+presentation only** and borrows **everything executable** from its parent at launch.
+
+| Lives on the tile | Resolved from the parent at launch |
+|---|---|
+| `name`, `description`, `kind`, `cover_url` / `hero_url` | `image` / `runtime_spec` / `runtime_preset_id` |
+| `external_source`, `external_id`, `origin` | `managed_home`, `home_container_path`, and the user's home |
+| `enabled`, `default_profile_id`, `profile_policy` | `default_vram_mb`, `default_encode_slots` |
+| favourites, entitlements | `default_width` / `height` / `fps` / `bitrate_kbps`, and the mounts |
+
+The tile contributes exactly one thing to execution: an environment override,
+`STEAM_STARTUP_FLAGS = "-bigpicture -applaunch <external_id>"`, merged over the parent's
+`runtime_spec.env` at dispatch. **Merge order is parent first, tile second, tile wins** — the same
+rule UI-P3 established for runtime presets. The flag string is composed server-side from a fixed
+template and the already-validated `external_id`; it is never concatenated from stored free text,
+and the template is not operator-editable.
+
+**The tile's own resource columns are never read.** Admission resolves `default_vram_mb` and
+`default_encode_slots` from the **parent**. This is not cosmetic: `cb97bfb` is a live incident in
+which omitted create fields zeroed encode slots and bypassed admission entirely, and a tile created
+by a background job (Phase 4) is precisely the shape that incident took.
+
+### The rule that must not be broken
+
+**Every guard, lock and placement decision keyed on an app's identity for a STORAGE purpose is
+keyed on the tile's home-owning app, not on the tile.** The tile does not own a home; it borrows
+its parent's:
+
+```
+homeAppID(app) = app.parent_app_id ?? app.id
+```
+
+Missing one site is not a cosmetic bug. The single-writer guard exists because **two Steam clients
+on one `steamapps` tree is a documented corruption class** — a mid-write Steam death marks the
+install unclean and forces a full checksum re-verify on next boot. A guard keyed on the tile
+returns "not in use" for a session that is actively writing.
+
+The same substitution applies to the **tombstone** guard on `DELETE /v1/admin/storage/homes/{id}`
+(§Storage): its `409 home_in_use` must see a live derived-tile session as using the parent's home,
+or an admin can tombstone a home that a running session is writing to. That is a data-destruction
+path, and it is the one where a wrong guard fails **silently**.
+
+### Launch behaviour: two `409`s
+
+**`409 home_in_use`** — *not a new code (P5-01), but it now keys on the home-owning app and its
+body carries `session_id`.*
+
+- With a session of the **parent** live, **every** derived tile is refused.
+- With **any** derived tile live, the **parent** (the Launcher tile) is refused, as is every
+  sibling tile.
+- **It is one lock, held by the parent app's home**, and the Launcher tile is simply its most
+  visible holder.
+
+```json
+// 409
+{ "error": { "code": "home_in_use",
+             "message": "Steam is already running",
+             "session_id": "…" } }
+```
+
+`session_id` is **omitted, never emitted empty**, when the guard fired but could not name the
+conflicting session — so a client branches on its presence and never renders a link to nowhere.
+Nesting an extra field inside the error object is the existing idiom (`live_sessions` on
+`restart_required`), not a new envelope shape.
+
+> **The client requirement, and it is not optional polish.** Keeping the Launcher tile visible
+> (rather than hiding the provider app after discovery) makes this lock **user-visible for the
+> first time**. From the user's side they clicked a *game* and were told a *different app* is in
+> the way, so a raw error toast reads as a bug.
+>
+> 1. Render it as **"Steam is already running — go to your session"**, with a link built from
+>    `session_id`. Not a generic launch failure.
+> 2. Name the **Launcher tile** — what the user sees in their library — **not** a parent app id.
+> 3. While a session backed by the parent home is live, the client *should* mark the rest of that
+>    family blocked rather than let the user discover it by clicking. It has what it needs: the
+>    live session's `app_id` and each tile's `parent_app_id`. **This is a presentation nicety. The
+>    enforcement is this `409`** (invariant #6: a client-side gate is never the access control).
+>
+> Switching games *inside* a live session is the desirable end state and is future work; it is not
+> smuggled in here.
+
+**`409 home_not_provisioned`** — *new.*
+
+A derived tile **provisions nothing**. The launch path resolves the home read-only: it requires a
+live `user_homes` row for `(caller, parent, host)` and **never creates one**. A create-on-miss here
+would be the worst possible behaviour — an empty directory is provisioned, the game is not in it,
+Steam boots into a library with nothing installed, and the session reaches `running` looking
+healthy. The same upsert would also **un-tombstone** a home an admin had just marked for reaping.
+
+```json
+// 409
+{ "error": { "code": "home_not_provisioned",
+             "message": "launch Steam once on a host to create your library, then try again" } }
+```
+
+The message names the **parent app**. This is checked **before placement**, and **no `user_homes`
+row is written** on this path.
+
+### Placement: a hard pin, not an affinity
+
+A derived tile is placed with a **hard host constraint** — the host holding the caller's home for
+the parent app, resolved pre-schedule and passed through the **existing** pin mechanism, so this
+adds no placement machinery. If no such host exists, the launch fails with `home_not_provisioned`
+above, **before** placement.
+
+**This is deliberately stricter than the existing locality preference**, which is only a sort key
+and loses to a free host. A derived tile cannot fall back to a free host and will refuse where a
+normal app would have run. That is the correct trade: **a session that refuses to start is
+recoverable in one click; a session that silently creates a second empty Steam library is a
+support ticket and a wasted disk.** It also means the pin behaves identically under either
+placement policy, so an operator never has to change one to make this correct.
+
+### Shape rules on the write path
+
+`AppWrite` accepts `parent_app_id` (tri-state on patch: absent = unchanged, explicit `null` =
+clear, uuid = set) and `library_provider` (absent = default/unchanged, explicit `""` = a deliberate
+un-marking). It does **not** accept `origin`.
+
+A row with `parent_app_id` set must satisfy, at the handler and again at the database
+(`apps_derived_shape_ck`):
+
+| rule | why |
+|---|---|
+| `runtime_spec = '{}'` | the merge happens at launch, so a parent edit reaches every tile with no re-sync. A validated Tower experiment hardcoded a host path into a tile's `runtime_spec.mounts`; the `CHECK` is why that cannot ship |
+| `managed_home = false` | the tile borrows a home, it does not declare one. The single-writer guard must read the **parent's** `managed_home`, or it does not fire for derived tiles at all — the exact inverse of its purpose |
+| `runtime_preset_id IS NULL` | a preset is container configuration, and the tile contributes none |
+| `library_provider = ''` | a tile cannot itself be a provider |
+| `external_source <> '' AND external_id <> ''` | the tile is nothing without the title it names, and `external_id` carries the injection grammar |
+
+`parent_app_id` must name an app that is **not itself derived**: one level, never a chain.
+`apps_parent_external_uk` makes one tile per `(parent_app_id, external_source, external_id)`
+**fleet-wide** — a duplicate is `409 conflict`, and it is what keeps the catalogue bounded by the
+union of installed titles rather than by users × titles.
+
+**Deleting a parent that has derived tiles** is refused with `409` listing them, unless the request
+explicitly opts in — mirroring the existing in-use `409` pattern. The FK cascade is the integrity
+backstop underneath that confirmation, not the primary UX.
+
+**`origin` is read-only.** An admin create is `'manual'` by construction; only a library-discovery
+sync writes `'discovered'` (Phase 4, nothing writes it yet). Accepting it on write would let an
+operator mislabel a hand-made tile as discovered, and the reconciler keys its create/suppress
+behaviour off provenance — so a lie here is a lie to a background job, not a cosmetic one.
+
+---
+
 ## Host Runtime Settings (host-runtime-settings-admin)
 
 > *Additive, admin-gated amendment. New endpoints; no change to any existing shape, status
@@ -3174,10 +3433,23 @@ one of:
 | `manual` | an admin picked, supplied or uploaded it |
 | `none` | we looked and there is nothing — a **negative cache**, not an error |
 
-`none` is a first-class outcome. `apps.kind = 'desktop'` (Phase 1) is checked **before** any
-provider call, so a desktop app is never queried at all: a games database will not have Blender
-or Firefox, and asking costs a request and leaks the app name for a guaranteed miss. An
-unmatched *game* records `none` too, so the next sweep does not re-ask. A provider **error**,
+`none` is a first-class outcome. **`apps.kind IN ('desktop','launcher')`** is checked **before**
+any provider call, so neither is ever queried at all: a games database will not have Blender or
+Firefox, and asking costs a request and leaks the app name for a guaranteed miss. **`'launcher'`
+joined the set in Steam library discovery Phase 3, and it is a deliberate call rather than an
+oversight** — the fuzzy matcher's 7-for-7 failure list on the live catalogue is **headed by
+"Steam (Dev)" matching "Steam Dev Days"**, so the Steam client is precisely the app a games
+database mis-matches *confidently*. Short-circuiting renders the gradient tile, which the mockups
+treat as a deliberate look; an operator who wants a Steam logo uploads one through the existing
+manual path. The condition is a **set membership, not a chain of `if`s**, so a fourth `kind` has
+to answer the question here rather than reintroduce it elsewhere.
+
+> **This short-circuit is the ONLY server-side read of `apps.kind`, and it stays this narrow.**
+> `kind` is presentation-only by contract; this is a presentation decision *about* presentation
+> (which tile art to render), not `kind` becoming an input to a decision. Nothing in scheduling,
+> admission, placement, profile/codec resolution, discovery or the agent wire may branch on it.
+
+An unmatched *game* records `none` too, so the next sweep does not re-ask. A provider **error**,
 by contrast, records nothing — a transient outage must never be cached as "this app has no art".
 
 ### Where the provider API key comes from *(2026-07-28 amendment)*
