@@ -393,6 +393,12 @@
 > favourites. A `DELETE` would cascade `user_app_favourites` and `app_artwork` irreversibly, and an
 > operator who rolls forward again wants those back. Clearing them out is an operator decision
 > taken with that in hand, not something a down migration makes for them.
+> **One Phase 3 rule is deliberately NOT in the schema, and a reader should not go looking for a
+> constraint that carries it:** a derived tile's own `enabled` and its parent's are **`AND`ed at
+> launch** (`409 parent_app_disabled`, ruled in at review). It is a **launch-path** rule, not a
+> stored one — disabling a parent writes nothing to its tiles, so their `enabled` stays `true`,
+> they keep appearing in the library, and re-enabling the parent restores them all at once. See
+> the `apps.enabled` row.
 > **The new constraints answer `4xx`, never `500`.** `apps_derived_shape_ck` maps to
 > `400 validation_failed` and `apps_parent_external_uk` to `409 conflict`, each naming what the
 > operator can fix — a `CHECK` violation reaching a client as `500 internal` is a lie, because the
@@ -616,7 +622,7 @@ defaults the scheduler and pipeline need.
 | `default_height` | `INT` NOT NULL DEFAULT `1080` | |
 | `default_fps` | `INT` NOT NULL DEFAULT `60` | |
 | `default_bitrate_kbps` | `INT` NOT NULL DEFAULT `15000` | |
-| `enabled` | `BOOLEAN` NOT NULL DEFAULT `true` | hidden from the public library when false. |
+| `enabled` | `BOOLEAN` NOT NULL DEFAULT `true` | hidden from the public library when false. *(Steam library discovery Phase 3, review ruling)* **A DERIVED TILE'S OWN `enabled` AND ITS PARENT'S ARE `AND`ed AT LAUNCH** — launching or swapping into a tile whose `parent_app_id` names a disabled app is `409 parent_app_disabled` (`control-api.md`). A tile has no independent existence: image, runtime, mounts and home are all the parent's, so launching a tile **is** running the parent, and `enabled = false` means *"stop this from running"*. **This is a launch-path rule, not a stored one** — disabling a parent does **not** write to its tiles, so their own `enabled` stays `true` and they keep appearing in the library; re-enabling the parent restores them all at once, which is the point of a kill switch. Nothing here is denormalised and no migration touches child rows. |
 | `managed_home` | `BOOLEAN` NOT NULL DEFAULT `false` | *(P5-01, migration 0008)* when true the control plane injects the caller's per-(user, app) home into `runtime_spec.mounts` at dispatch (assign **and** swap) and enforces the single-writer + quota rules (`control-api.md` §Storage). False = today's stateless behaviour, byte-identical dispatch. |
 | `home_container_path` | `TEXT` NOT NULL DEFAULT `'/home/quasar'` | *(P5-01, migration 0008)* container-side mount point for the managed home. |
 | `default_profile_id` | `TEXT` NULL → **`launch_profiles(id)`** | *(migration 0015; **FK repointed by UI-P4 / migration 0036** from `stream_profiles(id)`)* the **launch profile** this app pins or prefers, per `profile_policy`. The stored value is unchanged by the repoint, because existing ids are preserved as launch profile ids. |

@@ -1023,6 +1023,39 @@ paths:
         machinery) and cannot fall back to a free host, because a session that refuses to start
         is recoverable in one click while a session that silently creates a second empty Steam
         library is a support ticket and a wasted disk.
+
+        AND A THIRD, ADDED BY REVIEW RATHER THAN BY THE SPEC: 409 parent_app_disabled.
+
+        A TILE'S OWN enabled AND ITS PARENT'S enabled ARE ANDed AT LAUNCH. Launching a derived
+        tile whose parent app is disabled is 409 parent_app_disabled, and the message NAMES the
+        parent. This is a deliberate deviation from the implementation spec's own field table,
+        which lists `enabled` under "lives on the tile" and genuinely reads the other way. That
+        table says which ROW a field is read FROM; it does not say the parent's `enabled` is
+        irrelevant. A tile has NO INDEPENDENT EXISTENCE - image, runtime, mounts and home are all
+        the parent's - so launching a tile IS running the parent, and `enabled = false` on an app
+        in this system means "stop this from running".
+
+        Without it that demonstrably did not hold: a reviewer verified empirically that a
+        disabled parent's tiles still launched, dispatching the disabled parent's image against
+        the disabled parent's home, with no error and nothing in any UI warning the operator -
+        because the tiles are separate rows and they still look enabled. An operator taking Steam
+        out of service over a bad image tag, a mid-upgrade window or an incident would have had
+        the inverse of a kill switch.
+
+        THE TILE IS NOT MODIFIED AND STILL APPEARS IN THE CALLER'S LIBRARY. Its own `enabled` is
+        untouched and GET /v1/apps still lists it, so this is not derivable from the app object
+        and a client cannot pre-empt it. That asymmetry is why it gets ITS OWN CODE rather than
+        the generic conflict, on the same reasoning as home_not_provisioned: the remedy is an
+        action on a DIFFERENT app by SOMEONE ELSE (an operator re-enabling the parent), and a
+        client cannot derive that from a message string it is not allowed to parse. It is not the
+        caller's fault and there is nothing they can do about it.
+
+        THE PARENT'S NAME IS IN THE MESSAGE, NOT IN A STRUCTURED FIELD, and unlike home_in_use's
+        session_id that is deliberate: session_id exists because a client turns it into a link and
+        must branch on its presence, whereas this has no client action attached - there is nothing
+        to navigate to. A field nobody consumes is contract surface with no purchase. The message
+        is human-readable and forwardable ("ask an operator to re-enable it"); it is NOT a
+        machine-readable channel and must not be parsed.
       requestBody:
         required: true
         content:
@@ -1040,7 +1073,13 @@ paths:
             app_id. No session row persists.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/Conflict" }
+        "409":
+          description: >-
+            session_quota_exceeded / home_in_use / profile_ineligible /
+            profile_not_launchable_for_app / conflict (pre-existing), or (Phase 3)
+            home_not_provisioned - a derived tile whose parent has no home on any host - or
+            parent_app_disabled.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
         "503": { $ref: "#/components/responses/Unavailable" }
   /v1/sessions/{id}:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
@@ -1106,6 +1145,21 @@ paths:
         session launder their own entitlements into it: the session would end up running an app
         its owner may not launch, and its owner keeps the stream. The question is "may this
         session run this app", and a session's access is its owner's.
+
+        STEAM LIBRARY DISCOVERY PHASE 3 ADDS TWO 409 CONDITIONS HERE, both additive (409 was
+        already declared on this endpoint and Error.code is an open string).
+
+        409 home_not_provisioned - the swap target is a DERIVED TILE and THIS SESSION'S HOST holds
+        no live user_homes row for its parent. A swap is pinned to the live session's host and has
+        NO PLACEMENT STEP, so unlike a launch there is nowhere to re-pin it to: a tile whose
+        library lives on another host, or does not exist yet, cannot be swapped into. Launch it
+        directly instead - the launch path resolves the home host and pins there. Standard error
+        envelope, no extra fields. This was reported as 500 internal until a review found it: the
+        sentinel survived the wrap and only the mapping was missing, so an ordinary,
+        user-correctable condition surfaced as a server fault.
+
+        409 parent_app_disabled - the swap target is a DERIVED TILE whose parent is disabled. Same
+        rule and same reasoning as POST /v1/sessions; see that endpoint.
       requestBody:
         required: true
         content:
@@ -1124,7 +1178,12 @@ paths:
             entitlement for the target app.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/Conflict" }
+        "409":
+          description: >-
+            session_not_swappable / swap_exceeds_reservation / conflict (pre-existing), or
+            (Phase 3) home_not_provisioned - the target tile's parent has no home on THIS
+            session's host - or parent_app_disabled.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/sessions/{id}/trace/clock:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
@@ -2004,7 +2063,7 @@ components:
       type: object
       required: [code, message]
       properties:
-        code: { type: string, description: "e.g. validation_failed, unauthorized, forbidden, not_found, conflict, session_quota_exceeded, home_in_use, home_not_provisioned, profile_ineligible, profile_not_launchable_for_app, no_host_available, capacity_exhausted, restart_required, rate_limited, internal. Open string, not an enum: new codes are additive and an unknown one falls through to a client's generic per-status branch." }
+        code: { type: string, description: "e.g. validation_failed, unauthorized, forbidden, not_found, conflict, session_quota_exceeded, home_in_use, home_not_provisioned, parent_app_disabled, profile_ineligible, profile_not_launchable_for_app, no_host_available, capacity_exhausted, restart_required, rate_limited, internal. Open string, not an enum: new codes are additive and an unknown one falls through to a client's generic per-status branch." }
         message: { type: string }
         live_sessions: { type: integer, description: "Present on restart_required." }
         session_id:

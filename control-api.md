@@ -603,12 +603,25 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > `apps_parent_external_uk` makes one tile per `(parent_app_id, external_source, external_id)`
 > **fleet-wide**, which is what keeps the catalogue bounded regardless of user count.
 >
-> **(3) Two `409`s on `POST /v1/sessions`, one widened and one new.** `home_in_use` is **not** a
-> new code (P5-01 has emitted it since managed homes shipped); what changes is that it now keys on
-> the **home-owning** app rather than on the tile, and that its body carries **`session_id`**.
-> `home_not_provisioned` **is** new. Both are `409`, both are additive (`409` is already declared
-> on this endpoint and `Error.code` is an open string), and §Derived tiles below carries the rules
-> and the client requirement.
+> **(3) Three `409`s on the launch paths — one widened, two new.** `home_in_use` is **not** a new
+> code (P5-01 has emitted it since managed homes shipped); what changes is that it now keys on the
+> **home-owning** app rather than on the tile, and that its body carries **`session_id`**.
+> `home_not_provisioned` and `parent_app_disabled` **are** new. All three are `409` and all three
+> are additive (`409` is already declared on both endpoints and `Error.code` is an open string),
+> and §Derived tiles below carries the rules and the client requirement.
+>
+> **Both new codes reach `POST /v1/sessions/{id}/swap` as well as `POST /v1/sessions`**, and for
+> `home_not_provisioned` the swap's constraint is the **narrower** one: a swap is pinned to the
+> live session's host and has no placement step, so the parent's home must exist **on that host**
+> specifically. A launch can pin to whichever host holds the home; a swap cannot move.
+>
+> **`parent_app_disabled` is a behaviour change ruled in at review, not a shape the spec asked
+> for**, and it is recorded as such rather than as a footnote. **A tile's own `enabled` and its
+> parent's `enabled` are ANDed at launch.** The implementation spec's field table lists `enabled`
+> under *"lives on the tile"* and genuinely reads the other way — **the contract is the durable
+> artifact here, and it is this**. That table says which *row* a field is read **from**; it does
+> not say the parent's `enabled` is irrelevant. See §Derived tiles for the reasoning and for what
+> a reviewer observed before it was fixed.
 >
 > Backed by `schema.md` (migration 0044: the five `apps` columns, the widened `apps_kind_check`,
 > `apps_derived_shape_ck`, `apps_parent_external_uk`, `apps_external_ref_idx`) and `openapi.yaml`
@@ -649,7 +662,12 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   the conflicting session — see §Derived tiles), `home_not_provisioned` (409, *Steam library
   discovery Phase 3* — a derived tile was launched by a user who has no home for the **parent**
   app on any host; the tile provisions nothing, so no home is created and no `user_homes` row is
-  written), `profile_ineligible` (409, *AS10-03* — a user-facing launch selected a stream
+  written. **Also emitted by `POST /v1/sessions/{id}/swap`**, where the constraint is narrower:
+  the swap is pinned to the *live session's* host and has no placement step, so the parent's home
+  must exist **on that host**), `parent_app_disabled` (409, *Steam library discovery Phase 3* —
+  a derived tile was launched or swapped into while the **parent** app it borrows its runtime and
+  home from is disabled; the message names the parent, and the caller cannot act on it), 
+  `profile_ineligible` (409, *AS10-03* — a user-facing launch selected a stream
   profile that is `ineligible` for the caller's device, or a non-user-facing profile without an
   admin/explicit-override bypass), `profile_not_launchable_for_app` (409, *UI-P5* — the selected
   launch profile is valid and eligible but is not in the app's `launchable_profile_ids` allow-list;
@@ -664,7 +682,10 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   (and `session_quota_exceeded` / `home_in_use` once one of the caller's sessions ends).
   **`home_not_provisioned` is NOT retryable** — retrying reproduces it forever. It is resolved by
   a user *action* (launch the parent app once, so its home exists), which is why the message names
-  the parent rather than saying "try again".
+  the parent rather than saying "try again". **`parent_app_disabled` is not retryable either, and
+  is not even resolvable by the caller** — it takes an *operator* re-enabling a different app.
+  These two are the only refusals on the API whose remedy lies outside the caller's reach, which
+  is exactly why neither is folded into the generic `conflict`.
   *Superseded:* `capacity_unavailable` (409) — the original Phase-1 launch capacity-rejection;
   retained for compatibility but **no longer emitted** (the launch path now returns the more
   specific 503 `no_host_available` / `capacity_exhausted`, see §Admission control). At N=1 it
@@ -3035,7 +3056,11 @@ The same substitution applies to the **tombstone** guard on `DELETE /v1/admin/st
 or an admin can tombstone a home that a running session is writing to. That is a data-destruction
 path, and it is the one where a wrong guard fails **silently**.
 
-### Launch behaviour: two `409`s
+### Launch behaviour: three `409`s
+
+All three apply to **`POST /v1/sessions` and `POST /v1/sessions/{id}/swap` alike** — a swap is a
+launch of a different app into a live session, so a rule that only guarded the launch would be
+defeatable in two requests.
 
 **`409 home_in_use`** — *not a new code (P5-01), but it now keys on the home-owning app and its
 body carries `session_id`.*
@@ -3090,6 +3115,59 @@ healthy. The same upsert would also **un-tombstone** a home an admin had just ma
 
 The message names the **parent app**. This is checked **before placement**, and **no `user_homes`
 row is written** on this path.
+
+> **On a swap the constraint is narrower, and this is the one place the two endpoints genuinely
+> differ.** A swap is pinned to the **live session's host** and has **no placement step**, so
+> there is nowhere to re-pin it to: the parent's home must exist **on that host**. A tile whose
+> library lives on a *different* host is refused here even though launching it directly would
+> succeed, because the launch path resolves the home host and pins there. The remedy is therefore
+> "launch it directly", not "try again".
+>
+> This returned `500 internal` until a review caught it: the sentinel survived the wrap and only
+> the mapping was missing, so an ordinary, user-correctable condition was reported as a server
+> fault — and the contract documented the code on the launch path only, so **both sides were wrong
+> about a reachable state**.
+
+**`409 parent_app_disabled`** — *new, and a behaviour change ruled in at review.*
+
+**A tile's own `enabled` and its parent's `enabled` are ANDed at launch.** Launching or swapping
+into a derived tile whose **parent** is disabled is refused, and the message **names the parent**.
+
+> **This deviates from the implementation spec's field table, deliberately, and the contract is
+> the durable artifact.** That table lists `enabled` under *"lives on the tile"*, which reads the
+> other way. It says which **row** a field is read **from**; it does not say the parent's
+> `enabled` is irrelevant. **A derived tile has no independent existence** — image, runtime,
+> mounts and home are all the parent's — so launching a tile **is** running the parent, and
+> `enabled = false` on an app in this system means *"stop this from running"*. Stated here so
+> nobody re-litigates it from the table.
+
+Before the fix this demonstrably did not hold: a reviewer verified empirically that with the
+parent `enabled = false` the tiles **still launched** — dispatching the disabled parent's image,
+against the disabled parent's home, with no error. An operator taking Steam out of service over a
+bad image tag, a mid-upgrade window or an incident would have had every game tile keep running
+that exact image, with nothing in any UI warning them, because the tiles are separate rows and
+they still look enabled. That is the inverse of a kill switch.
+
+```json
+// 409
+{ "error": { "code": "parent_app_disabled",
+             "message": "this game is launched through \"Steam\", and that app is currently disabled — ask an operator to re-enable it" } }
+```
+
+- **The tile is not modified and still appears in the caller's library.** Its own `enabled` is
+  untouched and `GET /v1/apps` still lists it, so a client **cannot pre-empt this** from the app
+  object. Disabling a parent is not a bulk edit of its children, and re-enabling it restores every
+  tile at once — which is the point of a kill switch.
+- **Its own code, not the generic `conflict`**, on the same reasoning as `home_not_provisioned`:
+  the remedy is an action on a **different app**, by **somebody else**. A client cannot derive
+  "ask an operator to re-enable Steam" from a message string it is not allowed to parse, and the
+  refusal is emphatically not the caller's fault.
+- **The parent's name rides in the `message`, not in a structured field**, and unlike
+  `home_in_use`'s `session_id` that asymmetry is deliberate. `session_id` exists because a client
+  turns it into a **link** and must branch on its presence; this has no client action attached —
+  there is nothing to navigate to. A field nobody consumes is contract surface with no purchase.
+  The message is human-readable and forwardable; **it is not a machine-readable channel and must
+  not be parsed.**
 
 ### Placement: a hard pin, not an affinity
 
