@@ -2504,6 +2504,26 @@ components:
         hardware_encoder_required: { type: boolean }
         browser_client: { type: string, enum: [recommended, supported, risky] }
         playout0_ms: { type: integer }
+        warnings:
+          type: array
+          items: { $ref: "#/components/schemas/WriteWarning" }
+          description: >-
+            Present only on a WRITE response (PATCH /v1/admin/stream-profiles/{id}), and
+            omitted entirely when there is nothing to say, so every read path is byte-identical
+            to before. Reuses UI-P4's WriteWarning shape rather than inventing a second one.
+
+            Emitted when a codec change leaves every launch profile listing this rung still
+            carrying a launchable H.264 rung, but no longer LAST. That warns rather than
+            rejects, because the 0036 fan-out preserved each profile's stored codec order and
+            H.264 is often first, so rejecting would make migrated profiles permanently
+            uneditable. A change that would leave a chain with NO launchable H.264 rung is a
+            409 instead, naming the affected launch profiles: an operator editing one rung has
+            no way to know which chains depend on it.
+
+            This guard exists because the rule was previously enforced only when editing a
+            launch profile's rung LIST, so editing a stream profile's codec could silently
+            invalidate every chain listing it, with nothing surfacing until a launch failed at
+            dispatch. See docs/design/plans/2026-07-29-library-ux-fixes-spec.md.
         visibility:
           type: string
           enum: [user, debug, internal]
