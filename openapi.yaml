@@ -1564,6 +1564,14 @@ components:
       type: string
       description: "UI-P1: presentation-only library classification. Nothing in scheduling, admission, profile/codec resolution, or the agent wire reads it."
       enum: [game, desktop]
+    ExternalSource:
+      type: string
+      description: >-
+        Steam library discovery Phase 1: which external library provider this app IS a title of.
+        "" means the app is not a provider title, which is every app predating migration 0042 -
+        so "" is the meaningful default value, not a missing one. Enumerated + a DB CHECK for the
+        same reason as AppKind; widening the enum is a later migration.
+      enum: ["", steam]
     Codec:
       type: string
       description: "Multi-codec: the WIRE session video codec (h265 is HEVC). Resolved server-side at launch; the client answers the single codec the host offers. Distinct from CatalogCodec, which spells HEVC 'hevc'."
@@ -1763,7 +1771,7 @@ components:
       # UI-P1: kind + favourite are added HERE, so App and AdminApp — which are allOf
       # compositions over this schema — inherit both. There is no read shape that omits them.
       type: object
-      required: [id, name, description, cover_url, hero_url, kind, favourite, default_width, default_height, default_fps, default_bitrate_kbps, default_profile_id, profile_policy, enabled]
+      required: [id, name, description, cover_url, hero_url, kind, external_source, external_id, favourite, default_width, default_height, default_fps, default_bitrate_kbps, default_profile_id, profile_policy, enabled]
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
@@ -1788,6 +1796,26 @@ components:
             falls back hero_url -> cover_url -> gradient. Read-only: not accepted on AppWrite,
             written only by the artwork service.
         kind: { allOf: [ { $ref: "#/components/schemas/AppKind" } ], description: "UI-P1: presentation-only library classification (apps.kind). Always serialized; 'game' for every pre-UI-P1 row." }
+        external_source:
+          allOf: [ { $ref: "#/components/schemas/ExternalSource" } ]
+          description: >-
+            Steam library discovery Phase 1, ADDITIVE (apps.external_source, migration 0042):
+            "this app IS provider X's title Y", read together with external_id. Always serialized
+            and never omitted - "" is the meaningful default ("not a provider title", the state of
+            every pre-0042 app), so a client must be able to tell it from absent. Defined here on
+            AppListItem, so App and AdminApp inherit it exactly as they inherit kind. Phase 1's
+            only reader is the artwork service (§Cover artwork): a tagged app resolves its art by
+            id and never enters the fuzzy title matcher. Nothing in scheduling, admission,
+            profile/codec resolution, or the agent wire reads it.
+        external_id:
+          type: string
+          pattern: "^([1-9][0-9]{0,9})?$"
+          description: >-
+            Steam library discovery Phase 1, ADDITIVE (apps.external_id, migration 0042): the
+            provider-native id, today a Steam appid. Always serialized; "" when the app is not a
+            provider title. A bare positive integer, no leading zero, no sign, no whitespace, no
+            separators - the grammar is ARGUMENT-INJECTION CONTAINMENT, not tidiness; see
+            AppWrite.external_id and control-api.md.
         favourite:
           type: boolean
           description: >-
@@ -1858,6 +1886,35 @@ components:
             backstop, not the primary gate. Note crud.decodeJSON sets DisallowUnknownFields(),
             so sending kind to a control plane without this amendment is a hard 400, not a
             silent ignore - deploy the control plane before the client.
+        external_source:
+          allOf: [ { $ref: "#/components/schemas/ExternalSource" } ]
+          description: >-
+            Steam library discovery Phase 1, OPTIONAL. Absent = the server default ("") on create,
+            UNCHANGED on patch - absence is NEVER a zero value (the cb97bfb trap), and here an
+            absent field silently overwriting the column would un-tag an app's appid on any
+            unrelated PATCH and send its artwork back to the fuzzy matcher. UNLIKE kind, an
+            explicit "" IS valid: "" is the real domain value for "not a provider title", so
+            external_source: "" is a deliberate clear, not a malformed request. Any other value is
+            400 validation_failed. The handler is the primary gate; the DB CHECK
+            (apps_external_source_ck) is the backstop. Validated INDEPENDENTLY of external_id -
+            the contract states no pairing rule, and a half-set pair is inert (the artwork
+            resolver requires both before it takes the by-id path). Note crud.decodeJSON sets
+            DisallowUnknownFields(), so sending this to a control plane without this amendment is
+            a hard 400, not a silent ignore - deploy the control plane before the client.
+        external_id:
+          type: string
+          pattern: "^([1-9][0-9]{0,9})?$"
+          description: >-
+            Steam library discovery Phase 1, OPTIONAL, with the same presence semantics as
+            external_source: absent = default ("") on create, unchanged on patch; explicit "" is a
+            deliberate clear. A non-empty value must be a bare positive integer, no leading zero,
+            no sign, no whitespace, no separators (400 validation_failed otherwise), so "0",
+            "007", "1 2" and "-applaunch 480 -foo" are all rejected. THAT GRAMMAR IS
+            ARGUMENT-INJECTION CONTAINMENT, NOT A FORMAT PREFERENCE: the value ends up in
+            STEAM_STARTUP_FLAGS, which the quasar-steam entrypoint word-splits with `read -r -a`,
+            so a stored "480 -foo" would reach the Steam client as two extra arguments. The
+            handler is the primary gate; the DB CHECK (apps_external_id_ck) carries the same regex
+            as the backstop and is the one that also covers an admin editing the value later.
         enabled: { type: boolean }
         default_width: { type: integer }
         default_height: { type: integer }

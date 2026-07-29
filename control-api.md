@@ -421,6 +421,52 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > `docs/design/plans/2026-07-27-ui-implementation-spec.md` §"Phase 5" and
 > `docs/design/plans/2026-07-27-admin-mockup-implementation-notes.md` §3.
 
+> **Amendment — Steam library discovery, Phase 1 (`external_source` / `external_id`), additive,
+> requires sign-off.** The app object gains **two fields** that say *"this app **is** provider X's
+> title Y"* — today only `("steam", <appid>)`. `AppListItem` gains both on read (so `App` and
+> `AdminApp` inherit them, exactly as they inherit `kind`), **always serialized**; `AppWrite` gains
+> both as **optional** request fields on `POST /v1/apps` and `PATCH /v1/apps/{id}`. **Purely
+> additive:** two new fields on one read shape and one write shape, **no existing shape, status
+> code, endpoint or behaviour changes**, and no new error code (`400 validation_failed` is reused).
+>
+> **`""` is a value, not an absence, and that distinction is the whole design.** `external_source:
+> ""` / `external_id: ""` means *"this app is not a provider title"* — the state of every app that
+> exists today — so both fields are serialized on every read (never `omitempty`: a client must be
+> able to tell `""` from absent) and an explicit `""` on the write path is a deliberate **clear**,
+> **not** `400`. That is the one place this differs from `kind`, where `""` is a hard `400`. What
+> the two share is the presence rule: **absent = the schema default on create, UNCHANGED on patch**
+> (the `cb97bfb` trap — an omitted field decoding to `""` and being written clobbers the stored
+> value; here it would silently un-tag an app's appid on any unrelated `PATCH` and send its artwork
+> back to the fuzzy matcher).
+>
+> **The appid grammar is argument-injection containment, not tidiness.** `external_id` is `""` or
+> `^[1-9][0-9]{0,9}$` — a bare positive integer, no leading zero, no sign, no whitespace, no
+> separators. The value is destined for `STEAM_STARTUP_FLAGS`, which the `quasar-steam` entrypoint
+> **word-splits** with `read -r -a`, so a stored `"480 -foo"` would arrive at the Steam client as
+> two extra arguments. **The handler is the primary gate; the DB `CHECK` is the backstop** — the
+> same division of labour as `kind`, and here the `CHECK` is additionally the only one of the two
+> that survives an admin editing the value directly later.
+>
+> **The two fields are validated INDEPENDENTLY.** No pairing rule ("a source requires an id", or
+> the reverse) is imposed: none is needed, an admin setting one field in one request and the other
+> in the next would be rejected by a rule nothing asked for, and a half-set pair is **inert** — the
+> only reader requires *both* before it does anything different.
+>
+> **The only reader in Phase 1 is artwork resolution** (§Cover artwork). An app carrying
+> `("steam", <appid>)` resolves its two crops **by id** and never enters the fuzzy title matcher;
+> an exact id beats a fuzzy title match by construction. The `app_artwork` provenance shape is
+> **unchanged** — `provider_ref` simply now carries the appid for these apps. **Nothing in
+> scheduling, admission, profile/codec resolution, or the agent wire reads either field.**
+>
+> Backed by `schema.md` (`apps.external_source`, `apps.external_id`, two `CHECK`s and the partial
+> index `apps_external_ref_idx`, **migration 0042**). **`agent-api.md` is byte-identical** — the
+> whole Steam library discovery spec deliberately avoids touching the agent contract (spec §14:
+> `agent-api.md` appears in no phase's contract row). `signaling.md`, `input.md`,
+> `native-client.md` are unchanged. Rollout order, as for UI-P1/UI-P3/UI-P5: **control plane before
+> client** — `crud.decodeJSON` sets `DisallowUnknownFields()`, so a client sending either field to
+> a control plane without this amendment is a hard `400`. See
+> `docs/design/plans/2026-07-29-steam-library-discovery-spec.md` §4.1, §10, §12 and §13 "Phase 1".
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -854,7 +900,7 @@ block at the top of this document for what was exposed and why it changed.)*
 // 200
 { "items": [
     { "id": "<uuid>", "name": "Foo", "description": "...", "cover_url": "https://...",
-      "kind": "game", "favourite": true,
+      "kind": "game", "external_source": "steam", "external_id": "570", "favourite": true,
       "default_width": 1920, "default_height": 1080, "default_fps": 60, "default_bitrate_kbps": 15000,
       "default_profile_id": "1440p60", "profile_policy": "prefer",
       "display_stream": { "width": 2560, "height": 1440, "fps": 60, "bitrate_kbps": 20000 } }
@@ -881,6 +927,16 @@ profile/codec resolution, or the agent wire reads it. It is defined on `AppListI
 single-app read (`App`) and the admin read (`AdminApp`) inherit it — they are `allOf`
 compositions over the same shape.
 
+*(Steam library discovery, Phase 1)* `external_source` (`"" | "steam"`) and `external_id` say
+**which provider title this app is** — "this app *is* Steam appid 570". Both are **always
+serialized**, and **`""` on both is the meaningful default**, not a missing value: it means "this
+app is not a provider title", which is the state of every app that predates migration 0042. They
+sit on `AppListItem`, so `App` and `AdminApp` inherit them the same way they inherit `kind`; they
+are **identity**, not operator configuration, which is why they are not admin-only like
+`runtime_preset_id`. **Phase 1's only reader is artwork resolution** (§Cover artwork): an app
+carrying an appid resolves its two crops by that id and never enters the fuzzy title matcher.
+Nothing in scheduling, admission, profile/codec resolution, or the agent wire reads them.
+
 *(UI-P1)* `favourite` is **whether the calling user has favourited this app**, always
 serialized. It is resolved per request from the **bearer identity** — it is never a stored
 property of the app, never settable on the write shape, and never assertable by a client.
@@ -894,8 +950,8 @@ holds; a filter parameter would be a second way to express the same view for no 
 a decision, not an oversight.
 
 ### `GET /v1/apps/{id}`
-Single app, same fields as a list item — including `kind` and the caller-resolved `favourite`.
-`404` if absent or disabled.
+Single app, same fields as a list item — including `kind`, `external_source`/`external_id`, and
+the caller-resolved `favourite`. `404` if absent or disabled.
 
 > Creating/editing apps and managing hosts (`GET/POST/PATCH /v1/apps`, `GET /v1/hosts`) is the
 > **admin** surface (`role=admin`), built in P1-3 against the same `schema.md`. The read shapes
@@ -916,6 +972,44 @@ value outside `('game','desktop')`. The DB `CHECK` is the backstop, never the pr
 > sends `kind` to a control plane **without** this amendment gets a hard `400 validation_failed`
 > — not a silent ignore. Deploy the control plane first; a new client against an old control
 > plane fails loudly on every app create/edit.
+
+**The app write shape and `external_source` / `external_id` (Steam library discovery, Phase 1).**
+Both are **optional** on create and patch, both admin-gated like every other `AppWrite` field, and
+both carry the same presence rule as `kind`: **absent = the schema default (`""`) on create,
+unchanged on patch.** An absent field must never be written as a zero value — that is the
+`cb97bfb` trap again, and on this pair it has a specific cost: an unrelated `PATCH` that says
+nothing about them would silently **un-tag** an app's Steam appid and send its artwork back to the
+fuzzy title matcher on the next sweep.
+
+- **An explicit `""` IS valid here, and this is the one place the rule differs from `kind`.**
+  `""` is the real domain value for "this app is not a provider title", so `{"external_id": ""}`
+  is a deliberate **clear** — a real operation an admin needs — and not `400`. For `kind`, by
+  contrast, `""` is outside the enum and is a hard `400`. Absent and `""` therefore mean different
+  things and must stay distinguishable on the wire, which is why they decode through a
+  presence-aware pointer.
+- **`external_source` must be `""` or `"steam"`** (`400 validation_failed` otherwise).
+- **`external_id` must be `""` or `^[1-9][0-9]{0,9}$`** — a bare positive integer, no leading zero,
+  no sign, no whitespace, no separators. `"0"`, `"007"`, `"1 2"`, `"1;rm -rf /"` and
+  `"-applaunch 480 -foo"` are all `400 validation_failed`.
+- **Why the id is regex-constrained: argument-injection containment** (spec §10), not a format
+  preference. The stored appid is eventually rendered into `STEAM_STARTUP_FLAGS`, whose value the
+  `quasar-steam` entrypoint **word-splits** with `read -r -a`. A stored `"480 -foo"` would
+  therefore arrive at the Steam client as *two extra arguments*. The flags are built from a fixed
+  template with the validated integer interpolated, never by concatenating stored free text.
+- **The handler is the primary gate; the DB `CHECK` is the backstop** — `apps_external_source_ck`
+  and `apps_external_id_ck` carry the same value set and the same regex (`schema.md`, migration
+  0042). Same division of labour as `kind`, with one addition worth stating: because the value is
+  written by an automated job and read by a shell-adjacent consumer, the `CHECK` is also the only
+  one of the two layers that survives an admin editing the column directly later.
+- **The two fields are validated independently.** There is deliberately **no pairing rule** — no
+  "a source requires an id", and no reverse. None is needed: an admin who sets one field in one
+  request and the other in the next would be rejected by a rule nothing asked for, and a half-set
+  pair is **inert**, because the only reader (artwork resolution) requires *both* before it takes
+  the by-id path. That is a decision, not an oversight.
+
+> **Rollout order: control plane before client**, for the same reason as `kind` — `crud.decodeJSON`
+> sets `DisallowUnknownFields()`, so a client that sends either field to a control plane **without**
+> this amendment gets a hard `400 validation_failed`, not a silent ignore.
 
 ### Per-app launchable launch profiles *(UI-P5, admin)*
 
