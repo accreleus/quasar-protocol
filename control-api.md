@@ -571,6 +571,16 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > **`library_provider`** (`"" | "steam"`). `AppWrite` accepts `parent_app_id` (tri-state on patch,
 > like `runtime_preset_id`) and `library_provider` (explicit `""` valid, like `external_source`) —
 > **but never `origin`**, which is provenance the server sets and the Phase 4 reconciler reads.
+*(Known discrepancy pending sign-off: the Phase 3 implementation currently also accepts `origin` on
+write. §Derived tiles records both the shape and the argument; the contract keeps the narrower one,
+which is the recoverable direction.)*
+>
+> **`DELETE /v1/apps/{id}` gains a second refusal**, reusing the generic `conflict` code:
+> deleting an app that has derived tiles is `409` with the tiles **listed** in
+> `error.derived_tiles`, unless the caller sends `?delete_derived=true`. The FK cascade is the
+> integrity backstop under that confirmation, not the UX. And **the new constraints answer `4xx`,
+> never `500`** — `apps_derived_shape_ck` is `400 validation_failed`,
+> `apps_parent_external_uk` is `409 conflict`.
 >
 > **A derived tile carries identity and presentation only and borrows everything executable from
 > its parent at launch.** Its shape is a database `CHECK` (`apps_derived_shape_ck`):
@@ -3122,10 +3132,57 @@ union of installed titles rather than by users × titles.
 explicitly opts in — mirroring the existing in-use `409` pattern. The FK cascade is the integrity
 backstop underneath that confirmation, not the primary UX.
 
-**`origin` is read-only.** An admin create is `'manual'` by construction; only a library-discovery
-sync writes `'discovered'` (Phase 4, nothing writes it yet). Accepting it on write would let an
-operator mislabel a hand-made tile as discovered, and the reconciler keys its create/suppress
-behaviour off provenance — so a lie here is a lie to a background job, not a cosmetic one.
+**Every one of those rules answers `4xx`, never `500`.** `apps_derived_shape_ck` maps to
+`400 validation_failed` and `apps_parent_external_uk` to `409 conflict`, each naming what the
+operator can fix. A `CHECK` violation reaching a client as `500 internal` is a lie: the request is
+malformed, the server is not.
+
+Two rules the database **cannot** express as a row `CHECK` are enforced at the handler and answer
+`400`:
+
+- **`parent_app_id` must name an existing app that is not itself derived.** Home resolution
+  substitutes the parent **exactly once**, so a grandchild would resolve its home to a *tile*,
+  which owns none.
+- **`library_provider` may not be set on a derived tile** — evaluated against the **effective
+  patched-or-stored** shape, not the request alone, so a two-request path cannot assemble a state
+  that a single request would be refused for.
+
+**`origin` should be read-only, and this contract does not declare it on `AppWrite`.** An admin
+create is `'manual'` by construction; only a library-discovery sync writes `'discovered'`
+(Phase 4, nothing writes it yet). The write path buys no capability the reconciler needs, and both
+directions are footguns under `apps_parent_external_uk`: a tile relabelled `'manual'` still
+occupies its `(parent, source, appid)` slot, so a reconciler reading it as *"not mine, therefore
+missing"* cannot re-create it either — a resurrection loop with no visible cause. The mirror case
+(hand-creating a tile pre-labelled `'discovered'` so a sweep adopts it) has the same root cause.
+
+> **Known discrepancy, pending sign-off, recorded rather than papered over.** The Phase 3
+> control-plane implementation currently **also accepts `origin` on create and patch**, because the
+> implementation brief specified it in terms. This contract keeps the narrower shape deliberately:
+> it is the safe direction — the server tolerates a field the contract tells nobody to send, which
+> is recoverable, where the reverse would not be. **Clients: do not send it.** If the operator
+> rules the other way, the property is added here and to `openapi.yaml`; until then a reader should
+> not conclude that either side simply missed it.
+
+### Deleting a provider app
+
+`DELETE /v1/apps/{id}` gains a **second** refusal, mirroring the existing refuse-if-in-use pattern
+and reusing the generic `conflict` code rather than adding one. Deleting an app that has derived
+tiles is `409` **unless** the caller opts in with **`?delete_derived=true`**, because
+`apps.parent_app_id` **cascades**: the delete would silently take every derived tile with it, and
+each tile's `app_artwork` and `user_app_favourites` rows with those.
+
+```json
+// 409
+{ "error": { "code": "conflict",
+             "message": "this app has derived tiles that will be deleted with it — re-send with ?delete_derived=true to confirm",
+             "derived_tiles": [ { "id": "…", "name": "Portal 2" }, … ] } }
+```
+
+**The body lists the tiles; it does not count them.** The point of a confirmation is that the admin
+sees *what* they are about to destroy, and "12 tiles" is not that. The list is capped, and an empty
+array means the tiles could not be listed — never that there are none, since otherwise this `409`
+would not have been raised. Only the exact string `"true"` opts in, so a typo (`"1"`, `"yes"`,
+`"TRUE"`) refuses rather than deletes.
 
 ---
 

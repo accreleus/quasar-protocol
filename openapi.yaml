@@ -437,14 +437,43 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       tags: [apps]
-      summary: Remove an app from the catalog (refuse-if-in-use).
+      summary: Remove an app from the catalog (refuse-if-in-use, and refuse-if-it-has-derived-tiles).
+      description: |
+        STEAM LIBRARY DISCOVERY PHASE 3 ADDS A SECOND REFUSAL, mirroring the existing
+        refuse-if-in-use pattern and reusing the generic `conflict` code rather than adding one.
+        Deleting a PROVIDER app that has derived tiles is 409 unless the caller opts in with
+        ?delete_derived=true, because apps.parent_app_id CASCADEs: the delete would silently take
+        every derived tile with it, and each tile's app_artwork and user_app_favourites rows with
+        those. The cascade is the INTEGRITY BACKSTOP UNDER THIS CONFIRMATION, not the UX.
+
+        THE 409 BODY LISTS THE TILES, IT DOES NOT COUNT THEM - `derived_tiles: [{id, name}, ...]`
+        nested inside the error object, the same idiom as `live_sessions` on restart_required.
+        The point of a confirmation is that the admin sees WHAT they are about to destroy, and
+        "12 tiles" is not that. The list is capped; an empty array means the tiles could not be
+        listed, never that there are none (there are, or this 409 would not have been raised).
+
+        Only the exact string "true" opts in. Anything else - absent, "1", "yes", "TRUE" - is
+        treated as not opting in, so a typo refuses rather than deletes.
       x-required-role: admin
+      parameters:
+        - name: delete_derived
+          in: query
+          required: false
+          schema: { type: string, enum: ["true"] }
+          description: >-
+            Steam library discovery Phase 3. "true" confirms that deleting this app may cascade to
+            its derived tiles. Any other value, and absence, do not confirm. Inert for an app with
+            no derived tiles, which is every app predating migration 0044.
       responses:
         "204": { description: App removed. }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/Conflict" }
+        "409":
+          description: >-
+            In use by an active session (pre-existing), OR (Phase 3) the app has derived tiles and
+            ?delete_derived=true was not sent - the body then carries `derived_tiles`.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   # ─── admin: runtime presets (UI-P3) ──────────────────────────────────────
   /v1/admin/runtime-presets:
     get:
@@ -1991,6 +2020,20 @@ components:
             user who clicks a game tile can be refused because a DIFFERENT app (the Steam
             launcher, or another game from the same install) is running, and without the session
             id the refusal reads as a bug. See control-api.md §Derived tiles.
+        derived_tiles:
+          type: array
+          items:
+            type: object
+            required: [id, name]
+            properties:
+              id: { type: string, format: uuid }
+              name: { type: string }
+          description: >-
+            Steam library discovery Phase 3, ADDITIVE: present on the 409 conflict from
+            DELETE /v1/apps/{id} when the app has derived tiles and ?delete_derived=true was not
+            sent. A LIST, not a count - the point of the confirmation is that the admin sees what
+            they are about to destroy. Capped; an empty array means the tiles could not be
+            listed, never that there are none.
     ErrorEnvelope:
       type: object
       required: [error]
@@ -2258,6 +2301,16 @@ components:
             is 409 conflict, from the apps_parent_external_uk unique index.
             Note crud.decodeJSON sets DisallowUnknownFields(), so sending this to a control plane
             without this amendment is a hard 400 - deploy the control plane before the client.
+            EVERY ONE OF THESE RULES ANSWERS 4xx, NEVER 500. apps_derived_shape_ck maps to
+            400 validation_failed and apps_parent_external_uk to 409 conflict, both naming what
+            the operator can fix: a CHECK violation reaching a client as 500 internal is a lie,
+            because the request is malformed and the server is not. Two rules the database cannot
+            express as a row CHECK are enforced at the handler and answer 400: parent_app_id must
+            name an EXISTING app that is NOT ITSELF DERIVED (one level, never a chain - home
+            resolution substitutes the parent exactly once, so a grandchild would resolve its home
+            to a tile that owns none), and library_provider may not be set on a derived tile,
+            evaluated against the EFFECTIVE patched-or-stored shape rather than the request alone,
+            so a two-request path cannot assemble a state a single request would be refused for.
         library_provider:
           allOf: [ { $ref: "#/components/schemas/LibraryProvider" } ]
           description: >-
@@ -2860,6 +2913,16 @@ components:
                 lie to a background job rather than a cosmetic one.
                 Admin-only, like runtime_preset_id: it is operator/provenance detail, not library
                 presentation, so it is not on AppListItem.
+                KNOWN DISCREPANCY PENDING SIGN-OFF (recorded rather than papered over): the Phase 3
+                control-plane implementation currently ALSO accepts `origin` on create and patch.
+                This schema deliberately does not declare it, because the write path buys no
+                capability the reconciler needs and both directions are footguns under
+                apps_parent_external_uk - a tile relabelled 'manual' still occupies its
+                (parent, source, appid) slot, so a reconciler that reads it as "not mine, therefore
+                missing" cannot re-create it either, which is a resurrection loop with no visible
+                cause. Clients: do not send it. If the operator rules the other way this schema
+                gains the property; until then the narrower contract is the safe direction, since
+                the server tolerates a field the contract tells nobody to send.
             library_provider:
               allOf: [ { $ref: "#/components/schemas/LibraryProvider" } ]
               description: >-
