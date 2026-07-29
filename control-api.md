@@ -636,6 +636,100 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > re-pin is scheduled **with this phase** because of the `AppKind` widening above. See
 > `docs/design/plans/2026-07-29-steam-library-discovery-spec.md` §1–§5, §4.5 and §13 "Phase 3".
 
+> **Amendment — Steam library discovery, Phase 4 (discovery, the denylist, and the operator
+> setting). Additive, requires sign-off. Migration 0045.** Adds the §Library discovery section:
+> **seven new routes** — two **agent-authenticated** (`GET /v1/agent/library/scan-pending`,
+> `POST /v1/agent/library/scan-report`) and five **admin** (`GET /v1/admin/library/status`,
+> `GET /v1/admin/apps/{id}/library/unpublished`, `GET`/`PUT`/`DELETE` on
+> `/v1/admin/apps/{id}/library/rules`) — plus **one field**, `library_discovery_enabled`, on
+> `GET`/`PATCH /v1/admin/settings`. **No existing shape, status code, endpoint or behaviour
+> changes, and no new error code** (`validation_failed` 400, `unauthorized` 401, `not_found` 404
+> and `conflict` 409 are all reused).
+>
+> **This one really is additive, and the contrast with Phase 2 is the point.** Phase 2 introduced
+> an authorization object and then made five existing endpoints obey it; that is why it was
+> recorded as breaking and signed off as such. Phase 4 adds a surface and changes nothing that
+> already existed. What it *does* is start **writing** the `granted_by='provider'` entitlement
+> rows Phase 2 put in the `CHECK` and left unwritten — a value the contract already permitted,
+> arriving through a new route, with no shape change anywhere.
+>
+> **`agent-api.md` IS BYTE-IDENTICAL, and that is the headline architectural result of the whole
+> phase rather than an absence worth skipping.** Discovery has to run agent-side — the control
+> plane never touches a host filesystem (invariant #1) — so the obvious design is a new WebSocket
+> message on the frozen agent contract. It reuses the existing **`/v1/agent/storage/*` pull
+> channel** instead, exactly as the #175 GC amendment did, and §7.2 of the spec weighed both
+> before choosing:
+>
+> | | new `agent-api.md` WS message | HTTP pull, here |
+> |---|---|---|
+> | contract | frozen interface, Opus + sign-off, pin bumps here **and** in `quasar-client` | additive HTTP surface; #175 is the precedent that records `agent-api.md` byte-identical |
+> | push vs pull | the control plane must know the agent is connected and hold the correlation | the agent asks when it is ready; **nothing to correlate across a reconnect** |
+> | restart | an in-flight scan dies with the socket | a claim is a **database row**; a stale one is reaped by timeout |
+> | prior art | none for a long-running batch job | `spawn_gc_reaper` does exactly this shape today |
+> | does the agent learn a user | it would have to, or carry an opaque token that amounts to one | **never**, by construction |
+>
+> The whole feature — a filesystem walk on every user's home on every host, a fleet-wide
+> suppression ladder, and per-user entitlement grants and revokes — is implementable with the
+> agent contract untouched. `signaling.md`, `input.md`, `native-client.md` are likewise unchanged.
+>
+> **The agent never learns a user, and that is a guarantee of the interface rather than a property
+> of the current implementation.** Neither direction of the pull channel carries a user id, a
+> username, or any user-derived field: the job payload is a scan id, an opaque home path, two
+> relative roots and two bounds, and the report is a scan id, an `ok` flag and a list of installed
+> titles. The control plane holds the `scan_id → (user, app, host)` mapping in `library_scans`
+> and resolves it on receipt. `agent-api.md` records the **P2-01 verdict that per-user concerns
+> never reach the agent**; this honours it literally, and a change to this surface that put a user
+> on the wire would be the wrong change even though the JSON would validate.
+>
+> **PII: the report shape is closed, and the reason it is closed is `LastOwner`.** Every
+> `appmanifest_*.acf` carries a **SteamID64** — a persistent, globally unique, externally
+> resolvable identifier for a real person's Steam account. The agent parses with a **key
+> allow-list** (`appid`, `name`, `installdir`, `SizeOnDisk`, `StateFlags`) and **never a
+> denylist**, because Steam adds keys over time and a denylist leaks every future key by default;
+> and the report entry has exactly those five fields, so **there is no field for a sixth value to
+> travel in** even if the parser were wrong. Widening either of those two things is the change
+> this paragraph exists to make someone stop and think about.
+>
+> **Two of the five report fields have no consumer, and a reader should not assume otherwise.**
+> `install_dir` and `size_on_disk` are **collected, not used**. `install_dir` existed to feed
+> launch verification, which operator decision 3 dropped (spec §16.1); `size_on_disk` was never
+> consumed by anything. They stay because narrowing a PII containment allow-list buys nothing
+> while widening it later means re-touching the one piece of code whose job is to touch as little
+> of the manifest as possible. `state_flags` is likewise unread — on the live capture it was `4`
+> for all five Valve tools *and* for three of the four real games, so it distinguishes nothing.
+>
+> **The second-order PII, said out loud.** `library_observations` and the provider-written
+> `entitlements` rows are, together, **a per-user record of which games a person has installed**.
+> That is inherent to the feature the operator asked for, admins can see it by design (the
+> entitlement UI and the "Seen, not published" read both expose it), and it is **new** — nothing
+> in Quasar recorded a per-user game inventory before this phase. It is only appids and titles,
+> and it cascades away with the user (`ON DELETE CASCADE` on `user_id` throughout), but it is
+> worth naming rather than discovering.
+>
+> **Suppression is a hide, never a delete** (§Library discovery). An `ignore` rule writes the rule
+> row, disables the tile, and revokes that tile's `granted_by='provider'` entitlements — three
+> things, none of them a `DELETE`, because `apps` cascades to `user_app_favourites` and
+> `app_artwork`, so deleting a junk tile destroys **every user's favourite of it and its artwork
+> row, irreversibly** — and the next scan re-creates a bare row anyway, because the appid is still
+> on disk.
+>
+> **`library_discovery_enabled` is the master switch and the only switch.** Under operator
+> decision 1, auto-publish is the **behaviour**, not a mode: there is no review queue, so a second
+> "publish" toggle would only select between publishing and a path that was never built. Two env
+> knobs sit beside it and neither is a second switch: **`QUASAR_LIBRARY_SCAN_INTERVAL`** (default
+> `6h`; `0` forces discovery dark regardless of the database) and the opt-in, **default-off**
+> `QUASAR_STEAM_APPDETAILS_LOOKUP`, which discloses this instance's installed appids to a third
+> party — the same trade the artwork work rejected for hotlinking, which is why it is an
+> operator's decision and never a default.
+>
+> Backed by `schema.md` (migration 0045: `library_scans`, `library_observations`,
+> `library_appid_rules`, and `instance_settings.library_discovery_enabled`) and `openapi.yaml`
+> (the seven paths, the `Library*` shapes, and the settings field). **Migration numbering:** the
+> spec says 0044 for this phase throughout; Phase 3 shipped first and took 0044, so Phase 4's
+> tables land at **0045**. See
+> `docs/design/plans/2026-07-29-steam-library-discovery-spec.md` §7, §8, §9, §10, §11 and §13
+> "Phase 4".
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -723,6 +817,11 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `POST /v1/admin/apps/{id}/entitlements` | **admin** | *(Phase 2)* grant — `{subject_type, subject_id}`; `409 conflict` if that subject already holds one |
 | `DELETE /v1/admin/apps/{id}/entitlements/{entitlement_id}` | **admin** | *(Phase 2)* revoke — **scoped to the app in the path**, so an entitlement id belonging to another app is `404`, not a cross-app delete |
 | `GET /v1/admin/users/{id}/entitlements` | **admin** | *(Phase 2)* **this user's personal grants only** — deliberately *not* the `all` rows they also benefit from; see §Entitlements for why |
+| `GET /v1/admin/library/status` | **admin** | *(Steam library discovery Phase 4)* is discovery actually doing anything, **and if not, why** — the switch, the interval, the storage provider, the opt-in lookup, an `inert_reason` and the per-state scan census |
+| `GET /v1/admin/apps/{id}/library/unpublished` | **admin** | *(Phase 4)* **"Seen, not published"** — every appid observed under this provider app that has no enabled tile, and which layer suppressed it. A read of one table and a button, not a review queue: nothing waits on it |
+| `GET /v1/admin/apps/{id}/library/rules` | **admin** | *(Phase 4)* the operator-written layer-2 rules on this provider app |
+| `PUT /v1/admin/apps/{id}/library/rules/{external_id}` | **admin** | *(Phase 4)* **Ignore and un-ignore, one route, two directions** — `rule:"ignore"` suppresses fleet-wide (rule row + disable the tile + revoke its provider entitlements, in one transaction), `rule:"allow"` outranks the built-in denylist. The primary key is the idempotency key, so a repeat is a replace. Audited as `app.library.rule.set` |
+| `DELETE /v1/admin/apps/{id}/library/rules/{external_id}` | **admin** | *(Phase 4)* drop a rule, returning the appid to whatever the built-in denylist says about it. Re-enables and disables nothing by itself — the next scan applies the ladder afresh. Audited as `app.library.rule.delete` |
 | `GET /v1/admin/runtime-presets`, `GET /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* read the shared runtime presets, each with its `used_by` app list |
 | `POST /v1/admin/runtime-presets` | **admin** | *(UI-P3)* create a runtime preset |
 | `PATCH /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* edit a runtime preset — takes effect on the **next launch** of every app using it, with no app edit |
@@ -754,8 +853,8 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `PUT /v1/me/favourites/{app_id}` | user (self) | *(UI-P1)* favourite an app; owner is the bearer identity — no endpoint takes a `user_id`. Idempotent `204`; `404` under the same visibility rule as `GET /v1/apps/{id}`. **(Phase 2: `403 forbidden` when the caller is not entitled — checked *after* the `404`, and applied to every role including admin, because `/v1/me/*` is the user surface by definition)** |
 | `DELETE /v1/me/favourites/{app_id}` | user (self) | *(UI-P1)* unfavourite; idempotent **and unconditional** `204` for a well-formed UUID — deliberately never `404` |
 | `POST /v1/me/password` | user (self) | *(CP-01)* change the caller's own password; subject is the bearer identity, never a body field. Revokes all active tokens on success — client must re-authenticate |
-| `GET /v1/admin/settings` | **admin** | *(LP-SEC-01)* read instance settings (`registration_mode`, `storage_provider`, …) |
-| `PATCH /v1/admin/settings` | **admin** | *(LP-SEC-01)* update instance settings — how invites are enabled/disabled from the UI |
+| `GET /v1/admin/settings` | **admin** | *(LP-SEC-01)* read instance settings (`registration_mode`, `storage_provider`, **`library_discovery_enabled`** *(Phase 4)*, …) |
+| `PATCH /v1/admin/settings` | **admin** | *(LP-SEC-01)* update instance settings — how invites are enabled/disabled from the UI. *(Phase 4: also the discovery master switch. Every field is an **optional pointer**, so a `PATCH` that omits one leaves it alone — a plain bool would decode an absent `library_discovery_enabled` to `false` and silently switch discovery off every time an admin changed the registration mode)* |
 | `GET /v1/admin/secrets` | **admin** | *(secrets facility)* list the declared secrets + configured/readable/origin + a **masked** hint — never a value |
 | `PUT /v1/admin/secrets/{name}` | **admin** | *(secrets facility)* set/replace a secret's value; write-only on the wire, response is the status shape |
 | `DELETE /v1/admin/secrets/{name}` | **admin** | *(secrets facility)* clear a stored secret; any declared env-var fallback takes effect again |
@@ -3225,8 +3324,8 @@ Two rules the database **cannot** express as a row `CHECK` are enforced at the h
   that a single request would be refused for.
 
 **`origin` is read-only and is deliberately not on `AppWrite`.** An admin create is `'manual'` by
-construction; only a library-discovery sync writes `'discovered'` (Phase 4, nothing writes it yet),
-so the write path buys no capability anything needs.
+construction; only a library-discovery sync writes `'discovered'` (**Phase 4's reconciler does, since
+migration 0045**), so the write path buys no capability anything needs.
 
 **What settles it is that BOTH relabel directions are footguns under `apps_parent_external_uk`**,
 and it is worth stating because the first instinct is that only one of them is:
@@ -3272,6 +3371,344 @@ sees *what* they are about to destroy, and "12 tiles" is not that. The list is c
 array means the tiles could not be listed — never that there are none, since otherwise this `409`
 would not have been raised. Only the exact string `"true"` opts in, so a typo (`"1"`, `"yes"`,
 `"TRUE"`) refuses rather than deletes.
+
+---
+
+## Library discovery (Steam library discovery, Phase 4)
+
+> *Additive amendment (migration 0045), requires sign-off. Seven routes and one settings field;
+> no existing shape, status code, endpoint or behaviour changes, and no new error code. DDL
+> companion: `schema.md` `library_scans`, `library_observations`, `library_appid_rules`, and
+> `instance_settings.library_discovery_enabled`. **`agent-api.md` is byte-identical.** It sits
+> here, after §Derived tiles, because everything it produces is a derived tile.*
+
+Discovery is the job that turns *"this user has Portal 2 installed under their Steam home"* into a
+derived tile plus a `granted_by='provider'` entitlement, and back again when they uninstall it.
+It runs on a schedule, it publishes automatically, and it is off until an operator turns it on.
+
+### Where it runs, and why it is not a WebSocket message
+
+The control plane never touches a host filesystem (architecture invariant #1) — that is the
+reason `/v1/agent/storage/gc-*` exists at all — and on a real deployment the homes root is
+bind-mounted only into the node-agent container. **So discovery runs agent-side or it does not
+run**, and the only open question was which channel carries it.
+
+It reuses the **#175 pull channel shape**, and therefore **`agent-api.md` is byte-identical**: a
+new additive HTTP surface, not a WebSocket-message change. The alternative — a new `agent-api.md`
+message — would have cost a frozen-interface sign-off and a `quasar-client` pin bump, and bought
+nothing: discovery is not latency-sensitive, it is idempotent, an in-flight scan is a **database
+row** rather than state on a socket, and `spawn_gc_reaper` is the existing precedent for exactly
+this shape. The pull model survives an agent reconnect for free, because there is nothing to
+correlate across the gap.
+
+### The agent pull channel
+
+**Authentication is the node-secret scheme, not a user bearer token** — identical to
+§Agent storage GC, and deliberately not a second implementation of it. The agent presents
+`Authorization: Bearer {node_secret}` plus `X-Quasar-Node: {node_name}`; the control plane
+verifies against `hosts.node_secret_hash` with a constant-time compare, and the resolved
+`host_id` scopes every query, so an agent can only ever see and report scans for its own host.
+Any failure ⇒ `401 unauthorized`, never distinguishing which. `/v1/agent/` is already exempt
+from the HTTPS redirect.
+
+#### `GET /v1/agent/library/scan-pending`
+Claims up to 50 pending scans for the calling host (`FOR UPDATE SKIP LOCKED`, so two agents
+polling simultaneously get **disjoint** sets rather than blocking on each other) and returns the
+job payloads.
+
+```json
+{ "scans": [ {
+    "scan_id": "…",
+    "root_path": "/mnt/user/appdata/quasar/homes/…",
+    "relative_roots": [".local/share/Steam/steamapps", ".steam/steam/steamapps"],
+    "max_entries": 512,
+    "max_manifest_bytes": 1048576
+  } ] }
+```
+
+`relative_roots` and the two bounds are **control-plane-supplied**, not agent constants, so a
+bound can be tightened without an agent release. An empty list is the steady state and is also
+what the endpoint returns when the feature is switched off — the switch is re-read **here** as
+well as in the scheduler, because the scheduler is what stops rows being *created* and this is
+what stops an already-queued row being *handed out* after an operator turned discovery off.
+
+`root_path` is control-plane-supplied and the agent **validates containment against its own
+configured homes root before walking it**. A path outside that root is refused and reported as an
+error, never walked: the agent does not trust the control plane with a filesystem path any more
+than it would trust a client.
+
+#### `POST /v1/agent/library/scan-report`
+Body:
+
+```json
+{ "scan_id": "…", "ok": true,
+  "entries": [ { "external_id": "620", "name": "Portal 2",
+                 "install_dir": "Portal 2", "size_on_disk": 0, "state_flags": 4 } ] }
+```
+
+`{ "ok": false, "error": "…" }` reports a failure — a refused path, no configured home root, a
+walk that could not complete. **A failed scan changes nothing but its own row.** Revocation is
+driven by *absence*, and absence is exactly what a transient error looks like, so "reconcile
+whatever entries did arrive" would make a partial walk indistinguishable from a user uninstalling
+their library. `entries` and `error` are both optional on the wire (the agent omits whichever is
+empty); an absent `entries` on an `ok: true` report is a legitimate "this user has nothing
+installed" and is reconciled as such.
+
+Response is `{ "accepted": true }`. `404 not_found` for a scan the calling host does not own —
+**indistinguishable from one that does not exist, deliberately**, since a `403` would confirm the
+existence of another host's scan id to anyone holding one valid node secret. `409 conflict` for a
+scan that is not currently claimed, which is where a duplicate report after a successful
+reconcile lands.
+
+Accepting a report runs reconciliation **in one transaction** with marking the scan reported:
+observations are upserted and the ones this scan did not list are pruned, the suppression ladder
+is evaluated **once**, tiles are created for what publishes, tiles are disabled and their provider
+entitlements revoked for what suppresses, and the scanning user's provider entitlements are
+granted and revoked. Tile creation and the first entitlement commit **together**, because
+auto-publish means they are no longer separated by an admin decision and a tile that exists
+without its entitlement is a window in which a user sees nothing where the feature just claimed
+to add something.
+
+**This is the first thing that ever writes `entitlements.granted_by='provider'`** — a value
+Phase 2 put in the `CHECK` and deliberately left unwritten, which is why there is no `ALTER` here
+and why revoking one was already a working path the day the first appeared. Phase 2 also left
+`source_ref` as free-form provenance "for a Phase 4 grant"; the value it now carries is
+**`library:<external_source>:<external_id>`** — e.g. `library:steam:620`. It is provenance for a
+human reading a row, not a key anything joins on. `granted_by='admin'` rows are **never** touched
+by the sync in either direction: an operator's grant survives an uninstall, because an admin said
+so and a filesystem did not.
+
+### The agent never learns a user
+
+**There is no user id, no username and no user-derived field anywhere in either direction.** The
+job is a scan id, an opaque path and two bounds; the report is a scan id, a flag and a list of
+installed titles. The `scan_id → (user, app, host)` mapping lives in `library_scans` and is
+resolved on receipt.
+
+This is `agent-api.md`'s **P2-01 verdict — that per-user concerns never reach the agent** —
+honoured literally, and it is a **guarantee of this interface**, not an implementation detail that
+happens to hold today. A change to these two payloads that put a user on the wire would be the
+wrong change even though the JSON would still validate.
+
+### PII: a key allow-list, and a report shape with nowhere to put a person
+
+Every `appmanifest_*.acf` carries **`LastOwner`, a SteamID64** — a persistent, globally unique,
+externally resolvable identifier for a real person's Steam account.
+
+**Rule: `LastOwner` is never read, never logged, never transmitted and never persisted.** The
+mechanism is two independent things, and both are part of this contract:
+
+1. the agent parses with a **key allow-list** — `appid`, `name`, `installdir`, `SizeOnDisk`,
+   `StateFlags`, everything else discarded at parse time. An allow-list and **not** a denylist,
+   because Steam adds keys over time and a denylist leaks every future key by default;
+2. the report entry has **exactly those five fields**, so there is nowhere for a sixth value to
+   travel even if the parser were wrong.
+
+**Two of the five have no consumer, and this is the place that says so** rather than leaving a
+reader to assume they are populated for some other purpose. `install_dir` and `size_on_disk` are
+**collected, not used**: `install_dir` existed to feed launch verification, which was dropped, and
+`size_on_disk` was never consumed by anything. They stay because narrowing a PII containment
+allow-list buys nothing, while widening it later means re-touching the one piece of code whose job
+is to touch as little of the manifest as possible. `state_flags` is likewise unread — on the live
+capture it was `4` for all five Valve tools **and** for three of the four real games, so nothing
+branches on it.
+
+**`name` is retained deliberately** and its importance went *up*, not down: it is the tile title
+and it is **half of the denylist key** below, so it is load-bearing for correctness. It is a game
+title, not a person.
+
+**The second-order PII, said out loud.** `library_observations` and the provider-written
+`entitlements` rows are together **a per-user record of which games a person has installed**. That
+is inherent to the feature, admins can see it by design — the entitlement UI and the "Seen, not
+published" read both expose it — and it is **new**: nothing in Quasar recorded a per-user game
+inventory before this phase. It is only appids and titles, and it cascades away with the user, but
+it is worth naming rather than discovering. Note also that observations record **every** appid
+including suppressed ones (that is what makes a wrongly-suppressed game recoverable), so the
+per-user inventory is complete rather than filtered.
+
+### The suppression ladder
+
+On the live box **5 of 9** manifests were runtimes rather than games (Proton Experimental, Proton
+Hotfix, two Steam Linux Runtimes, Steamworks Common Redistributables), and **no structural field
+distinguishes a tool from a game** — `StateFlags` was `4` for all of them and for most of the real
+games too. So filtering is on the two values the parser must extract anyway, in two layers over
+one decision, evaluated per observed appid, **first match wins**:
+
+1. an `allow` rule exists → **publish**;
+2. an `ignore` rule exists → **suppress**;
+3. the built-in denylist matches the appid **or** a case-insensitive name prefix → **suppress**;
+4. otherwise → **publish**. This is the default, and it is what "auto-publish" means;
+5. *(only when `QUASAR_STEAM_APPDETAILS_LOOKUP` is on)* Valve's store says this appid's `type` is
+   not `game` → **suppress**.
+
+**Rung 1 above rung 3 is what makes a wrongly-denylisted game recoverable without a release**, and
+rung 2 above rung 4 is what makes an operator's Ignore stick. **Rung 5 is appended, never
+substituted**: it is consulted *only* for appids rungs 1–4 would publish and *never* for one an
+operator's rule decided, so turning it on cannot override a rule an admin wrote, and a Valve
+outage, a rate-limit or an unrecognised appid degrades to "the denylist alone decided" — which is
+the default behaviour anyway. An appid the store does not recognise is **not consulted**, not
+"not a game": treating it otherwise would let the opt-in lookup suppress real games, which is the
+one thing it must not be able to do.
+
+**Layer 1 is a code constant and updating it is a release.** That is the honest answer to "how
+does an operator update the denylist", and it is exactly why layer 2 exists. The residual is
+specific and worth stating: a **new Valve runtime the built-in list does not know about
+auto-publishes to every user at once**, because every Steam user has Proton installed, so a
+denylist miss on a *runtime* is not a per-user annoyance the way a miss on a game would be. The
+**name-prefix** half is what mitigates it — a future `Proton 10.0` ships a new appid but keeps the
+prefix — and the recovery for what gets through is one Ignore, fleet-wide, immediate.
+
+### Ignore is a hide, never a delete
+
+`PUT …/library/rules/{external_id}` with `rule: "ignore"` does **three** things in one
+transaction, and none of them is a `DELETE`:
+
+1. writes the `library_appid_rules` row;
+2. sets `enabled = false` on the tile, if one exists;
+3. revokes that tile's `granted_by='provider'` entitlements — **fleet-wide**, not just for one
+   user, because an Ignore is a fleet decision and a half-revoke would leave the tile live for
+   everyone who happens not to be scanned next.
+
+**Why it is not a delete**, plainly: `apps` cascades to `user_app_favourites` and to `app_artwork`,
+so deleting a junk tile **destroys every user's favourite of it and its artwork row,
+irreversibly** — and the next scan re-creates a bare row anyway, because the appid is still on
+disk, at which point the admin reasonably concludes the feature is broken. Delete is the obvious
+reflex and the admin app editor already offers it; it is the wrong action here twice over.
+
+Durability comes from **two independent facts, deliberately**, because either alone is a
+resurrection bug: the rule row makes the reconciler skip the appid, **and** the reconciler never
+modifies an existing tile, so `enabled = false` is never flipped back even if the rule row were
+somehow lost.
+
+**`allow` does *not* re-enable an existing disabled tile.** It writes the rule; the **next scan**
+republishes the appid through the ladder. That asymmetry is intentional: a tile may be disabled
+because an admin disabled it by hand for a reason unrelated to discovery, and an un-ignore must
+not override them. `DELETE` on a rule likewise enables and disables nothing by itself — it returns
+the appid to whatever layer 1 says about it, and the next scan applies the ladder afresh.
+
+### Admin surfaces
+
+#### `GET /v1/admin/library/status`
+```json
+{ "enabled": false, "storage_provider": "auto", "scan_interval_secs": 21600,
+  "appdetails_lookup": false,
+  "inert_reason": "library discovery is switched off",
+  "scans": { "pending": 0, "claimed": 0, "reported": 0, "failed": 0 } }
+```
+
+**`inert_reason` is the reason this endpoint exists**, and it is part of the contract rather than a
+nicety. Under auto-publish the only observable signal of a working scan is **tiles appearing**, so
+"nothing appeared" and "nothing ran" look identical to an operator. `inert_reason` is `""` when
+discovery is live, and otherwise names exactly one of: the switch is off; the interval is `0`
+(which disables discovery regardless of the database flag); or the instance storage provider is
+`volume`. `scan_interval_secs` is the **resolved** interval in seconds, so an operator can see
+what their `6h` actually became.
+
+#### `GET /v1/admin/apps/{id}/library/unpublished` — "Seen, not published"
+```json
+{ "items": [ { "external_source": "steam", "external_id": "1493710",
+               "name": "Proton Experimental", "suppressed_by": "builtin_appid",
+               "users": 3, "last_seen_at": "…", "has_tile": false } ] }
+```
+
+Every appid observed under this provider app that has **no enabled tile**. This read is why
+observations record suppressed appids at all: a suppressed appid has no tile, so without it a game
+the built-in denylist wrongly caught would be **invisible, with no surface on which an admin could
+find it** — let alone `allow` it. It is a read of one table and a button, not a review queue:
+nothing waits on it, and the feature is fully correct for an operator who never opens it.
+
+`suppressed_by` is `rule_ignore`, `builtin_appid`, `builtin_prefix`, `appdetails` — or **`other`**,
+and that last value is deliberate honesty rather than a gap. `other` means the ladder's first four
+rungs **would** have published this appid and yet no enabled tile exists. Exactly two things reach
+that state and **neither is knowable from the database**: the opt-in `appdetails` lookup suppressed
+it during a scan, or an admin disabled the tile by hand. Guessing between them would be worse than
+saying so, and an admin who sees `other` and writes `allow` gets the right outcome in the first
+case and no change in the second — which is the correct behaviour for both.
+
+`has_tile` distinguishes "a disabled tile exists" from "nothing was ever created" — the difference
+between an Ignore that took effect and an appid nothing has published yet. Both are recoverable;
+only the first has favourites and artwork to preserve. `users` is the number of distinct accounts
+observed with it installed; `name` is one of the observed names (they can diverge across users on
+a torn read or a localised client, and the row is a handle for an admin action, not a catalogue
+entry).
+
+#### `GET /v1/admin/apps/{id}/library/rules`
+```json
+{ "items": [ { "external_source": "steam", "external_id": "1493710", "rule": "ignore",
+               "note": "", "created_by": "…", "created_at": "…" } ] }
+```
+Newest first. `created_by` is the acting admin and is `null` once that account is deleted —
+deleting the operator who wrote a rule must not silently un-suppress every appid they ignored.
+
+#### `PUT /v1/admin/apps/{id}/library/rules/{external_id}`
+Body `{ "rule": "ignore" | "allow", "note": "…", "external_source": "steam" }`. `note` is optional
+and truncated at 512 characters; `external_source` is optional and defaults to `"steam"`, and any
+other value is `400 validation_failed` — the vocabulary is provider-shaped so Heroic or RomM slot
+in later, but only `steam` exists today.
+
+```json
+{ "rule": { "external_source": "steam", "external_id": "1493710", "rule": "ignore",
+            "note": "", "created_by": "…", "created_at": "…" },
+  "disabled": true, "revoked": 4 }
+```
+
+**Note the shape asymmetry, which is real and is recorded rather than smoothed over:** `rule` on
+the *request* is the two-value string, and `rule` on the *response* is the whole stored rule
+object (whose own `rule` field is that string). `disabled` says whether a tile was disabled by
+this call and `revoked` counts the provider entitlements it removed — both `false`/`0` for an
+`allow`, which by design changes nothing but the rule row.
+
+**`external_id` is validated at the handler as a bare positive integer** (`^[1-9][0-9]{0,9}$`,
+bounded below 2³²) **before** the database `CHECK` sees it. Both are deliberate: this table is
+**admin-writable and takes an appid straight from an HTTP body**, and the value ends up in
+`STEAM_STARTUP_FLAGS`, which the `quasar-steam` entrypoint word-splits with `read -r -a`. The
+handler is what makes a bad value a `400` instead of a `500`; the `CHECK` is the durable guard and
+the only one of the two that survives an admin editing the row directly later.
+
+#### `DELETE /v1/admin/apps/{id}/library/rules/{external_id}`
+`204` on success, `404 not_found` when no such rule exists. Takes the same optional
+`?external_source=` (default `steam`); unlike the `PUT` it does not reject an unknown source with
+a `400` — an unknown source simply matches no rule and is therefore the `404` it already is.
+
+### The operator setting, and the two env knobs beside it
+
+**`library_discovery_enabled`** on `GET`/`PATCH /v1/admin/settings` (default **`false`** —
+ship-dark, the posture artwork already holds) is the **master switch and the only switch**. Under
+operator decision 1 **auto-publish is the behaviour, not a mode**: there is no review queue, so a
+second "publish" toggle would only ever select between publishing and a path that was never built,
+and a boolean whose `false` branch is unimplemented is precisely the half-built second path that
+decision exists to avoid.
+
+It is read **per pass and per request, never cached at boot**. A setting an admin flips in the UI
+must take effect without a restart; the artwork provider is the recorded precedent for what
+happens otherwise.
+
+Two environment knobs sit beside it and **neither is a second switch**:
+
+- **`QUASAR_LIBRARY_SCAN_INTERVAL`** (default `6h`) — how often a scan is enqueued per
+  (user, provider app, host). **`0` disables discovery entirely regardless of the database flag**,
+  so an operator can guarantee a control plane makes no scan and no third-party call without
+  needing database access. Negative or unparseable **fails startup**, rather than silently
+  disabling: "I set the knob and nothing was ever scanned" is not a failure anyone finds on their
+  own.
+- **`QUASAR_STEAM_APPDETAILS_LOOKUP`** (default **off**) — rung 5 of the ladder. **It discloses to
+  a third party exactly which Steam appids this instance has installed**, which is the same privacy
+  class as artwork hotlinking, and that was rejected for the same reason. Off by default, an
+  operator's decision, never a default; bounded per scan; and contained so that enabling it cannot
+  override a rule an admin wrote.
+
+With the switch off, **nothing happens**: no scan rows, no agent requests, no third-party calls.
+
+### Storage-driver limitation, stated up front
+
+A `volume`-provider home has **no host path an agent can walk**, so on an instance whose storage
+provider is `volume` discovery **enqueues nothing**. The limitation is the same one `bytes_used`
+already has, and it is not new information — what is new is that under auto-publish it is
+**invisible without help**, which is why surfacing it is part of this contract and not a UI
+nicety: `GET /v1/admin/library/status` reports it as `inert_reason`, and the same reason is logged
+once for an operator reading logs rather than the admin UI. The scheduler also filters per home,
+not only per instance, so a volume-backed home on an otherwise-local instance is never enqueued
+into a pending row nothing could ever claim.
 
 ---
 

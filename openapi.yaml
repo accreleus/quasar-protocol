@@ -671,6 +671,126 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  # ─── library discovery, admin surfaces (Steam library discovery Phase 4) ──
+  # Purely additive: five admin routes, no existing shape or behaviour changed.
+  # The suppression ladder these serve, per observed appid, first match wins:
+  #   1. an `allow` rule exists                                    -> publish
+  #   2. an `ignore` rule exists                                   -> suppress
+  #   3. the built-in denylist matches the appid OR a name prefix  -> suppress
+  #   4. otherwise                                                 -> publish
+  #   5. (only when QUASAR_STEAM_APPDETAILS_LOOKUP is on) Valve's store says the
+  #      type is not "game" -> suppress. APPENDED, never substituted: consulted
+  #      only for appids rungs 1-4 would publish and NEVER for one a rule decided.
+  # Rung 1 above rung 3 is what makes a wrongly-denylisted game recoverable
+  # WITHOUT A RELEASE; rung 2 above rung 4 is what makes an operator's Ignore
+  # stick.
+  /v1/admin/library/status:
+    get:
+      tags: [admin]
+      summary: Is discovery actually doing anything, and if not, WHY.
+      description: >-
+        Phase 4. INERT_REASON IS THE REASON THIS ENDPOINT EXISTS, and it is part of the contract
+        rather than a nicety: under auto-publish the only observable signal of a working scan is
+        tiles appearing, so "nothing appeared" and "nothing ran" look identical to an operator
+        unless something says which. It is "" when discovery is live, and otherwise names exactly
+        one of - the master switch is off; QUASAR_LIBRARY_SCAN_INTERVAL is 0 (which disables
+        discovery regardless of the database flag); or the instance storage provider is 'volume',
+        which has no host path a node-agent can walk. scan_interval_secs is the RESOLVED interval,
+        so an operator can see what their "6h" actually became.
+      x-required-role: admin
+      responses:
+        "200": { description: OK., content: { application/json: { schema: { $ref: "#/components/schemas/LibraryStatus" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { description: Could not read settings or scan counts. , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /v1/admin/apps/{id}/library/unpublished:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin, apps]
+      summary: "\"Seen, not published\": observed appids with no enabled tile."
+      description: >-
+        Phase 4. THIS READ IS WHY library_observations RECORDS SUPPRESSED APPIDS AT ALL. A
+        suppressed appid has no tile, so without this a game the built-in denylist wrongly caught
+        would be invisible, with no surface on which an admin could find it - let alone allow it.
+        It is a read of one table and a button, NOT a review queue: nothing waits on it, and the
+        feature is fully correct for an operator who never opens it. {id} is the PROVIDER app.
+      x-required-role: admin
+      responses:
+        "200": { description: OK., content: { application/json: { schema: { $ref: "#/components/schemas/LibraryUnpublishedList" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/apps/{id}/library/rules:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin, apps]
+      summary: The operator-written appid rules on this provider app (layer 2 of the denylist).
+      description: >-
+        Phase 4. Newest first. Layer 1 is a code constant and updating it is a release; this is the
+        layer an operator can write, and it is overlaid at runtime OVER layer 1 - which is what
+        makes a wrongly-denylisted game recoverable without waiting for a deploy.
+      x-required-role: admin
+      responses:
+        "200": { description: OK., content: { application/json: { schema: { $ref: "#/components/schemas/LibraryRuleList" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/apps/{id}/library/rules/{external_id}:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - { $ref: "#/components/parameters/PathExternalId" }
+    put:
+      tags: [admin, apps]
+      summary: Ignore or un-ignore one appid (one route, two directions).
+      description: >-
+        Phase 4. rule:"ignore" is the Ignore action and it does THREE things in one transaction,
+        NONE OF THEM A DELETE - writes the rule row, sets enabled=false on the tile if one exists,
+        and revokes that tile's granted_by='provider' entitlements FLEET-WIDE (an Ignore is a fleet
+        decision; a half-revoke would leave the tile live for everyone who happens not to be scanned
+        next). It is not a delete because `apps` cascades to user_app_favourites and app_artwork, so
+        deleting a junk tile destroys every user's favourite of it and its artwork row irreversibly
+        - and the next scan re-creates a bare row anyway, because the appid is still on disk.
+        Durability rests on two INDEPENDENT facts, deliberately, because either alone is a
+        resurrection bug: the rule row makes the reconciler skip the appid, AND the reconciler never
+        modifies an existing tile, so enabled=false is never flipped back.
+        rule:"allow" outranks the built-in denylist and writes ONLY the rule row - it does NOT
+        re-enable an existing disabled tile; the next scan republishes the appid through the ladder.
+        That asymmetry is intentional: a tile may have been disabled by hand for a reason unrelated
+        to discovery, and an un-ignore must not override the admin who did it.
+        The primary key (parent_app_id, external_source, external_id) is the idempotency key, so a
+        repeat is a REPLACE and never an accumulation. Audited as app.library.rule.set.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/LibraryRuleWrite" } } }
+      responses:
+        "200": { description: Rule written., content: { application/json: { schema: { $ref: "#/components/schemas/LibraryRuleSetResult" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [admin, apps]
+      summary: Drop a rule, returning the appid to whatever the built-in denylist says.
+      description: >-
+        Phase 4. Enables and disables NOTHING by itself - the next scan applies the ladder afresh.
+        Takes the same optional ?external_source= (default "steam"); unlike the PUT it does not
+        reject an unknown source with a 400, because an unknown source simply matches no rule and is
+        therefore the 404 it already is. Audited as app.library.rule.delete.
+      x-required-role: admin
+      parameters:
+        - name: external_source
+          in: query
+          required: false
+          schema: { type: string, enum: [steam] }
+          description: "Defaults to 'steam'. Provider-shaped vocabulary; only 'steam' exists today."
+      responses:
+        "204": { description: Rule deleted. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   # ─── cover artwork (UI-P7) ───────────────────────────────────────────────
   # The artwork provider SHIPS DARK: with no API key configured the control
   # plane makes no third-party request, writes no artwork, and every app keeps
@@ -1267,6 +1387,14 @@ paths:
               properties:
                 registration_mode: { $ref: "#/components/schemas/RegistrationMode" }
                 storage_provider: { $ref: "#/components/schemas/StorageProvider" }
+                library_discovery_enabled:
+                  type: boolean
+                  description: >-
+                    Steam library discovery Phase 4. EVERY FIELD ON THIS BODY IS OPTIONAL AND
+                    ABSENCE MEANS UNCHANGED - a plain (non-pointer) decode of an absent
+                    library_discovery_enabled would read false and silently switch discovery off
+                    every time an admin changed the registration mode. A PATCH naming no known
+                    field is a no-op that returns current state.
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SettingsEnvelope" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
@@ -1821,6 +1949,73 @@ paths:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/GCConfirmResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  # ─── agent-internal: library discovery (Steam library discovery Phase 4) ──
+  # THE SAME PULL SHAPE AS THE #175 GC ENDPOINTS ABOVE, AND FOR THE SAME REASON:
+  # the control plane never touches a host filesystem (invariant #1), so the walk
+  # runs agent-side. Reusing this channel is what keeps agent-api.md BYTE-IDENTICAL
+  # - a new additive HTTP surface, not a WebSocket-message change.
+  #
+  # NOTHING IN EITHER DIRECTION IDENTIFIES A USER. The job is a scan id, an opaque
+  # home path and two bounds; the report is a scan id, a flag and a list of
+  # installed titles. The scan_id -> (user, app, host) mapping lives in
+  # library_scans and is resolved control-plane-side on receipt, which is
+  # agent-api.md's P2-01 verdict (per-user concerns never reach the agent)
+  # honoured literally. A change here that put a user on the wire would be the
+  # wrong change even though the JSON would still validate.
+  #
+  # Auth is the per-node node_secret (Authorization: Bearer <node_secret> plus
+  # X-Quasar-Node), not a user bearer token - the same scheme as gc-pending /
+  # gc-confirm, verified constant-time against hosts.node_secret_hash, with the
+  # resolved host_id scoping every query.
+  /v1/agent/library/scan-pending:
+    get:
+      tags: [agent]
+      summary: "Node-agent internal: claim pending Steam library scans for this host. (Not operator-facing.)"
+      description: >-
+        Phase 4. Claims up to 50 pending scans for the calling host with FOR UPDATE SKIP LOCKED,
+        so two agents polling simultaneously get DISJOINT sets rather than blocking on each other.
+        An empty list is the steady state, and is also what this returns when discovery is
+        switched off - the master switch is re-read HERE as well as in the scheduler, because the
+        scheduler is what stops rows being created and this is what stops an already-queued row
+        being handed out after an operator turned the feature off. relative_roots and the two
+        bounds are control-plane-supplied rather than agent constants, so a bound can be tightened
+        without an agent release. root_path is control-plane-supplied and the agent validates
+        containment against its own configured homes root before walking it - a path outside that
+        root is refused and reported as an error, never walked.
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/LibraryScanPendingResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { description: Could not list pending scans. , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /v1/agent/library/scan-report:
+    post:
+      tags: [agent]
+      summary: "Node-agent internal: report one scan's result. (Not operator-facing.)"
+      description: >-
+        Phase 4. Accepting an ok:true report runs the whole reconciliation IN ONE TRANSACTION with
+        marking the scan reported - observations upserted and pruned, the suppression ladder
+        evaluated ONCE, tiles created for what publishes, tiles disabled and their provider
+        entitlements revoked for what suppresses, and the scanning user's provider entitlements
+        granted and revoked. Tile creation and the first entitlement commit TOGETHER, because
+        auto-publish means they are no longer separated by an admin decision and a tile that exists
+        with no entitlement is a window in which a user sees nothing where the feature just claimed
+        to add something. An ok:false report CHANGES NOTHING BUT ITS OWN ROW: revocation is driven
+        by absence, and absence is exactly what a transient error looks like, so "reconcile whatever
+        entries did arrive" would make a partial walk indistinguishable from an uninstall. 404 for a
+        scan the calling host does not own - indistinguishable from one that does not exist,
+        deliberately, since a 403 would confirm another host's scan id to anyone holding one valid
+        node secret. 409 for a scan that is not currently claimed, which is where a duplicate report
+        after a successful reconcile lands.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/LibraryScanReport" } } }
+      responses:
+        "200": { description: Report accepted (and reconciled, if ok). , content: { application/json: { schema: { $ref: "#/components/schemas/LibraryScanAccepted" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { description: Could not record or reconcile the report. , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+
   # ─── signaling (WebSocket) ───────────────────────────────────────────────
   /v1/signal:
     get:
@@ -1867,6 +2062,19 @@ components:
         app named by the sibling {id}; a well-formed pair that does not match is 404, never a
         cross-app delete.
       schema: { type: string, format: uuid }
+    PathExternalId:
+      name: external_id
+      in: path
+      required: true
+      description: >-
+        Steam library discovery Phase 4: the provider title id an appid rule applies to - today a
+        Steam appid. VALIDATED AT THE HANDLER AS WELL AS BY THE DATABASE CHECK, deliberately: this
+        table is ADMIN-WRITABLE and takes the value straight from a URL, and the value ends up in
+        STEAM_STARTUP_FLAGS, which the quasar-steam entrypoint word-splits with `read -r -a`. The
+        handler is what makes a bad value a 400 instead of a 500; the CHECK is the durable guard and
+        the only one of the two that survives an admin editing the row directly later. Bounded below
+        2^32 in addition to the pattern.
+      schema: { type: string, pattern: "^[1-9][0-9]{0,9}$" }
 
   responses:
     Unauthorized:
@@ -1928,8 +2136,8 @@ components:
       description: >-
         Steam library discovery Phase 3 (apps.origin, migration 0044): how this app row came to
         exist. 'manual' = an operator created it, which is every app predating 0044 and every
-        app an admin creates. 'discovered' = a library-discovery sync created it (Phase 4;
-        nothing writes it yet). PROVENANCE, NOT AUTHORITY - both launch identically. It is
+        app an admin creates. 'discovered' = a library-discovery sync created it - WRITTEN
+        SINCE PHASE 4 (migration 0045) by the scan reconciler. PROVENANCE, NOT AUTHORITY - both launch identically. It is
         READ-ONLY and admin-only: see AdminApp.origin.
       enum: [manual, discovered]
     LibraryProvider:
@@ -2474,9 +2682,11 @@ components:
       description: >-
         Steam library discovery Phase 2: PROVENANCE, NOT AUTHORITY - all three grant identical
         access. 'admin' = an operator granted it (audited). 'provider' = a library-discovery sync
-        wrote it and a sync may revoke it; NOTHING WRITES IT YET (that is Phase 4) - it is in the
-        contract now so Phase 4 needs no migration and so revoking one is already a working path
-        the day the first appears. 'migration' = the 0043 backfill and only ever that, so "who
+        wrote it and a sync may revoke it - WRITTEN SINCE PHASE 4 (migration 0045) by the scan
+        reconciler, carrying source_ref 'library:steam:<appid>'. It was in the contract from Phase 2
+        precisely so Phase 4 needed no migration and so revoking one was already a working path the
+        day the first appeared. THE SYNC OWNS ONLY WHAT THE SYNC WROTE: it never touches an 'admin'
+        row in either direction, so an operator's grant survives an uninstall. 'migration' = the 0043 backfill and only ever that, so "who
         made this app public" answers "it was public before entitlements existed" rather than
         falsely attributing it to whichever admin happened to act first.
       enum: [admin, provider, migration]
@@ -2513,7 +2723,10 @@ components:
             NULLs this rather than revoking the entitlement.
         source_ref:
           type: string
-          description: "Free-form provenance for a 'provider' grant (Phase 4: which scan, which appid). '' for everything Phase 2 writes."
+          description: >-
+            Free-form provenance for a 'provider' grant. '' for everything Phase 2 writes; Phase 4's
+            reconciler writes 'library:<external_source>:<external_id>' (e.g. 'library:steam:620').
+            It is provenance for a human reading a row, NOT a key anything joins on.
         created_at: { type: string, format: date-time }
     EntitlementList:
       type: object
@@ -2751,10 +2964,21 @@ components:
       properties:
         settings:
           type: object
-          required: [registration_mode, storage_provider, updated_by, updated_at]
+          required: [registration_mode, storage_provider, library_discovery_enabled, updated_by, updated_at]
           properties:
             registration_mode: { $ref: "#/components/schemas/RegistrationMode" }
             storage_provider: { $ref: "#/components/schemas/StorageProvider" }
+            library_discovery_enabled:
+              type: boolean
+              description: >-
+                Steam library discovery Phase 4 (migration 0045). THE MASTER SWITCH, AND THE ONLY
+                SWITCH. Default false - ship-dark, the posture artwork already holds - and with it
+                false the scheduler returns before its first query and the agent pull answers an
+                empty list: no scan rows, no agent work, no third-party calls. Under operator
+                decision 1 AUTO-PUBLISH IS THE BEHAVIOUR, NOT A MODE (there is no review queue), so
+                there is deliberately no second "publish" toggle: its false branch would select a
+                path that was never built. Read PER PASS and per request rather than cached at boot,
+                so flipping it in the admin UI takes effect without a restart.
             updated_by: { type: [string, "null"], format: uuid }
             updated_at: { type: string, format: date-time }
 
@@ -4141,3 +4365,270 @@ components:
       required: [deleted]
       properties:
         deleted: { type: integer, description: "Count of hard-deleted home rows." }
+
+    # ─── library discovery (Steam library discovery Phase 4, internal/library) ──
+    LibraryScanTask:
+      type: object
+      description: >-
+        One scan job, exactly as it goes on the wire. NOTE WHAT IS ABSENT: no user id, no username,
+        no user-derived field. root_path is an opaque home directory and which person it belongs to
+        is resolved control-plane-side on receipt of the report and never leaves that process. This
+        is agent-api.md's P2-01 verdict - per-user concerns never reach the agent - honoured
+        literally, and it is a GUARANTEE OF THE INTERFACE rather than a property of the current
+        implementation.
+      required: [scan_id, root_path, relative_roots, max_entries, max_manifest_bytes]
+      properties:
+        scan_id: { type: string, format: uuid, description: "The only handle the agent ever holds." }
+        root_path:
+          type: string
+          description: >-
+            The absolute host path of the user's managed home. Control-plane-supplied, so the agent
+            VALIDATES CONTAINMENT against its own configured homes root before walking it: a path
+            outside that root is refused and reported as an error, never walked. The agent does not
+            trust the control plane with a filesystem path any more than it would trust a client.
+        relative_roots:
+          type: array
+          items: { type: string }
+          description: >-
+            In-home paths to glob for appmanifest_*.acf, today the flatpak/deb
+            (.local/share/Steam/steamapps) and classic (.steam/steam/steamapps) layouts, which are
+            usually symlinks to each other and are de-duplicated by resolved path. libraryfolders.vdf
+            is deliberately NOT consulted: it records CONTAINER-side paths, meaningless to a
+            host-side scanner, so translating it would be guesswork - libraries on other disks are
+            an accepted limitation instead.
+        max_entries: { type: integer, description: "Cap on manifests per scan (512 today)." }
+        max_manifest_bytes:
+          type: integer
+          format: int64
+          description: >-
+            Per-file read cap (1 MiB today). Both bounds are CONTROL-PLANE-OWNED rather than agent
+            constants, so they can be tightened without an agent release.
+    LibraryScanPendingResponse:
+      type: object
+      required: [scans]
+      properties:
+        scans:
+          type: array
+          items: { $ref: "#/components/schemas/LibraryScanTask" }
+          description: "Empty is the steady state, and is also the answer when discovery is switched off."
+    LibraryScanReportEntry:
+      type: object
+      description: >-
+        One parsed appmanifest_*.acf. THE FIELD SET IS THE PII CONTAINMENT MECHANISM, not a
+        convenience. Every manifest carries LastOwner, a SteamID64 - a persistent, globally unique,
+        externally resolvable identifier for a real person's Steam account. The agent parses with a
+        key ALLOW-LIST (appid, name, installdir, SizeOnDisk, StateFlags) and NEVER a denylist,
+        because Steam adds keys over time and a denylist leaks every future key by default; and this
+        shape has exactly those five fields, so THERE IS NOWHERE FOR A SIXTH VALUE TO TRAVEL even if
+        the parser were wrong. Widening either the allow-list or this shape is the change that
+        sentence exists to make someone stop and think about.
+      required: [external_id, name]
+      properties:
+        external_id:
+          type: string
+          pattern: "^[1-9][0-9]{0,9}$"
+          description: >-
+            The Steam appid. Validated at FOUR independent points - agent parse, control-plane
+            ingest (plus a bound below 2^32), the database CHECK, and the launch-time flag composer
+            - because the value is written by an automated job and read by a shell-adjacent consumer
+            (STEAM_STARTUP_FLAGS is word-split by `read -r -a`), and because only the CHECK survives
+            a later admin edit. An entry failing ingest validation is REJECTED WHILE THE REST OF THE
+            REPORT IS STILL PROCESSED: one malformed manifest must not cost a user their library.
+        name:
+          type: string
+          description: >-
+            The manifest title. Retained deliberately, and its importance went UP rather than down:
+            it is the tile title AND half of the denylist key (which matches on appid OR name
+            prefix), so it is load-bearing for correctness. It is a game title, not a person.
+        install_dir:
+          type: string
+          description: >-
+            COLLECTED AND NOT USED. It existed to feed launch verification, which operator decision
+            3 dropped, and it has had no consumer since. It stays because narrowing a PII containment
+            allow-list buys nothing while widening it later means re-touching the one piece of code
+            whose job is to touch as little of the manifest as possible. Do not assume it is
+            populated for some other purpose.
+        size_on_disk:
+          type: integer
+          format: int64
+          description: "COLLECTED AND NOT USED - never consumed by anything in this feature. Kept for the same reason as install_dir."
+        state_flags:
+          type: integer
+          format: int64
+          description: >-
+            Unread, and the live capture is why: it was 4 for all five Valve tools on the reference
+            box AND for three of the four real games. NO STRUCTURAL FIELD DISTINGUISHES A TOOL FROM
+            A GAME, which is exactly why filtering is on appid and name instead. Nothing branches on
+            this.
+    LibraryScanReport:
+      type: object
+      required: [scan_id, ok]
+      properties:
+        scan_id: { type: string, format: uuid }
+        ok:
+          type: boolean
+          description: >-
+            false reports a failure - a refused path, no configured home root, a walk that could not
+            complete. A FAILED SCAN CHANGES NOTHING BUT ITS OWN ROW: revocation is driven by ABSENCE,
+            and absence is exactly what a transient error looks like, so "reconcile whatever entries
+            did arrive" would make a partial walk indistinguishable from an uninstall.
+        error: { type: string, description: "Failure text on ok:false. Omitted when empty; truncated server-side." }
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/LibraryScanReportEntry" }
+          description: >-
+            Omitted when empty. An absent entries on an ok:true report is a legitimate "this user has
+            nothing installed" and is reconciled as such - which is how an uninstall of the last game
+            is recognised.
+    LibraryScanAccepted:
+      type: object
+      required: [accepted]
+      properties:
+        accepted: { type: boolean }
+    LibraryRule:
+      type: object
+      description: >-
+        One operator-written layer-2 rule. Layer 1 is a shipped code constant (an appid set plus
+        case-insensitive Valve tool name prefixes) and UPDATING IT IS A CODE CHANGE AND A RELEASE -
+        which is exactly why this layer exists, because an operator cannot wait for one.
+      required: [external_source, external_id, rule, note, created_by, created_at]
+      properties:
+        external_source: { type: string, enum: [steam] }
+        external_id: { type: string, pattern: "^[1-9][0-9]{0,9}$" }
+        rule: { $ref: "#/components/schemas/LibraryRuleValue" }
+        note: { type: string, description: "Why, for the next operator. Truncated at 512 characters." }
+        created_by:
+          type: [string, "null"]
+          format: uuid
+          description: >-
+            The acting admin, resolved server-side from the bearer identity. NULL once that account
+            is deleted (ON DELETE SET NULL, not CASCADE) - deleting the operator who wrote a rule
+            must not silently un-suppress every appid they ignored.
+        created_at: { type: string, format: date-time, description: "Set, and re-set on a replace." }
+    LibraryRuleValue:
+      type: string
+      description: >-
+        'ignore' suppresses an appid the built-in denylist does not know about; 'allow'
+        un-suppresses a game it wrongly caught, and OUTRANKS the built-in list - rung 1 of the
+        ladder sits above rung 3.
+      enum: [ignore, allow]
+    LibraryRuleList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/LibraryRule" }
+    LibraryRuleWrite:
+      type: object
+      required: [rule]
+      properties:
+        rule: { $ref: "#/components/schemas/LibraryRuleValue" }
+        note: { type: string, description: "Optional. Truncated at 512 characters." }
+        external_source:
+          type: string
+          enum: [steam]
+          description: >-
+            Optional, defaults to 'steam'; any other value is 400 validation_failed. The vocabulary
+            is provider-shaped so Heroic or RomM slot in later with no re-model, but only 'steam'
+            exists today.
+    LibraryRuleSetResult:
+      type: object
+      description: >-
+        NOTE THE SHAPE ASYMMETRY, which is real and is recorded rather than smoothed over: `rule` on
+        the REQUEST is the two-value string, and `rule` here is the whole stored rule object (whose
+        own `rule` field is that string).
+      required: [rule, disabled, revoked]
+      properties:
+        rule: { $ref: "#/components/schemas/LibraryRule" }
+        disabled:
+          type: boolean
+          description: >-
+            Whether this call disabled a tile. Always false for an 'allow', which by design changes
+            nothing but the rule row - it does NOT re-enable an existing disabled tile, because that
+            tile may have been disabled by hand for a reason unrelated to discovery; the next scan
+            republishes the appid through the ladder instead.
+        revoked:
+          type: integer
+          description: >-
+            Provider entitlements removed by this call - FLEET-WIDE, because an Ignore is a fleet
+            decision and a half-revoke would leave the tile live for everyone who happens not to be
+            scanned next. granted_by='admin' rows are never touched.
+    LibraryUnpublished:
+      type: object
+      description: "One observed appid under this provider app that has no ENABLED tile."
+      required: [external_source, external_id, name, suppressed_by, users, last_seen_at, has_tile]
+      properties:
+        external_source: { type: string, enum: [steam] }
+        external_id: { type: string, pattern: "^[1-9][0-9]{0,9}$" }
+        name:
+          type: string
+          description: >-
+            One of the observed names. They can diverge across users (a torn read, a localised
+            client); the row is a HANDLE FOR AN ADMIN ACTION, not a catalogue entry, so the choice is
+            arbitrary but deterministic.
+        suppressed_by: { $ref: "#/components/schemas/LibrarySuppressedBy" }
+        users: { type: integer, description: "Distinct accounts observed with it installed." }
+        last_seen_at: { type: string, format: date-time }
+        has_tile:
+          type: boolean
+          description: >-
+            Distinguishes "a disabled tile exists" from "nothing was ever created" - the difference
+            between an Ignore that took effect and an appid nothing has published yet. Both are
+            recoverable; only the first has favourites and artwork to preserve, which is precisely
+            why suppression is a hide and never a delete.
+    LibrarySuppressedBy:
+      type: string
+      description: >-
+        Which rung of the ladder is responsible. 'other' IS DELIBERATE HONESTY RATHER THAN A GAP: it
+        means rungs 1-4 WOULD have published this appid and yet no enabled tile exists, and exactly
+        two things reach that state, NEITHER OF THEM KNOWABLE FROM THE DATABASE - the opt-in
+        appdetails lookup suppressed it during a scan, or an admin disabled the tile by hand.
+        Guessing between them would be worse than saying so, and an admin who sees 'other' and
+        writes an 'allow' rule gets the right outcome in the first case and no change in the second.
+      enum: [rule_ignore, builtin_appid, builtin_prefix, appdetails, other]
+    LibraryUnpublishedList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/LibraryUnpublished" }
+    LibraryScanCounts:
+      type: object
+      required: [pending, claimed, reported, failed]
+      properties:
+        pending: { type: integer }
+        claimed: { type: integer, description: "A claim older than 30 minutes is reaped back to pending - the only recovery for an agent that died mid-walk." }
+        reported: { type: integer, description: "Reported AND reconciled: those commit in one transaction, so there is no third state." }
+        failed: { type: integer }
+    LibraryStatus:
+      type: object
+      required: [enabled, storage_provider, scan_interval_secs, appdetails_lookup, inert_reason, scans]
+      properties:
+        enabled: { type: boolean, description: "instance_settings.library_discovery_enabled - the master switch and the only switch." }
+        storage_provider: { $ref: "#/components/schemas/StorageProvider" }
+        scan_interval_secs:
+          type: number
+          description: >-
+            The RESOLVED QUASAR_LIBRARY_SCAN_INTERVAL in seconds (default 6h = 21600), so an operator
+            can see what their duration string actually became. 0 disables discovery ENTIRELY
+            regardless of the database flag - the kill switch that lets an operator guarantee no scan
+            and no third-party call without database access.
+        appdetails_lookup:
+          type: boolean
+          description: >-
+            QUASAR_STEAM_APPDETAILS_LOOKUP, DEFAULT OFF. Rung 5 of the ladder. IT DISCLOSES TO A
+            THIRD PARTY EXACTLY WHICH STEAM APPIDS THIS INSTANCE HAS INSTALLED - the same privacy
+            class as artwork hotlinking, which was rejected for the same reason - which is why it is
+            an operator's decision and never a default. Contained so that enabling it cannot override
+            a rule an admin wrote, and bounded per scan.
+        inert_reason:
+          type: string
+          description: >-
+            "" when discovery is live; otherwise why it is doing nothing. THIS FIELD IS THE REASON
+            THE ENDPOINT EXISTS: under auto-publish the only observable signal of a working scan is
+            tiles appearing, so "nothing appeared" and "nothing ran" are indistinguishable to an
+            operator otherwise - and leaving them to conclude from an unchanged library that nobody
+            has any games installed is the failure this closes.
+        scans: { $ref: "#/components/schemas/LibraryScanCounts" }
