@@ -3169,9 +3169,33 @@ Query: `user_id`, `app_id`, `pending_gc` (bool) — all optional filters. Pagina
 `GET /v1/users`.
 ```json
 { "items": [ { "id": "…", "user_id": "…", "app_id": "…", "host_id": "…",
+  "username": "mike", "app_name": "Steam", "host_name": "tower",
   "provider": "volume", "ref": "quasar-home-…", "bytes_used": 123456789,
   "created_at": "…", "last_used_at": "…", "gc_after": null } ], "next_cursor": null }
 ```
+
+**Resolved names (`username`, `app_name`, `host_name`) — additive, nullable.**
+*Additive amendment: three new fields on the storage-home object. Nothing existing changes
+shape; a client that ignores them behaves exactly as before.*
+
+Each is the human-readable name of the entity named by the id beside it —
+`users.username`, `apps.name`, `hosts.node_name`, i.e. the same column the admin Users,
+Apps and Hosts surfaces already display, so the storage listing agrees with them. They exist
+because an operator reading this list cannot tell whose home is holding 249 GB from a
+truncated UUID.
+
+**All three are nullable, and that is not an oversight.** `user_id`, `app_id` and `host_id`
+are themselves nullable: a home routinely **outlives** the user, app or host it belonged to
+(the owning columns are `ON DELETE SET NULL`), and such a row **must stay in the listing** —
+its bytes are still on disk, and an orphaned home is exactly what an admin opens this page to
+find. So the name is resolved with an outer join and comes back `null` whenever the
+referenced row is gone or the id was never set. Dropping the row instead of nulling the name
+would hide the very storage the endpoint exists to account for. A client must render a
+missing name as an explicit placeholder (the id, or a dash), never treat it as an error.
+
+**The ids remain authoritative.** Names are display-only and are not unique, not stable
+across a rename, and not resolvable back to a row. `DELETE /v1/admin/storage/homes/{id}` and
+every other action key off the ids, which are still present on every item.
 
 ### `DELETE /v1/admin/storage/homes/{id}` — tombstone a home (admin)
 Marks the home for GC (`gc_after = now()`); the janitor reaps the backing store

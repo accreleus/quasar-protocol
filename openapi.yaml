@@ -4127,12 +4127,15 @@ components:
     AdminHome:
       type: object
       description: "One managed-home row from GET /v1/admin/storage/homes (storage/handler.go homeResp)."
-      required: [id, user_id, app_id, host_id, provider, ref, bytes_used, created_at, last_used_at, gc_after]
+      required: [id, user_id, app_id, host_id, username, app_name, host_name, provider, ref, bytes_used, created_at, last_used_at, gc_after]
       properties:
         id: { type: string, format: uuid }
         user_id: { type: [string, "null"], format: uuid, description: "Null when the user was deleted and the row is orphaned pending GC." }
         app_id: { type: [string, "null"], format: uuid, description: "Null when the app was deleted and the row is orphaned pending GC." }
         host_id: { type: [string, "null"], format: uuid }
+        username: { type: [string, "null"], description: "users.username for user_id — display only. Null when user_id is null (the home outlived its user); the row still appears so its bytes stay accounted for." }
+        app_name: { type: [string, "null"], description: "apps.name for app_id — display only. Null when app_id is null (the home outlived its app); the row still appears so its bytes stay accounted for." }
+        host_name: { type: [string, "null"], description: "hosts.node_name for host_id — display only. Null when host_id is null or the host row is gone." }
         provider: { type: string }
         ref: { type: string }
         bytes_used: { type: integer }
