@@ -815,6 +815,50 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > Backed by `openapi.yaml` (the one new path and the `LibraryForceScan*` shapes). No `schema.md`
 > change: the force path writes `library_scans` rows the Phase 4 DDL already defines.
 
+> **Amendment — a fourth `inert_reason`: no app is marked as a library provider. Additive,
+> admin-gated, requires sign-off. No migration, no new route, no new field, no new error code and
+> no shape change of any kind** — the only thing that moves is the **set of values** the existing
+> `inert_reason` string on `GET /v1/admin/library/status` and `POST /v1/admin/library/scan` may
+> take, which this document previously enumerated as exactly three. **`agent-api.md` is
+> byte-identical**, verified by blob hash.
+>
+> **This is the first-run state, and it produced total silence on a real deployment.** An operator
+> switched `library_discovery_enabled` on and *nothing happened* — no scan rows, no observations,
+> no log line beyond the janitor's startup message. The cause was that no app carried
+> `library_provider='steam'`, so the janitor's enqueue joined against nothing and matched zero
+> rows. That is the **single most likely first-run state**, because an operator naturally flips the
+> settings toggle first and only afterwards wonders what else was needed — and §Storage-driver
+> limitation's principle already covers exactly this: under auto-publish, *"nothing appeared"* and
+> *"nothing ran"* are indistinguishable to an operator, so **the reason has to be surfaced**. Three
+> inert causes already were. This fourth one is the one that actually bit.
+>
+> **It is a REASON, not a gate, and the distinction is contractual.** The three existing causes mean
+> no work *may* be done; this one only predicts that the eligibility query will match nothing, which
+> stays a **normal, non-error outcome**. Enqueue behaviour does not change, a force scan against
+> such an instance is still a `200`, and **zero eligible triples is still not an error**. The
+> control-plane janitor likewise *reports* it and carries on with its pass rather than returning
+> early — the case where an operator **un**marks their last provider app is precisely the case that
+> needs the stranded-scan expiry an early return would skip.
+>
+> **Ordering is observable and therefore contractual: it is reported LAST of the four.** With the
+> switch off *and* no provider app, the reported reason is **the switch**. The three above it are
+> instance-level facts that make the provider question moot, and telling someone who has the feature
+> switched off that they also have no provider app would send them configuring an app on a control
+> plane that would have ignored it anyway. Same rule, same reason, as *"inertness is answered before
+> the scope"* above.
+>
+> **The message names the remedy**, as the non-provider-`app_id` `400` already does: *set Library
+> provider to Steam on your Steam app (Identity section of the app editor)*. An operator told only
+> that discovery is inert has been moved from silence to a sentence, which is barely an improvement.
+> The usual rule still holds — **clients must not parse `inert_reason`**; it is human-readable prose
+> rendered verbatim, and only its presence is contractual.
+>
+> Both admin surfaces answer with the **identical string**, computed by the one shared server-side
+> helper the force-scan amendment introduced, and the janitor logs the same reason **once** rather
+> than every six hours. Backed by `openapi.yaml` (two description updates; no schema, path, method
+> or required-field change, so `TestOpenAPIDrift` sees nothing move — which is correct, and is the
+> known limit of that gate rather than a gap in this amendment).
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -3746,9 +3790,14 @@ instance-scoped by default — an unscoped force scan names no app at all.
 nicety. Under auto-publish the only observable signal of a working scan is **tiles appearing**, so
 "nothing appeared" and "nothing ran" look identical to an operator. `inert_reason` is `""` when
 discovery is live, and otherwise names exactly one of: the switch is off; the interval is `0`
-(which disables discovery regardless of the database flag); or the instance storage provider is
-`volume`. `scan_interval_secs` is the **resolved** interval in seconds, so an operator can see
-what their `6h` actually became.
+(which disables discovery regardless of the database flag); the instance storage provider is
+`volume`; or **no app is marked as a library provider**, so the eligibility query joins against
+nothing — the first-run state, reported **last** of the four because the three above it make the
+provider question moot. `scan_interval_secs` is the **resolved** interval in seconds, so an
+operator can see what their `6h` actually became.
+
+**Clients must not parse `inert_reason`.** It is human-readable prose, rendered verbatim, and the
+set above will grow; only its **presence** is contractual.
 
 #### `POST /v1/admin/library/scan` — the operator's "scan now"
 
@@ -3801,7 +3850,11 @@ staring at `queued: 0` would be reading a different story from the one the panel
   makes a double-press idempotent — no duplicates, no `409`, no `500`.
 - **`eligible`** — `queued + skipped`: the number of `(user, library-provider app, host)` triples the
   request matched **at all**.
-- **`inert_reason`** — `""` when the call could do work; otherwise the reason it could not.
+- **`inert_reason`** — `""` when the call could do work; otherwise the reason it could not — the
+  same four instance-level reasons `GET /v1/admin/library/status` reports, in the same words (one
+  shared server-side helper computes both), **plus** the route-specific *"your scope matched
+  nothing"* below. The instance-level four are answered first; the `eligible: 0` reason is only
+  reached once none of them applies.
 
 **`eligible` is the non-obvious field, and it is here because two zeros mean opposite things.**
 `queued: 0` with `eligible > 0` means *everything is already queued — wait for the agent to claim
@@ -3822,8 +3875,8 @@ not an error**, because "everything, now" is what the admin button sends.
 
 **Order of checks, which is observable and therefore contractual: inertness is answered before the
 scope is.** A request carrying a non-provider or non-existent `app_id` against an instance where
-discovery is switched off (or `volume`-backed, or interval-`0`) is the **`200` with `inert_reason`**,
-not the `400`/`404`. That is the right order rather than an accident of the code: the instance-level
+discovery is switched off (or `volume`-backed, or interval-`0`, or has no library-provider app at
+all) is the **`200` with `inert_reason`**, not the `400`/`404`. That is the right order rather than an accident of the code: the instance-level
 answer is the one that explains why *nothing at all* can happen, and reporting a scope defect first
 would send an operator fixing an app id on a control plane that would have refused any scope. Body
 shape — malformed JSON, malformed UUID — is still rejected first, because a request the server

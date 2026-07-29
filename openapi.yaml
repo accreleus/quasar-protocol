@@ -4713,7 +4713,19 @@ components:
             THE ENDPOINT EXISTS: under auto-publish the only observable signal of a working scan is
             tiles appearing, so "nothing appeared" and "nothing ran" are indistinguishable to an
             operator otherwise - and leaving them to conclude from an unchanged library that nobody
-            has any games installed is the failure this closes.
+            has any games installed is the failure this closes. FOUR REASONS, REPORTED IN THIS
+            ORDER: the library_discovery_enabled switch is off; QUASAR_LIBRARY_SCAN_INTERVAL is 0;
+            the instance storage provider is 'volume'; or NO APP IS MARKED AS A LIBRARY PROVIDER
+            (library_provider='steam'), so the eligibility query joins against nothing. The fourth
+            is the first-run state - an operator flips the toggle before marking the app - and it is
+            reported LAST because the three above it are instance-level facts that make the provider
+            question moot: telling someone who has the feature switched off that they also have no
+            provider app would send them configuring an app for nothing. It is a REASON AND NOT A
+            GATE: enqueue behaviour is unchanged and zero eligible triples remains a normal outcome.
+            CLIENTS MUST NOT PARSE THIS STRING - it is human-readable prose rendered verbatim, the
+            set will grow, and only its presence is contractual. The message names the remedy (set
+            Library provider to Steam in the app editor's Identity section), because an operator told
+            only that discovery is inert is barely better off than one told nothing.
         scans: { $ref: "#/components/schemas/LibraryScanCounts" }
     LibraryForceScanRequest:
       type: object
@@ -4769,8 +4781,13 @@ components:
           type: string
           description: >-
             "" when the call could do work; otherwise why it could not - the switch is off,
-            QUASAR_LIBRARY_SCAN_INTERVAL is 0, or the instance storage provider is 'volume'. AN INERT
-            INSTANCE IS THIS 200 AND NOT A 4xx, mirroring GET /v1/admin/library/status so a client
-            has one code path; the two surfaces share one server-side helper so their wording cannot
-            drift. An eligible:0 result also carries a reason here - naming the eligibility rule that
-            matched nothing - rather than a silent zero.
+            QUASAR_LIBRARY_SCAN_INTERVAL is 0, the instance storage provider is 'volume', or no app
+            is marked as a library provider (library_provider='steam'), which is the first-run state
+            and is answered LAST of the four for the reason LibraryStatus.inert_reason gives. AN
+            INERT INSTANCE IS THIS 200 AND NOT A 4xx, mirroring GET /v1/admin/library/status so a
+            client has one code path; the two surfaces share one server-side helper so their wording
+            cannot drift, and the janitor logs the same reason once rather than every six hours. An
+            eligible:0 result also carries a reason here - naming the eligibility rule that matched
+            nothing - rather than a silent zero; that fifth reason is route-specific ("your scope
+            matched nothing") and is only reached once none of the four instance-level ones applies.
+            CLIENTS MUST NOT PARSE THIS STRING; only its presence is contractual.
