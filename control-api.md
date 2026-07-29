@@ -742,6 +742,79 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > `docs/design/plans/2026-07-29-steam-library-discovery-spec.md` §7, §8, §9, §10, §11 and §13
 > "Phase 4".
 
+> **Amendment — Steam library discovery, the force scan (Phase 4 follow-on). Additive,
+> admin-gated, requires sign-off. No migration.** Adds **one route** to §Library discovery —
+> `POST /v1/admin/library/scan` — and documents one **behaviour** on an endpoint whose shape does
+> not move: a `PATCH /v1/admin/settings` that flips `library_discovery_enabled` **false→true** now
+> causes a janitor pass promptly rather than at the next six-hourly tick. **No existing shape,
+> status code, endpoint or error code changes** (`validation_failed` 400, `unauthorized` 401,
+> `forbidden` 403 and `not_found` 404 are all reused), no new table and no new column. **`agent-api.md` is
+> byte-identical**, verified by blob hash against the published Phase 4 contract.
+>
+> **What this closes is two timers that were never one idea.** Discovery shipped paced by two
+> independent six-hour clocks, and **each is anchored to its own process's boot rather than to the
+> moment an operator enables the feature**: the control-plane janitor decides when a scan is
+> *enqueued*, and the node-agent's poll decides when a queued scan is *claimed*. Enabling discovery
+> could therefore take **up to twelve hours** to produce a single tile. And because this is a
+> **pull** channel by deliberate design (§Library discovery, "Where it runs, and why it is not a
+> WebSocket message"), **the control plane cannot push a scan to an agent** to shorten it — the
+> property that bought `agent-api.md` byte-identical is the same property that makes latency the
+> operator's problem. Half a day of an unchanged library is indistinguishable from the feature being
+> broken, which is precisely the failure `inert_reason` exists to close, arriving through **timing**
+> rather than configuration.
+>
+> **Two changes fix it, and they are one idea rather than two.** First, **the agent's poll drops
+> from 6h to 60s**. **Poll cadence is not scan cadence, and conflating them was the defect**: a poll
+> is one indexed query against `library_scans` scoped to the calling host, returning an empty list
+> almost always, while the expensive half — a filesystem walk over every user's home on every host —
+> stays paced by `QUASAR_LIBRARY_SCAN_INTERVAL` exactly as before. That is **agent behaviour, not
+> wire shape**: the two payloads, the claim semantics, the bounds and the node-secret auth are all
+> untouched, which is why `agent-api.md` does not move and no `quasar-client` pin does either.
+> Second, the route below — which is only *worth* having because of the first. A "scan now" button
+> in front of a 6h poll would have made an operator wait six hours for their own button.
+>
+> **`POST /v1/admin/library/scan` bypasses pacing, and never a gate.** It enqueues `pending` scans
+> immediately, dropping the janitor's *"no successful scan inside the interval"* recency check —
+> **that bypass is the entire point**, because an operator pressing this has a reason the recency
+> rule cannot know about (they just installed a game, or just fixed a home mount). Everything the
+> janitor *gates* on it still respects **and reports**: the `library_discovery_enabled` switch, the
+> `volume` storage provider (§Storage-driver limitation), `QUASAR_LIBRARY_SCAN_INTERVAL=0` as the
+> hard kill switch, and the per-home `local` driver filter. A force scan overrides how *often*
+> discovery runs, never *whether* an operator allowed it to.
+>
+> **Inert is a `200` carrying `inert_reason`, not a 4xx**, mirroring `GET /v1/admin/library/status`
+> — whose `inert_reason` exists for exactly this — so a client renders one code path for "here is
+> what happened" and "here is why nothing did". The server extracts a **shared helper** for the
+> reason strings, so the two surfaces cannot drift in wording; an operator reading `queued 0` on the
+> button and the sentence on the status panel must not be reading two different stories.
+>
+> **`eligible` is the non-obvious field and it is contractual.** `queued: 0` with `eligible > 0`
+> means *everything is already queued — wait*; `queued: 0` with `eligible: 0` means *your scope
+> matched nothing — fix the scope*. **Two zeros with opposite remedies**, and without `eligible` a
+> client cannot tell them apart. This is the same class of problem §Storage-driver limitation exists
+> for: under auto-publish, silence is ambiguous, so every path through this endpoint says something.
+>
+> Scoping by `app_id` and/or `user_id` is optional and **an empty body is valid**, meaning
+> "everything, now" — the common case and what the admin button sends. A non-provider `app_id` is
+> `400`, reusing the rule the four `/v1/admin/apps/{id}/library/*` routes already apply rather than
+> inventing a second vocabulary for the same mistake. Double-press is **idempotent**: the open-scan
+> unique index is partial on `pending`/`claimed`, so a second press inserts nothing, reports it as
+> `skipped`, and is not an error. **Audited as `library.scan.force`**, identifiers and counts only:
+> this makes the whole fleet walk every user's home directory on demand, which is exactly the kind
+> of action someone later asks *"who did that"* about.
+>
+> **The on-enable nudge is documented because a client author would otherwise assume the opposite.**
+> `PATCH /v1/admin/settings` does not change shape, but flipping `library_discovery_enabled`
+> false→true now runs a janitor pass promptly instead of at the next 6h tick; true→true and
+> false→false do not, so re-saving a settings form does not re-walk the fleet. The **transition** is
+> detected by reading the previous value `FOR UPDATE` in the same transaction as the write, so two
+> admins saving concurrently cannot both observe false→true. Left undocumented, a client author
+> reasonably assumes enabling is inert until the next tick — which is the wrong expectation, and the
+> one this amendment exists to fix.
+>
+> Backed by `openapi.yaml` (the one new path and the `LibraryForceScan*` shapes). No `schema.md`
+> change: the force path writes `library_scans` rows the Phase 4 DDL already defines.
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -830,6 +903,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `DELETE /v1/admin/apps/{id}/entitlements/{entitlement_id}` | **admin** | *(Phase 2)* revoke — **scoped to the app in the path**, so an entitlement id belonging to another app is `404`, not a cross-app delete |
 | `GET /v1/admin/users/{id}/entitlements` | **admin** | *(Phase 2)* **this user's personal grants only** — deliberately *not* the `all` rows they also benefit from; see §Entitlements for why |
 | `GET /v1/admin/library/status` | **admin** | *(Steam library discovery Phase 4)* is discovery actually doing anything, **and if not, why** — the switch, the interval, the storage provider, the opt-in lookup, an `inert_reason` and the per-state scan census |
+| `POST /v1/admin/library/scan` | **admin** | *(Steam library discovery, force scan)* **"Scan now"** — enqueue `pending` scans immediately, **bypassing the janitor's recency pacing and nothing else**. Optional `app_id` / `user_id` scope; an **empty body is valid** and means everything. Reports `queued` / `skipped` / `eligible` / `inert_reason`; an inert instance is a `200` with the reason, not a 4xx, mirroring `GET /v1/admin/library/status`. A non-provider `app_id` is `400` and a non-existent one `404`, same rule as the four routes below; **inertness is answered before the scope**, so a bad `app_id` on a switched-off instance is that `200`. Idempotent. Audited as `library.scan.force` |
 | `GET /v1/admin/apps/{id}/library/unpublished` | **admin** | *(Phase 4)* **"Seen, not published"** — every appid observed under this provider app that has no enabled tile, and which layer suppressed it. A read of one table and a button, not a review queue: nothing waits on it. **`{id}` must be a library provider: `400` for a real app that is not one, `404` only for one that does not exist** |
 | `GET /v1/admin/apps/{id}/library/rules` | **admin** | *(Phase 4)* the operator-written layer-2 rules on this provider app. Same `{id}` rule: `400` for a real non-provider app, `404` for a missing one |
 | `PUT /v1/admin/apps/{id}/library/rules/{external_id}` | **admin** | *(Phase 4)* **Ignore and un-ignore, one route, two directions** — `rule:"ignore"` suppresses fleet-wide (rule row + disable the tile + revoke its provider entitlements, in one transaction), `rule:"allow"` outranks the built-in denylist. The primary key is the idempotency key, so a repeat is a replace. Audited as `app.library.rule.set` |
@@ -3393,6 +3467,11 @@ would not have been raised. Only the exact string `"true"` opts in, so a typo (`
 > companion: `schema.md` `library_scans`, `library_observations`, `library_appid_rules`, and
 > `instance_settings.library_discovery_enabled`. **`agent-api.md` is byte-identical.** It sits
 > here, after §Derived tiles, because everything it produces is a derived tile.*
+>
+> *Extended by the **force-scan** follow-on (additive, admin-gated, requires sign-off, no
+> migration): one route, `POST /v1/admin/library/scan`, plus the on-enable janitor nudge on
+> `PATCH /v1/admin/settings` and the agent's 60s poll cadence. **`agent-api.md` is still
+> byte-identical.** See the amendment block above.*
 
 Discovery is the job that turns *"this user has Portal 2 installed under their Steam home"* into a
 derived tile plus a `granted_by='provider'` entitlement, and back again when they uninstall it.
@@ -3443,6 +3522,19 @@ bound can be tightened without an agent release. An empty list is the steady sta
 what the endpoint returns when the feature is switched off — the switch is re-read **here** as
 well as in the scheduler, because the scheduler is what stops rows being *created* and this is
 what stops an already-queued row being *handed out* after an operator turned discovery off.
+
+**Poll cadence is not scan cadence, and the contract should not let anyone conflate them again.**
+The agent polls this endpoint every **60 seconds** (it shipped at 6h, which was the defect: two
+independent six-hour timers stacked into a twelve-hour worst case before a single tile appeared).
+A poll is **one indexed query** against `library_scans` scoped to the calling host, returning an
+empty list almost always; the expensive half — the filesystem walk over every user's home — is paced
+entirely by the control plane's `QUASAR_LIBRARY_SCAN_INTERVAL`, unchanged. Polling faster therefore
+buys queue latency and costs nothing that matters, and it is **agent behaviour, not wire shape**:
+the payloads, bounds, claim semantics and node-secret auth here are untouched, which is why
+**`agent-api.md` remains byte-identical** and no client pin moves. The 60s figure is the current
+agent's cadence rather than a wire guarantee — a client must not derive a deadline from it — but
+`POST /v1/admin/library/scan` is only useful *because* of it: a "scan now" button in front of a
+six-hour poll would have made an operator wait six hours for their own button.
 
 `root_path` is control-plane-supplied and the agent **validates containment against its own
 configured homes root before walking it**. A path outside that root is refused and reported as an
@@ -3629,6 +3721,11 @@ reader could "simplify" in the wrong direction.
 `404 rule not found` — distinguishing them would confirm the existence of an app id to a request
 that named a rule — but a real non-provider app is the `400` above, not that `404`.
 
+**`POST /v1/admin/library/scan` applies the same rule to its optional `app_id`**, even though the
+app id rides in the body rather than the path: the mistake is identical, so the answer is identical
+rather than a second vocabulary for it. It is not one of the four routes above only because it is
+instance-scoped by default — an unscoped force scan names no app at all.
+
 > **No automated gate caught this omission, and that is worth recording rather than filing as a
 > near-miss.** `TestOpenAPIDrift` compares **path and method only**, so a route documented with the
 > wrong status-code set is invisible to it; and the API-conformance harness validates only the
@@ -3652,6 +3749,98 @@ discovery is live, and otherwise names exactly one of: the switch is off; the in
 (which disables discovery regardless of the database flag); or the instance storage provider is
 `volume`. `scan_interval_secs` is the **resolved** interval in seconds, so an operator can see
 what their `6h` actually became.
+
+#### `POST /v1/admin/library/scan` — the operator's "scan now"
+
+> *Additive amendment, admin-gated, requires sign-off. One new route; no migration, no new error
+> code, and **`agent-api.md` still byte-identical**. See the force-scan amendment block above.*
+
+Body — **entirely optional, and an empty body is the common case**:
+
+```json
+{ "app_id": "<uuid|absent>", "user_id": "<uuid|absent>" }
+```
+
+```json
+// 200
+{ "queued": 3, "skipped": 1, "eligible": 4, "inert_reason": "" }
+```
+
+**Why it exists: discovery's pacing is anchored to process boot, not to the operator's decision.**
+The janitor's enqueue timer starts when the control plane starts, and the agent polls on its own
+cadence on top of that — right for steady state and wrong for the moment an operator *changes*
+something and then watches an empty library, unable to tell a working feature from a broken one.
+This is a **pull** channel (that is what kept `agent-api.md` untouched), so the control plane cannot
+push a scan to an agent; the only thing it can do is queue one immediately and let a **60-second**
+poll pick it up.
+
+**It bypasses the pacing and nothing else.** What it drops is the janitor's *"no successful scan for
+this triple inside `QUASAR_LIBRARY_SCAN_INTERVAL`"* predicate — the rule that stops a six-hourly
+sweep re-walking every home on every pass, and precisely the rule an operator who just installed a
+game or just fixed a home mount is overriding on purpose. **Every gate still applies and is still
+reported**: the `library_discovery_enabled` switch, `QUASAR_LIBRARY_SCAN_INTERVAL=0`, the `volume`
+storage provider, and the per-home `provider='local'` filter — the last enforced inside the enqueue
+itself, so a volume-backed home on an otherwise-local instance is never forced into a `pending` row
+nothing could claim. *Pacing is the operator's to override; the gates are the operator's own
+decisions and are not.*
+
+**An inert instance is a `200` with `inert_reason`, deliberately not a `409` or a `400`.** It
+mirrors `GET /v1/admin/library/status`, whose `inert_reason` was added for exactly this question, so
+a client renders **one** code path for "here is what happened" and "here is why nothing did" — and
+an admin UI that shows the reason inline needs no second branch. The server computes both surfaces'
+reasons through **one shared helper**, so the wording cannot drift between the status panel and the
+button; two copies of that switch would diverge the day a fourth gate appears, and the operator
+staring at `queued: 0` would be reading a different story from the one the panel tells.
+
+**The response fields, and why `eligible` is one of them:**
+
+- **`queued`** — `pending` rows actually inserted by this call.
+- **`skipped`** — triples that already had an **open** scan (`pending` or `claimed`). **Not an error
+  count.** `library_scans_open_uk` is partial on those two states, so "already queued" is the
+  *correct* answer to "scan now", not a failure; enqueue is `ON CONFLICT DO NOTHING`, which is what
+  makes a double-press idempotent — no duplicates, no `409`, no `500`.
+- **`eligible`** — `queued + skipped`: the number of `(user, library-provider app, host)` triples the
+  request matched **at all**.
+- **`inert_reason`** — `""` when the call could do work; otherwise the reason it could not.
+
+**`eligible` is the non-obvious field, and it is here because two zeros mean opposite things.**
+`queued: 0` with `eligible > 0` means *everything is already queued — wait for the agent to claim
+it*. `queued: 0` with `eligible: 0` means *your scope matched nothing — fix the scope*. One says do
+nothing, the other says do something, and **without `eligible` a client cannot tell them apart**.
+That is the same ambiguity §Storage-driver limitation exists to close: under auto-publish, silence
+is indistinguishable from success, so **no path through this endpoint returns a bare zero** — an
+`eligible: 0` also carries an `inert_reason` naming the eligibility rule that matched nothing.
+
+**Scoping.** `app_id` narrows to one **library-provider** app, `user_id` to one user; either, both,
+or neither. A **non-provider `app_id` is `400 validation_failed`**, reusing the rule the four
+`/v1/admin/apps/{id}/library/*` routes already apply and for the identical reason — a scope naming an
+app the reconciler will never read is permanently inert, and the operator most likely to write one
+is already hunting for why nothing happens. An `app_id` naming an app that **does not exist at all**
+is `404 not_found` — the same two-mistakes-two-fixes split the sibling routes make, applied to a
+body field. A malformed UUID in either field is `400`; malformed JSON is `400`; **an absent body is
+not an error**, because "everything, now" is what the admin button sends.
+
+**Order of checks, which is observable and therefore contractual: inertness is answered before the
+scope is.** A request carrying a non-provider or non-existent `app_id` against an instance where
+discovery is switched off (or `volume`-backed, or interval-`0`) is the **`200` with `inert_reason`**,
+not the `400`/`404`. That is the right order rather than an accident of the code: the instance-level
+answer is the one that explains why *nothing at all* can happen, and reporting a scope defect first
+would send an operator fixing an app id on a control plane that would have refused any scope. Body
+shape — malformed JSON, malformed UUID — is still rejected first, because a request the server
+cannot parse has no meaning to report an inert reason *for*.
+
+**Audited as `library.scan.force`**, target type `library`, with identifiers and counts only
+(`app_id`, `user_id`, `queued`, `skipped`, `eligible`) and no free text. This is an action that
+makes the entire fleet walk every user's home directory on demand, which is exactly the class of
+thing an operator later asks *"who did that, and when"* about. The request body is bounded at
+**64 KiB**; anything larger fails the decode and is the same `400` as malformed JSON.
+
+> **The same gate limit §Admin surfaces records above applies to this route, and is worth saying
+> rather than assuming otherwise.** `TestOpenAPIDrift` compares **path and method only**, so it
+> proves this route is documented and not that its status codes or its four response fields are; and
+> the API-conformance harness validates only the responses it actually drives, and it does not drive
+> this one. Both gates are green for this amendment and neither of them checked the part that
+> matters here — which is the reviewer reading the handler against this text.
 
 #### `GET /v1/admin/apps/{id}/library/unpublished` — "Seen, not published"
 ```json
@@ -3736,6 +3925,23 @@ decision exists to avoid.
 It is read **per pass and per request, never cached at boot**. A setting an admin flips in the UI
 must take effect without a restart; the artwork provider is the recorded precedent for what
 happens otherwise.
+
+**Enabling it now runs a pass promptly, and that is contractual behaviour of `PATCH
+/v1/admin/settings` even though the endpoint's shape does not change.** A `PATCH` that moves
+`library_discovery_enabled` **false→true** causes the janitor to run a pass without waiting for its
+next six-hourly tick. **true→true and false→false do not** — an admin re-saving the settings form to
+change the registration mode must not re-walk every home on the fleet, and there is nothing to run
+for a disable. Reading the switch per pass was never enough on its own: the pass that read `false`
+had already scheduled its successor hours out, so "no restart needed" and "takes effect now" were
+two different claims and only the first was true.
+
+**It is the transition that is observed, not the value.** The previous value is read `FOR UPDATE` in
+the **same transaction** as the write, so two admins saving concurrently cannot both see false→true
+and both trigger a pass. This is stated here because a client author reading only the endpoint's
+shape would reasonably assume that enabling discovery is inert until the next tick, and then build
+a UI that tells the operator to come back in six hours — which is exactly the expectation this
+closes. The nudge changes **when** a pass runs and nothing about what it does: the same code path,
+the same re-read of this switch, the same inert reasons.
 
 Two environment knobs sit beside it and **neither is a second switch**:
 

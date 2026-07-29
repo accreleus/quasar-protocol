@@ -673,6 +673,8 @@ paths:
 
   # ─── library discovery, admin surfaces (Steam library discovery Phase 4) ──
   # Purely additive: five admin routes, no existing shape or behaviour changed.
+  # (A sixth, POST /v1/admin/library/scan, was added by the force-scan follow-on
+  # below - also additive, also with agent-api.md byte-identical.)
   # The suppression ladder these serve, per observed appid, first match wins:
   #   1. an `allow` rule exists                                    -> publish
   #   2. an `ignore` rule exists                                   -> suppress
@@ -703,6 +705,62 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "500": { description: Could not read settings or scan counts. , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  # ─── force scan (Phase 4 follow-on) ──────────────────────────────────────
+  # Additive, admin-gated, no migration, agent-api.md STILL byte-identical.
+  # Discovery shipped paced by TWO independent 6h timers, each anchored to its
+  # own process's boot rather than to the moment an operator enables the
+  # feature: the janitor decides when a scan is enqueued, the agent's poll
+  # decides when it is claimed. Enabling discovery could take up to TWELVE hours
+  # to produce one tile, and this is a PULL channel, so the control plane cannot
+  # push. Two changes fix it and they are one idea: the agent's poll dropped from
+  # 6h to 60s (agent behaviour, not wire shape - a poll is one indexed query,
+  # while the filesystem walk stays paced by QUASAR_LIBRARY_SCAN_INTERVAL), and
+  # this route. A "scan now" button in front of a 6h poll would have made an
+  # operator wait six hours for their own button.
+  /v1/admin/library/scan:
+    post:
+      tags: [admin]
+      summary: "\"Scan now\": enqueue pending scans immediately, bypassing the recency pacing."
+      description: >-
+        IT BYPASSES PACING AND NEVER A GATE. What it drops is the janitor's "no successful scan for
+        this triple inside QUASAR_LIBRARY_SCAN_INTERVAL" predicate - the rule that stops a six-hourly
+        sweep re-walking every home on every pass, and precisely the rule an operator who just
+        installed a game or just fixed a home mount is overriding on purpose. Every GATE still
+        applies and is still reported: the library_discovery_enabled switch, the 'volume' storage
+        provider, QUASAR_LIBRARY_SCAN_INTERVAL=0 as the hard kill switch, and the per-home
+        provider='local' filter (enforced inside the enqueue, so a volume-backed home on an
+        otherwise-local instance is never forced into a pending row nothing could claim).
+        AN INERT INSTANCE IS A 200 CARRYING inert_reason, DELIBERATELY NOT A 409 OR A 400. It mirrors
+        GET /v1/admin/library/status, whose inert_reason exists for exactly this question, so a
+        client renders ONE code path for "here is what happened" and "here is why nothing did"; the
+        server computes both surfaces' reasons through one shared helper so the wording cannot drift
+        between the status panel and the button.
+        Scope is optional and AN EMPTY BODY IS VALID, meaning "everything, now" - the common case and
+        what the admin button sends. A non-provider app_id is 400 and an app_id that does not exist
+        at all is 404, reusing the two-mistakes-two-fixes split the four /v1/admin/apps/{id}/library/*
+        routes already apply rather than inventing a second vocabulary for the same mistake; a
+        malformed uuid or malformed JSON is likewise 400.
+        ORDER OF CHECKS IS OBSERVABLE AND THEREFORE CONTRACTUAL: body shape first (400), then
+        INERTNESS (200 + inert_reason), then the scope (400/404). A bad app_id on a switched-off
+        instance is the 200, not the 400 - the instance-level answer explains why nothing at all can
+        happen, and reporting a scope defect first would send an operator fixing an app id on a
+        control plane that would have refused any scope.
+        Double-press is IDEMPOTENT: library_scans_open_uk is partial on pending/claimed and the
+        enqueue is ON CONFLICT DO NOTHING, so the second press inserts nothing, reports it as
+        `skipped`, and is not an error.
+        Audited as library.scan.force, identifiers and counts only - this makes the whole fleet walk
+        every user's home directory on demand.
+      x-required-role: admin
+      requestBody:
+        required: false
+        content: { application/json: { schema: { $ref: "#/components/schemas/LibraryForceScanRequest" } } }
+      responses:
+        "200": { description: "Enqueued, or inert with a stated reason.", content: { application/json: { schema: { $ref: "#/components/schemas/LibraryForceScanResult" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { description: Could not read settings or enqueue scans. , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
   /v1/admin/apps/{id}/library/unpublished:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     get:
@@ -4657,3 +4715,62 @@ components:
             operator otherwise - and leaving them to conclude from an unchanged library that nobody
             has any games installed is the failure this closes.
         scans: { $ref: "#/components/schemas/LibraryScanCounts" }
+    LibraryForceScanRequest:
+      type: object
+      description: >-
+        The optional scope for a force scan. EVERY FIELD IS OPTIONAL AND AN EMPTY BODY IS VALID,
+        meaning "everything, now" - the common case, and what the admin UI's button sends. An absent
+        body is not an error; only malformed JSON is.
+      properties:
+        app_id:
+          type: string
+          format: uuid
+          description: >-
+            Narrow to one LIBRARY-PROVIDER app. A real app that is not a library provider is 400
+            validation_failed - the same rule the four /v1/admin/apps/{id}/library/* routes apply,
+            reused rather than given a second vocabulary, because it is the same operator mistake: a
+            scope naming an app the reconciler will never read can only ever produce a bare zero. An
+            app id that does not exist at all is 404 - the app being REAL is what makes the other one
+            a 400. A malformed uuid is also 400 (a format guard at the handler, so it is never a
+            Postgres 22P02 surfacing as a 500).
+        user_id:
+          type: string
+          format: uuid
+          description: "Narrow to one user. Malformed uuid is 400."
+    LibraryForceScanResult:
+      type: object
+      description: >-
+        What one force scan actually did. THERE IS NO PATH THROUGH THIS ENDPOINT THAT RETURNS A BARE
+        ZERO: either work was queued, or something already had it queued, or inert_reason says why
+        not. Under auto-publish silence is indistinguishable from success, which is the same
+        ambiguity GET /v1/admin/library/status exists to close.
+      required: [queued, skipped, eligible, inert_reason]
+      properties:
+        queued:
+          type: integer
+          description: "'pending' library_scans rows actually inserted by this call."
+        skipped:
+          type: integer
+          description: >-
+            Triples that already had an OPEN scan (pending or claimed). NOT AN ERROR COUNT:
+            library_scans_open_uk is partial on those two states, so "already queued" is the CORRECT
+            answer to "scan now", not a failure. Enqueue is ON CONFLICT DO NOTHING, which is what
+            makes a double-press idempotent - no duplicates, no 409, no 500.
+        eligible:
+          type: integer
+          description: >-
+            queued + skipped: the (user, library-provider app, host) triples this request matched AT
+            ALL. THIS IS THE NON-OBVIOUS FIELD AND IT IS WHY IT EXISTS - two zeros mean opposite
+            things. queued:0 with eligible>0 means "everything is already queued, wait for the agent
+            to claim it"; queued:0 with eligible:0 means "your scope matched nothing, fix the scope".
+            One says do nothing, the other says do something, and without this field a client cannot
+            tell them apart.
+        inert_reason:
+          type: string
+          description: >-
+            "" when the call could do work; otherwise why it could not - the switch is off,
+            QUASAR_LIBRARY_SCAN_INTERVAL is 0, or the instance storage provider is 'volume'. AN INERT
+            INSTANCE IS THIS 200 AND NOT A 4xx, mirroring GET /v1/admin/library/status so a client
+            has one code path; the two surfaces share one server-side helper so their wording cannot
+            drift. An eligible:0 result also carries a reason here - naming the eligibility rule that
+            matched nothing - rather than a silent zero.
