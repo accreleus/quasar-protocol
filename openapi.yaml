@@ -713,10 +713,24 @@ paths:
         suppressed appid has no tile, so without this a game the built-in denylist wrongly caught
         would be invisible, with no surface on which an admin could find it - let alone allow it.
         It is a read of one table and a button, NOT a review queue: nothing waits on it, and the
-        feature is fully correct for an operator who never opens it. {id} is the PROVIDER app.
+        feature is fully correct for an operator who never opens it.
+        {id} MUST BE A LIBRARY PROVIDER, and the refusal is 400 rather than 404 - deliberately, and
+        never 200. A 200 would be the trap: these routes are keyed on (parent_app_id,
+        external_source, external_id) and the reconciler only reads rules whose parent carries
+        library_provider='steam', so anything addressed at an ordinary app is permanently inert, and
+        the operator most likely to do it is the one already hunting for why a rule "isn't working".
+        404 is wrong because the app is REAL - "no such app" and "the app is fine but unmarked" are
+        two different mistakes with two different fixes, and collapsing them sends someone looking
+        for a missing app that is sitting right there. The message names the remedy (set Library
+        provider to Steam on the app) so it is ACTIONABLE, but as everywhere else it is for a human
+        and MUST NOT BE PARSED - only `code` is contractual.
+        The check reads library_provider and NEVER kind: an app styled as a Launcher without a
+        provider set must fail it, and a provider app left at kind='game' must pass. That is
+        §Derived tiles' "no server path branches on kind" promise cutting both ways.
       x-required-role: admin
       responses:
         "200": { description: OK., content: { application/json: { schema: { $ref: "#/components/schemas/LibraryUnpublishedList" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -729,9 +743,13 @@ paths:
         Phase 4. Newest first. Layer 1 is a code constant and updating it is a release; this is the
         layer an operator can write, and it is overlaid at runtime OVER layer 1 - which is what
         makes a wrongly-denylisted game recoverable without waiting for a deploy.
+        Same {id} rule as the sibling reads: 400 validation_failed for a REAL app that is not a
+        library provider, 404 only for an app id that does not exist. Two different operator
+        mistakes, two different fixes.
       x-required-role: admin
       responses:
         "200": { description: OK., content: { application/json: { schema: { $ref: "#/components/schemas/LibraryRuleList" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -759,6 +777,9 @@ paths:
         to discovery, and an un-ignore must not override the admin who did it.
         The primary key (parent_app_id, external_source, external_id) is the idempotency key, so a
         repeat is a REPLACE and never an accumulation. Audited as app.library.rule.set.
+        The 400 on this route now covers TWO causes: a malformed appid, and a real {id} that is not
+        a library provider - the latter checked INSIDE the write transaction, so a concurrent
+        un-marking of the provider cannot slip a rule in behind it.
       x-required-role: admin
       requestBody:
         required: true
@@ -776,7 +797,11 @@ paths:
         Phase 4. Enables and disables NOTHING by itself - the next scan applies the ladder afresh.
         Takes the same optional ?external_source= (default "steam"); unlike the PUT it does not
         reject an unknown source with a 400, because an unknown source simply matches no rule and is
-        therefore the 404 it already is. Audited as app.library.rule.delete.
+        therefore the 404 it already is. It DOES reject a real {id} that is not a library provider
+        with a 400, like its three siblings. Its 404 deliberately collapses "no such app" and "no
+        such rule" - the caller is deleting something that is not there either way, and separating
+        them would confirm the existence of an app id to a request that named a rule.
+        Audited as app.library.rule.delete.
       x-required-role: admin
       parameters:
         - name: external_source

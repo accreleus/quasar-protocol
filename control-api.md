@@ -646,6 +646,18 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > changes, and no new error code** (`validation_failed` 400, `unauthorized` 401, `not_found` 404
 > and `conflict` 409 are all reused).
 >
+> **`{id}` on the four `/v1/admin/apps/{id}/library/*` routes must be a library provider, and the
+> refusal is `400`, not `404` and never `200`** (§Library discovery). These routes are keyed on
+> `(parent_app_id, external_source, external_id)` and the reconciler only reads rules whose parent
+> carries `library_provider='steam'`, so a rule written against an ordinary app would store, be
+> acknowledged, and be **permanently inert** — a success response for a request that can never have
+> an effect, handed to the one operator already hunting for why a rule "isn't working". `400`
+> rather than `404` because the app is **real**: those are two different mistakes with two
+> different fixes, and collapsing them sends someone looking for a missing app that is sitting
+> right there. The check reads **`library_provider`, never `kind`** — §Derived tiles' promise that
+> no server path branches on `kind` cuts both ways here, so an app *styled* as a Launcher without a
+> provider set must fail it.
+>
 > **This one really is additive, and the contrast with Phase 2 is the point.** Phase 2 introduced
 > an authorization object and then made five existing endpoints obey it; that is why it was
 > recorded as breaking and signed off as such. Phase 4 adds a surface and changes nothing that
@@ -818,8 +830,8 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `DELETE /v1/admin/apps/{id}/entitlements/{entitlement_id}` | **admin** | *(Phase 2)* revoke — **scoped to the app in the path**, so an entitlement id belonging to another app is `404`, not a cross-app delete |
 | `GET /v1/admin/users/{id}/entitlements` | **admin** | *(Phase 2)* **this user's personal grants only** — deliberately *not* the `all` rows they also benefit from; see §Entitlements for why |
 | `GET /v1/admin/library/status` | **admin** | *(Steam library discovery Phase 4)* is discovery actually doing anything, **and if not, why** — the switch, the interval, the storage provider, the opt-in lookup, an `inert_reason` and the per-state scan census |
-| `GET /v1/admin/apps/{id}/library/unpublished` | **admin** | *(Phase 4)* **"Seen, not published"** — every appid observed under this provider app that has no enabled tile, and which layer suppressed it. A read of one table and a button, not a review queue: nothing waits on it |
-| `GET /v1/admin/apps/{id}/library/rules` | **admin** | *(Phase 4)* the operator-written layer-2 rules on this provider app |
+| `GET /v1/admin/apps/{id}/library/unpublished` | **admin** | *(Phase 4)* **"Seen, not published"** — every appid observed under this provider app that has no enabled tile, and which layer suppressed it. A read of one table and a button, not a review queue: nothing waits on it. **`{id}` must be a library provider: `400` for a real app that is not one, `404` only for one that does not exist** |
+| `GET /v1/admin/apps/{id}/library/rules` | **admin** | *(Phase 4)* the operator-written layer-2 rules on this provider app. Same `{id}` rule: `400` for a real non-provider app, `404` for a missing one |
 | `PUT /v1/admin/apps/{id}/library/rules/{external_id}` | **admin** | *(Phase 4)* **Ignore and un-ignore, one route, two directions** — `rule:"ignore"` suppresses fleet-wide (rule row + disable the tile + revoke its provider entitlements, in one transaction), `rule:"allow"` outranks the built-in denylist. The primary key is the idempotency key, so a repeat is a replace. Audited as `app.library.rule.set` |
 | `DELETE /v1/admin/apps/{id}/library/rules/{external_id}` | **admin** | *(Phase 4)* drop a rule, returning the appid to whatever the built-in denylist says about it. Re-enables and disables nothing by itself — the next scan applies the ladder afresh. Audited as `app.library.rule.delete` |
 | `GET /v1/admin/runtime-presets`, `GET /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* read the shared runtime presets, each with its `used_by` app list |
@@ -3588,6 +3600,43 @@ the appid to whatever layer 1 says about it, and the next scan applies the ladde
 
 ### Admin surfaces
 
+**`{id}` must be a library provider on all four of the `/v1/admin/apps/{id}/library/*` routes,
+and the refusal is `400 validation_failed` — deliberately not `404`, and emphatically not `200`.**
+
+**Why not `200`.** Every one of these routes is keyed on
+`(parent_app_id, external_source, external_id)`, and the reconciler only ever reads rules whose
+parent carries `library_provider='steam'`. So a rule written against an ordinary app **stores
+fine, is acknowledged, and is permanently inert** — and the operator most likely to write one is
+precisely the operator already hunting for why a rule "isn't working". **A success response for a
+request that can never have an effect is worse than a failure**, because it removes the one signal
+that would have ended the search.
+
+**Why not `404`.** The app is real. `404` and `400` here are **two different operator mistakes
+with two different fixes**: `404` means the app id does not exist, and `400` means the app is fine
+and only the marking is missing. Collapsing them would send someone hunting for a missing app that
+is sitting right there. The server's message names the remedy — *set Library provider to Steam on
+the app first* — so it is **actionable**, and the usual rule still applies: **clients must not
+parse it**, only the `code` is contractual.
+
+**The check reads `library_provider` and never `kind`.** §Derived tiles' promise that no server
+path may branch on `apps.kind` is load-bearing here in both directions: a provider app an operator
+left at `kind='game'` must pass, and an app they styled as a **Launcher** without setting a
+provider must **not**. Styling is not configuration. There is a test whose negative case is
+deliberately a `kind='launcher'` non-provider app, because this is exactly the check a future
+reader could "simplify" in the wrong direction.
+
+`DELETE …/rules/{external_id}` keeps collapsing "no such app" and "no such rule" into one
+`404 rule not found` — distinguishing them would confirm the existence of an app id to a request
+that named a rule — but a real non-provider app is the `400` above, not that `404`.
+
+> **No automated gate caught this omission, and that is worth recording rather than filing as a
+> near-miss.** `TestOpenAPIDrift` compares **path and method only**, so a route documented with the
+> wrong status-code set is invisible to it; and the API-conformance harness validates only the
+> responses it actually drives, and it drives none of these four. That is a real and known limit of
+> both gates rather than a failure of either — they answer *"does this route exist in both places"*
+> and *"is this response well-shaped"*, and neither answers *"is every refusal documented"*. The
+> only thing that closes that gap is a reviewer reading the handler, which is what happened here.
+
 #### `GET /v1/admin/library/status`
 ```json
 { "enabled": false, "storage_provider": "auto", "scan_interval_secs": 21600,
@@ -3610,6 +3659,9 @@ what their `6h` actually became.
                "name": "Proton Experimental", "suppressed_by": "builtin_appid",
                "users": 3, "last_seen_at": "…", "has_tile": false } ] }
 ```
+
+`400 validation_failed` when `{id}` is a real app that is not a library provider (above);
+`404 not_found` when it does not exist at all.
 
 Every appid observed under this provider app that has **no enabled tile**. This read is why
 observations record suppressed appids at all: a suppressed appid has no tile, so without it a game
@@ -3639,6 +3691,8 @@ entry).
 ```
 Newest first. `created_by` is the acting admin and is `null` once that account is deleted —
 deleting the operator who wrote a rule must not silently un-suppress every appid they ignored.
+Same `{id}` rule as the read above: `400` for a real non-provider app, `404` for one that does not
+exist.
 
 #### `PUT /v1/admin/apps/{id}/library/rules/{external_id}`
 Body `{ "rule": "ignore" | "allow", "note": "…", "external_source": "steam" }`. `note` is optional

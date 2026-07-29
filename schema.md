@@ -1662,7 +1662,7 @@ field capable of holding a sixth value even if the parser were wrong.
 
 | column | type | notes |
 |---|---|---|
-| `parent_app_id` | `UUID` NOT NULL → `apps(id)` **ON DELETE CASCADE** | the provider app the rule applies under. Rules are per-provider-app, not global. |
+| `parent_app_id` | `UUID` NOT NULL → `apps(id)` **ON DELETE CASCADE** | the provider app the rule applies under. Rules are per-provider-app, not global. **The FK only requires an `apps` row, so "and it must actually be a library provider" is a WRITE-PATH rule, enforced at the handler as `400 validation_failed` and re-checked inside the write transaction** (`control-api.md`). It is not a `CHECK` because `library_provider` lives on a different table and a row `CHECK` cannot see it; the consequence a reader should hold onto is that the constraint set alone would happily store a rule the reconciler can never read, since the reconciler only ever joins rules whose parent carries `library_provider='steam'`. |
 | `external_source` | `TEXT` NOT NULL | `'steam'` today. |
 | `external_id` | `TEXT` NOT NULL | `CHECK (external_id ~ '^[1-9][0-9]{0,9}$')`. **This table needs the `CHECK` more than `apps` does**: it is **admin-writable and takes an appid straight from an HTTP body**, and the value ends up in `STEAM_STARTUP_FLAGS` via a tile. The handler validates first so a bad value is a `400` and not a `500`; the `CHECK` is the durable guard and the only one that survives an admin editing the row later. |
 | `rule` | `TEXT` NOT NULL | `CHECK (rule IN ('ignore','allow'))`. `'ignore'` suppresses an appid the built-in denylist does not know about; `'allow'` un-suppresses a game it wrongly caught. |
