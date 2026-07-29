@@ -571,9 +571,8 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > **`library_provider`** (`"" | "steam"`). `AppWrite` accepts `parent_app_id` (tri-state on patch,
 > like `runtime_preset_id`) and `library_provider` (explicit `""` valid, like `external_source`) —
 > **but never `origin`**, which is provenance the server sets and the Phase 4 reconciler reads.
-*(Known discrepancy pending sign-off: the Phase 3 implementation currently also accepts `origin` on
-write. §Derived tiles records both the shape and the argument; the contract keeps the narrower one,
-which is the recoverable direction.)*
+> Sending it is `400` — enforced by `DisallowUnknownFields()` rather than a field-specific branch,
+> so the message is the generic malformed-body one (§Derived tiles).
 >
 > **`DELETE /v1/apps/{id}` gains a second refusal**, reusing the generic `conflict` code:
 > deleting an app that has derived tiles is `409` with the tiles **listed** in
@@ -3147,21 +3146,33 @@ Two rules the database **cannot** express as a row `CHECK` are enforced at the h
   patched-or-stored** shape, not the request alone, so a two-request path cannot assemble a state
   that a single request would be refused for.
 
-**`origin` should be read-only, and this contract does not declare it on `AppWrite`.** An admin
-create is `'manual'` by construction; only a library-discovery sync writes `'discovered'`
-(Phase 4, nothing writes it yet). The write path buys no capability the reconciler needs, and both
-directions are footguns under `apps_parent_external_uk`: a tile relabelled `'manual'` still
-occupies its `(parent, source, appid)` slot, so a reconciler reading it as *"not mine, therefore
-missing"* cannot re-create it either — a resurrection loop with no visible cause. The mirror case
-(hand-creating a tile pre-labelled `'discovered'` so a sweep adopts it) has the same root cause.
+**`origin` is read-only and is deliberately not on `AppWrite`.** An admin create is `'manual'` by
+construction; only a library-discovery sync writes `'discovered'` (Phase 4, nothing writes it yet),
+so the write path buys no capability anything needs.
 
-> **Known discrepancy, pending sign-off, recorded rather than papered over.** The Phase 3
-> control-plane implementation currently **also accepts `origin` on create and patch**, because the
-> implementation brief specified it in terms. This contract keeps the narrower shape deliberately:
-> it is the safe direction — the server tolerates a field the contract tells nobody to send, which
-> is recoverable, where the reverse would not be. **Clients: do not send it.** If the operator
-> rules the other way, the property is added here and to `openapi.yaml`; until then a reader should
-> not conclude that either side simply missed it.
+**What settles it is that BOTH relabel directions are footguns under `apps_parent_external_uk`**,
+and it is worth stating because the first instinct is that only one of them is:
+
+- Relabelling a discovered tile `'manual'` — the obvious *"stop the reconciler managing this"*
+  move — does not stop it. The tile still occupies its `(parent, source, appid)` slot, so a
+  reconciler reading it as *"not mine, therefore missing"* **cannot re-create it either**: a
+  resurrection loop with no visible cause. The specified way to suppress a tile is the
+  `library_appid_rules` Ignore rule, which is durable and idempotent across every sweep.
+- Hand-creating a tile pre-labelled `'discovered'` so a sweep adopts it has the **same root cause**
+  from the other side.
+
+The field being unwritable removes both. It also matches this API's standing rule for provenance:
+`entitlements.granted_by` is likewise never client-settable, and `favourite` is resolved rather
+than assertable.
+
+> **The enforcement is `DisallowUnknownFields()`, not a field-specific rejection branch, and the
+> error message reflects that.** Because `origin` is simply absent from `AppWrite`, sending
+> `{"origin": "discovered"}` to `POST /v1/apps` or `PATCH /v1/apps/{id}` is
+> **`400 validation_failed` with the generic malformed-JSON-body message** — the same answer any
+> unknown key on this shape gets — rather than a message naming the field. A client author
+> debugging a `400` here should look for a stray `origin` in the body, not for a validator. On
+> both verbs the request is rejected *whole*: no app row is created, and no stored value is
+> touched.
 
 ### Deleting a provider app
 

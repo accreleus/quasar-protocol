@@ -2911,18 +2911,19 @@ components:
                 on write would let an operator mislabel a hand-made tile as discovered - and the
                 reconciler keys its create/suppress behaviour off provenance, so a lie here is a
                 lie to a background job rather than a cosmetic one.
+                BOTH relabel directions are footguns under apps_parent_external_uk, which is what
+                settles it: a tile relabelled 'manual' still occupies its (parent, source, appid)
+                slot, so a reconciler reading it as "not mine, therefore missing" cannot re-create
+                it either - a resurrection loop with no visible cause - and hand-creating a tile
+                pre-labelled 'discovered' so a sweep adopts it has the same root cause. The field
+                being unwritable removes both.
+                ENFORCEMENT IS DisallowUnknownFields, NOT A FIELD-SPECIFIC BRANCH. Because this
+                property is absent from AppWrite, sending {"origin": ...} to POST /v1/apps or
+                PATCH /v1/apps/{id} is 400 validation_failed with the generic malformed-body
+                message, not a message naming `origin`. That is the same mechanism that rejects
+                any unknown key on this shape; do not expect a bespoke error string.
                 Admin-only, like runtime_preset_id: it is operator/provenance detail, not library
                 presentation, so it is not on AppListItem.
-                KNOWN DISCREPANCY PENDING SIGN-OFF (recorded rather than papered over): the Phase 3
-                control-plane implementation currently ALSO accepts `origin` on create and patch.
-                This schema deliberately does not declare it, because the write path buys no
-                capability the reconciler needs and both directions are footguns under
-                apps_parent_external_uk - a tile relabelled 'manual' still occupies its
-                (parent, source, appid) slot, so a reconciler that reads it as "not mine, therefore
-                missing" cannot re-create it either, which is a resurrection loop with no visible
-                cause. Clients: do not send it. If the operator rules the other way this schema
-                gains the property; until then the narrower contract is the safe direction, since
-                the server tolerates a field the contract tells nobody to send.
             library_provider:
               allOf: [ { $ref: "#/components/schemas/LibraryProvider" } ]
               description: >-
