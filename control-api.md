@@ -467,6 +467,69 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > a control plane without this amendment is a hard `400`. See
 > `docs/design/plans/2026-07-29-steam-library-discovery-spec.md` §4.1, §10, §12 and §13 "Phase 1".
 
+> **Amendment — Steam library discovery, Phase 2 (entitlements). NOT ADDITIVE. Requires Opus +
+> explicit human sign-off.** Recorded honestly rather than dressed up as additive, in the same
+> idiom as UI-P1 (5) and UI-P4.
+>
+> **Read the blast radius before the shape.** This introduces an **authorization object** —
+> *"which subjects may see and launch which apps"* — and then makes **five existing endpoints
+> obey it**. Nothing about that is a new field on a new route:
+>
+> | endpoint | before | after |
+> |---|---|---|
+> | `GET /v1/apps` | every enabled app, for every caller | **only apps the caller is entitled to**, for **every role including admin** |
+> | `GET /v1/apps/{id}` | `404` iff absent or disabled | non-admin: **`404` also when not entitled**. The pre-existing admin branch is **unchanged** (see below) |
+> | `PUT /v1/me/favourites/{app_id}` | `204` / `404` | **`403 forbidden`** when the caller is not entitled |
+> | `POST /v1/sessions` | `409`/`503` refusals | **new terminal `403 forbidden`** when the caller is not entitled to `app_id` |
+> | `POST /v1/sessions/{id}/swap` | `404`/`409` refusals | **new terminal `403 forbidden`** when the **session owner** is not entitled to the target app |
+>
+> **A client that reads `GET /v1/apps` and shows what it gets keeps working and needs no change.**
+> What changes for a client is that the list can now be *shorter than the catalogue*, and that
+> two writes it previously only had to defend against `404`/`409` can now answer `403`. `403` on
+> `POST /v1/sessions` and on the swap is a **new terminal status on an existing endpoint** — the
+> reason this amendment is not additive, and the reason it is signed off rather than glanced at.
+>
+> **`GET /v1/admin/apps` is untouched and stays the unfiltered god view.** That is what makes
+> filtering `GET /v1/apps` for admins acceptable: nothing becomes unreachable, it moves to the
+> route that already means "the whole fleet's catalogue".
+>
+> **Day one, nothing changes for anybody.** Migration 0043 creates the table **and backfills an
+> `('all', granted_by='migration')` row for every existing app in the same transaction**, so the
+> filter's first evaluation returns exactly what the unfiltered query returned. That is not a
+> convenience: turning filtering on against an empty table blanks **every** user's library on
+> **every** deployment simultaneously, and it would ship — the migration applies, the service
+> boots, `go-test-db` passes (tests create their own entitlements) and the web build passes.
+> **The backfill is the only gate between those two outcomes.** See `schema.md`.
+>
+> **Four new admin routes**, `RequireAuth → RequireAdmin` like every other admin route, and they
+> are the **only** way to widen visibility — which is precisely what lets the list and the launch
+> stay filtered for admins too. `GET`/`POST /v1/admin/apps/{id}/entitlements`,
+> `DELETE /v1/admin/apps/{id}/entitlements/{entitlement_id}`, and
+> `GET /v1/admin/users/{id}/entitlements`.
+>
+> **One new optional request field**, `entitle` on `POST /v1/apps` (`"all" | "none"`, default
+> `"all"`). It is the mirror of the backfill: without a default grant, *"I made an app and nobody
+> can see it"* becomes the new default experience.
+>
+> **There is no role bypass anywhere in the enforcement path, and there must never be one.** An
+> admin who cannot see something **grants themselves the entitlement**, which is one audited call.
+> An `if isAdmin { skip }` arm in the filter or the launch check is the exact shape of the
+> client-side-admin-flag defect class `CLAUDE.md` invariant #6 exists to forbid, and it is the one
+> code path nobody tests.
+>
+> **The filtered list is UX. `POST /v1/sessions` is the authorization boundary** — the check runs
+> **inside the scheduling transaction, before placement**, so a client that ignores the list and
+> posts an app id directly is refused there, and nothing is reserved for a launch that will fail.
+>
+> Backed by `schema.md` (the `entitlements` table, its two **partial** unique indexes, its shape
+> `CHECK`, and the 0043 backfill) and `openapi.yaml` (four paths + the `Entitlement` shapes +
+> `AppWrite.entitle`). **`agent-api.md` is byte-identical** — the whole Steam library discovery
+> spec deliberately avoids touching the agent contract (spec §14: `agent-api.md` appears in no
+> phase's contract row). `signaling.md`, `input.md`, `native-client.md` are unchanged. **Rollout
+> order: control plane before client**, and the client re-pin is scheduled **with** this phase
+> rather than batched to the end, because the client's library listing narrows here. See
+> `docs/design/plans/2026-07-29-steam-library-discovery-spec.md` §6 and §13 "Phase 2".
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -534,6 +597,10 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `POST /v1/apps` | **admin** | create an app — *(UI-P5)* including its `launchable_profile_ids` allow-list |
 | `PATCH /v1/apps/{id}` | **admin** | edit an app — *(UI-P5)* including its `launchable_profile_ids` allow-list. **UI-P5 adds no new route**: the allow-list rides these two, which are already `RequireAuth → RequireAdmin`, so a non-admin bearer is `403` before the field is ever looked at |
 | `DELETE /v1/apps/{id}` | **admin** | *(admin-delete)* remove an app from the catalog — refuse-if-in-use |
+| `GET /v1/admin/apps/{id}/entitlements` | **admin** | *(Steam library discovery Phase 2)* who may see and launch this app — the `all` row first, then the personal grants |
+| `POST /v1/admin/apps/{id}/entitlements` | **admin** | *(Phase 2)* grant — `{subject_type, subject_id}`; `409 conflict` if that subject already holds one |
+| `DELETE /v1/admin/apps/{id}/entitlements/{entitlement_id}` | **admin** | *(Phase 2)* revoke — **scoped to the app in the path**, so an entitlement id belonging to another app is `404`, not a cross-app delete |
+| `GET /v1/admin/users/{id}/entitlements` | **admin** | *(Phase 2)* **this user's personal grants only** — deliberately *not* the `all` rows they also benefit from; see §Entitlements for why |
 | `GET /v1/admin/runtime-presets`, `GET /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* read the shared runtime presets, each with its `used_by` app list |
 | `POST /v1/admin/runtime-presets` | **admin** | *(UI-P3)* create a runtime preset |
 | `PATCH /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* edit a runtime preset — takes effect on the **next launch** of every app using it, with no app edit |
@@ -550,9 +617,9 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/hosts`, `GET /v1/hosts/{id}` | **admin** | host/capacity oversight |
 | `POST /v1/hosts/{id}/drain`, `POST /v1/hosts/{id}/uncordon` | **admin** | *(P3-01)* host lifecycle — cordon a host out of service / return it |
 | `DELETE /v1/hosts/{id}` | **admin** | *(admin-delete)* forget an offline host — refuse-if-online-or-in-use |
-| `GET /v1/apps`, `GET /v1/apps/{id}` | user | the library — **both reads require auth** *(UI-P1: the list was public until 2026-07-27; see the breaking-change amendment. `favourite` is resolved from the bearer identity, so an anonymous read could not answer it anyway)* |
+| `GET /v1/apps`, `GET /v1/apps/{id}` | user | the library — **both reads require auth** *(UI-P1: the list was public until 2026-07-27; see the breaking-change amendment. `favourite` is resolved from the bearer identity, so an anonymous read could not answer it anyway)*. **(Phase 2: both are now entitlement-scoped — the list for every role including admin, the single read for non-admins as a `404`. This is not a role gate and produces no `403`; an entitlement is a per-subject grant, not a role. The unfiltered catalogue is `GET /v1/admin/apps`.)** |
 | `GET /v1/sessions/{id}`, `GET /v1/sessions`, `DELETE /v1/sessions/{id}` | **owner or admin** | resource-ownership check (`403` otherwise), not a blanket admin gate |
-| `POST /v1/sessions/{id}/swap` | **owner or admin** | *(P2-02)* same ownership check as `DELETE` |
+| `POST /v1/sessions/{id}/swap` | **owner or admin** | *(P2-02)* same ownership check as `DELETE`. **(Phase 2: additionally `403 forbidden` when the **session owner** is not entitled to the target app — keyed on the owner, never on the caller, so an admin swapping someone else's session cannot launder their own entitlements into it)** |
 | `POST /v1/sessions/{id}/stats` | **owner or admin** | *(P4-01)* the client posts its own session's browser telemetry — same ownership check as `DELETE` |
 | `GET /v1/admin/sessions/{id}/metrics` | **admin** | *(P4-01)* per-session telemetry read (oversight) |
 | `POST /v1/me/devices` | user (self) | *(P4-01)* upsert the caller's own device capability; owner is the bearer identity, never a body field |
@@ -562,7 +629,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `GET /v1/me/storage` | user (self) | *(P5-01)* the caller's own per-app storage usage |
-| `PUT /v1/me/favourites/{app_id}` | user (self) | *(UI-P1)* favourite an app; owner is the bearer identity — no endpoint takes a `user_id`. Idempotent `204`; `404` under the same visibility rule as `GET /v1/apps/{id}` |
+| `PUT /v1/me/favourites/{app_id}` | user (self) | *(UI-P1)* favourite an app; owner is the bearer identity — no endpoint takes a `user_id`. Idempotent `204`; `404` under the same visibility rule as `GET /v1/apps/{id}`. **(Phase 2: `403 forbidden` when the caller is not entitled — checked *after* the `404`, and applied to every role including admin, because `/v1/me/*` is the user surface by definition)** |
 | `DELETE /v1/me/favourites/{app_id}` | user (self) | *(UI-P1)* unfavourite; idempotent **and unconditional** `204` for a well-formed UUID — deliberately never `404` |
 | `POST /v1/me/password` | user (self) | *(CP-01)* change the caller's own password; subject is the bearer identity, never a body field. Revokes all active tokens on success — client must re-authenticate |
 | `GET /v1/admin/settings` | **admin** | *(LP-SEC-01)* read instance settings (`registration_mode`, `storage_provider`, …) |
@@ -592,7 +659,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `POST /v1/admin/hosts/{id}/encoder-certification/cells/{sid}/finalize` | **admin** | *(SPT-06)* derive the verdict from real agent metrics, upsert + teardown |
 | `POST /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}/complete` | **admin** | *(SPT-06)* close the run (release the per-host lock) |
 | `GET /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}` | **admin** | *(SPT-05)* poll a run's status/progress |
-| everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account. *(UI-P5: `POST /v1/sessions` additionally refuses a `profile_id` outside the app's allow-list with `409 profile_not_launchable_for_app` — a per-app configuration rule, not a role check, which is why it is `409` and not the `403` this table's admin rows produce. It is refused for **every** non-admin caller, including one supplying an explicit `stream` override, which carries no role gate here)* |
+| everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account. *(UI-P5: `POST /v1/sessions` additionally refuses a `profile_id` outside the app's allow-list with `409 profile_not_launchable_for_app` — a per-app configuration rule, not a role check, which is why it is `409` and not the `403` this table's admin rows produce. It is refused for **every** non-admin caller, including one supplying an explicit `stream` override, which carries no role gate here.* ***Phase 2:** `POST /v1/sessions` additionally refuses an app the caller holds no entitlement for with `403 forbidden`. That one **is** `403` and not `409`, because unlike the allow-list it is a statement about the **caller** rather than about the request — and unlike this table's admin rows it is refused for **every** role, admin included)* |
 
 ### First-admin bootstrap (decision)
 A fresh database has no admin, and `/v1/auth/register` deliberately mints **only**
@@ -896,6 +963,8 @@ device id belongs to another user (no existence leak).
 Lists enabled apps (the library the user can launch). **`RequireAuth`** — `401` without a valid
 bearer. *(UI-P1, breaking: this list was unauthenticated until 2026-07-27; see the amendment
 block at the top of this document for what was exposed and why it changed.)*
+**(Steam library discovery Phase 2, non-additive: the list is now `enabled = true` **AND**
+entitled — see "Entitlement scope" below.)**
 ```json
 // 200
 { "items": [
@@ -910,6 +979,34 @@ block at the top of this document for what was exposed and why it changed.)*
 app/global profile policy when available, and otherwise falls back to the legacy
 `default_*` stream fields. `runtime_spec` and resource defaults are **not** exposed to
 clients (agent-internal / scheduler-internal). Disabled apps are omitted.
+
+**Entitlement scope *(Steam library discovery Phase 2 — this is the non-additive part)*.** An app
+appears here only if it is `enabled` **and** the caller holds an entitlement for it: either an
+`all` row (the app is visible to everyone) **or** a `('user', caller)` row. On day one every app
+carries an `all` row from the 0043 backfill, so the list is byte-identical to the pre-Phase-2 one;
+it narrows only as an admin deliberately narrows it.
+
+- **The filter applies to every role, admins included, and there is deliberately no bypass.** An
+  admin browsing the library is a user browsing *their own* library — a fleet-wide god view here
+  would be actively wrong once library discovery is on, since it would show every other user's
+  games. **The god view is `GET /v1/admin/apps`**, which is unfiltered and unchanged, so nothing
+  becomes unreachable; it moves to the route that already means "the whole catalogue". An admin
+  who wants an app in their *own* library grants themselves the entitlement — one call, and it
+  leaves an audit row, which `if isAdmin { skip }` does not.
+- **A caller holding both an `all` and a personal entitlement for one app sees it exactly once.**
+  The two are independent facts and the schema deliberately permits both to exist (revoking one
+  must not revoke the other), so this endpoint matches on **existence**, never by joining the
+  entitlement rows in. A join would emit the app twice, and because this list pages by offset with
+  a `limit + 1` overfetch, a duplicated row does not merely look untidy — it consumes a slot,
+  shifts the page boundary, and silently drops an app off the far end. It is stated here because
+  it is the kind of defect every single-user test passes.
+- **This is UX, not the authorization boundary.** The boundary is `POST /v1/sessions`. A client
+  that ignores this list and launches an app id directly is refused there, not here.
+- **A library-ordering consequence, stated because it is visible.** `apps` has no `sort_order` and
+  this list is `ORDER BY created_at DESC`, so newly entitled apps arrive at the top of an entitled
+  user's library all at once. Phase 2 alone cannot produce a batch (an admin grants one at a
+  time); Phase 4's discovery can. No ordering column is added here — that is a library-UX change
+  with its own design.
 
 *(UI-P4)* `default_profile_id` now names a **launch profile**, and `profile_policy` is
 `inherit | prefer | force` — **`custom` is gone** (see the UI-P4 amendment block). `display_stream`
@@ -952,6 +1049,31 @@ a decision, not an oversight.
 ### `GET /v1/apps/{id}`
 Single app, same fields as a list item — including `kind`, `external_source`/`external_id`, and
 the caller-resolved `favourite`. `404` if absent or disabled.
+
+**Entitlement scope *(Steam library discovery Phase 2)*: for a non-admin caller this is `404`
+when the caller is not entitled**, folded into the existing no-such-app answer rather than given
+its own status. This endpoint is already an existence check for a non-admin — a disabled app is
+`404` too — so collapsing "not entitled" into it leaks nothing and is the correct posture for a
+per-user library: the caller cannot tell "no such app" from "not yours". `403` is reserved for the
+two *writes* that follow (`PUT /v1/me/favourites/{app_id}`, `POST /v1/sessions`), where the caller
+has deliberately named a specific app and needs an actionable answer.
+
+> **The admin branch of this route is NOT entitlement-filtered, and that is deliberate. Do not
+> "fix" it.** This route has always had two behaviours: for a non-admin it is the library read
+> above; **for an admin it returns the full admin shape** — disabled apps included, `runtime_spec`
+> included. **It is the admin app-editor's loader** (`web/src/api/admin.ts:160`), and **there is no
+> `GET /v1/admin/apps/{id}` route** to move that load onto. Filtering it would make an app
+> **un-editable the instant an admin restricted it** — an operator lockout with no recovery inside
+> the product, reachable by using the feature exactly as intended.
+>
+> **The asymmetry, stated plainly so a future reader does not read it as a bug:** an admin can read
+> one app's detail here while that same app is **absent from their own `GET /v1/apps`**. That is
+> consistent, not contradictory — §Authorization's admin surface is "the whole fleet's
+> configuration", the library is "what *I* may launch", and this route serves both. Nothing an
+> admin can read here is anything `GET /v1/admin/apps` would not already hand them, so the
+> asymmetry concedes no information. **What it does not do is grant a launch:** `POST /v1/sessions`
+> and the swap are entitlement-checked for every role, so an admin who can *read* an app they have
+> restricted still cannot *run* it without granting themselves the entitlement.
 
 > Creating/editing apps and managing hosts (`GET/POST/PATCH /v1/apps`, `GET /v1/hosts`) is the
 > **admin** surface (`role=admin`), built in P1-3 against the same `schema.md`. The read shapes
@@ -1010,6 +1132,39 @@ fuzzy title matcher on the next sweep.
 > **Rollout order: control plane before client**, for the same reason as `kind` — `crud.decodeJSON`
 > sets `DisallowUnknownFields()`, so a client that sends either field to a control plane **without**
 > this amendment gets a hard `400 validation_failed`, not a silent ignore.
+
+**The app write shape and `entitle` (Steam library discovery, Phase 2).** `POST /v1/apps` gains one
+**optional** request field, `entitle`: `"all" | "none"`, **default `"all"`**.
+
+- **`"all"` (the default, and what an absent field means)** creates the app with an
+  `('all', granted_by='admin')` entitlement, so it is immediately visible to everyone — i.e.
+  **exactly the pre-entitlements behaviour of creating an app**. `"none"` creates it entitled to
+  nobody, for an admin who wants to configure access before anyone sees it.
+- **The default is the whole point and is not negotiable.** Once `GET /v1/apps` is
+  entitlement-filtered, a newly created app is invisible until something entitles it — so without
+  a default grant, *"I made an app and nobody can see it"* becomes the **default** experience. It
+  is the same failure as an un-backfilled migration (`schema.md`), one app at a time.
+- **CREATE-ONLY.** `entitle` is not accepted on `PATCH /v1/apps/{id}`; sending it there is
+  `400 validation_failed` (`crud.decodeJSON` sets `DisallowUnknownFields()`). It describes how an
+  app is *born*, not a property it carries — after creation, access is edited through the
+  entitlement routes above, which is the surface that produces an audit row and can express a
+  per-user grant. A patchable `entitle` would be a second, lossy way to say the same thing.
+- **`entitle` is not a stored column and is never returned on any read shape.** It is an
+  instruction to the create path; the resulting entitlement row is what persists, and
+  `GET /v1/admin/apps/{id}/entitlements` is where it is visible.
+- Any value other than `"all"`, `"none"` or absent is `400 validation_failed` — **rejected rather
+  than treated as "none"**, because a typo (`"nome"`, `"None"`) that quietly created an invisible
+  app would be diagnosed as "the catalogue is broken".
+- **The default grant is part of the create, and a failure to write it removes the app.** An app
+  that exists with no entitlement is not a security problem but an undiagnosable one — the admin
+  sees a created app, every user sees nothing, and no field in the editor explains it. The create
+  therefore fails whole (`500`, no app), rather than succeeding into that state.
+
+> **Rollout order: control plane before client**, same reason again — a client sending `entitle`
+> to a control plane without this amendment gets a hard `400`, not a silent ignore. Note the
+> asymmetry with the *read* path: a client that never sends `entitle` is unaffected by this field,
+> but **every** client is affected by the filtered `GET /v1/apps`, which is why this phase's
+> client re-pin is scheduled with it.
 
 ### Per-app launchable launch profiles *(UI-P5, admin)*
 
@@ -1074,6 +1229,16 @@ and the idempotency key (`schema.md` `user_app_favourites`).
 - `404 not_found` when the app id does not resolve **under the same visibility rule as
   `GET /v1/apps/{id}`** (non-admin: absent *or* disabled; admin: absent). A `204` on a disabled
   app would confirm the existence of something the caller cannot read.
+- **`403 forbidden` when the caller is not entitled to the app** *(Steam library discovery Phase
+  2)*, checked **after** the `404` above rather than folded into it. This is the one read-adjacent
+  place the contract gives a distinguishable answer instead of a uniform `404`, and it is a
+  considered trade: `GET /v1/apps/{id}` is a *read*, so collapsing "not entitled" into "not found"
+  costs the caller nothing, but this is a **write** the client offers as a toggle on a tile — an
+  app the caller can no longer launch should say so rather than appear to have evaporated. The
+  existence signal it concedes is bounded, because the caller must already hold a valid app UUID
+  to reach it. **Applied to every role, admin included**, unlike the visibility rule above:
+  `/v1/me/*` is the user surface by definition, an admin favouriting an app that is not in their
+  own library is meaningless, and a role arm here would be the first crack in the no-bypass rule.
 - `400 validation_failed` on a malformed UUID. `401` on a missing/invalid token.
 
 **`DELETE /v1/me/favourites/{app_id}` — unfavourite:**
@@ -1093,6 +1258,107 @@ and the idempotency key (`schema.md` `user_app_favourites`).
 > view is `GET /v1/apps` filtered client-side. This is a decision, not an oversight; revisit it
 > only if the catalogue outgrows a single page.
 
+### Entitlements — who may see and launch an app *(Steam library discovery Phase 2, admin)*
+
+An **entitlement** is one fact: *"this subject may see and launch this app"*. It is the object the
+roadmap's library-provider model already owns, deliberately built here rather than a narrower
+Steam-shaped shortcut (a `visible_to_user_id` column on the app could express neither "everyone"
+nor an admin grant nor a future group, and would have to be torn out when a second provider
+arrives). **Presence of the row is the fact** — no `revoked` boolean, no soft delete.
+
+`RequireAuth → RequireAdmin`, like every other admin route. **These four are the only way to widen
+visibility**, which is exactly what lets `GET /v1/apps` and `POST /v1/sessions` stay filtered for
+admins too: an admin who cannot see something grants it here, and the grant is written to
+`GET /v1/admin/activity` (`app.entitlement.grant` / `app.entitlement.revoke`).
+
+**Two subject shapes, and only two in Phase 2.** `subject_type: "all"` (with **no** `subject_id`)
+means everyone; `subject_type: "user"` (with a user UUID) is a personal grant. `"group"` is
+additive later — a new value and a third uniqueness key, no shape change — and is deliberately not
+shipped now.
+
+**The entitlement object** (identical in all three read shapes):
+```json
+{ "id": "<uuid>",
+  "subject_type": "user",          // "user" | "all"
+  "subject_id": "<uuid>",          // null when subject_type is "all"
+  "subject_username": "alice",     // null when subject_type is "all"; joined for display
+  "app_id": "<uuid>", "app_name": "Foo",
+  "granted_by": "admin",           // "admin" | "provider" | "migration"
+  "granted_by_user": "<uuid>",     // the acting admin, null otherwise
+  "source_ref": "",
+  "created_at": "..." }
+```
+`granted_by` is **provenance, not authority** — every one of the three grants the same access.
+`"migration"` is the 0043 backfill and only ever that, so *"who made this app public"* answers
+"it was public before entitlements existed" rather than falsely attributing it to whichever admin
+happened to act first. `"provider"` is written by library discovery in **Phase 4** — nothing
+writes it yet; it is in the contract now so revoking one is already a working path the day the
+first one appears. `source_ref` is free-form provenance for a provider grant and is `""` for
+everything Phase 2 writes.
+
+**`GET /v1/admin/apps/{id}/entitlements` — who can see this app:**
+```json
+// 200
+{ "items": [ { "subject_type": "all", "subject_id": null, ... },
+             { "subject_type": "user", "subject_username": "alice", ... } ] }
+```
+Ordered **`all` first, then by username** — the "Visible to" control reads top-down and "everyone"
+is the fact that subsumes the rest. `404 not_found` if the app does not exist; `400
+validation_failed` on a malformed UUID.
+
+**`POST /v1/admin/apps/{id}/entitlements` — grant:**
+```json
+// request
+{ "subject_type": "user", "subject_id": "<uuid>" }
+// 201
+{ "entitlement": { ...the object above... } }
+```
+- `subject_type: "all"` must **omit** `subject_id` (or send it empty); anything else is
+  `400 validation_failed`. `subject_type: "user"` **requires** a user UUID. Any other
+  `subject_type` is `400`.
+- **`409 conflict` when that subject already holds an entitlement for this app.** Not a silent
+  idempotent `201`: the two are genuinely different outcomes for an admin who believes they are
+  granting access to someone new, and the underlying uniqueness is per **shape**, so the honest
+  answer to "grant again" is "there is already one".
+- `404 not_found` if the app or the named user does not exist.
+- The grant is always recorded as `granted_by: "admin"` with the acting admin in
+  `granted_by_user`. A client cannot assert either.
+
+**`DELETE /v1/admin/apps/{id}/entitlements/{entitlement_id}` — revoke:**
+```json
+// 204 No Content
+```
+- **Scoped to the app in the path**, not a bare delete by id: the entitlement must belong to
+  `{id}`, and a well-formed pair that does not match is `404 not_found`. So a stale admin page
+  cannot revoke an entitlement on some *other* app by replaying an id it still holds, and the URL
+  means what it reads as.
+- `400 validation_failed` if either id is malformed.
+- **Revoking an `all` row does not revoke anybody's personal grant, and vice versa.** They are
+  independent facts about the same app and the schema deliberately allows both to exist.
+- **A `granted_by: "provider"` revoke is not permanent** and a client showing this surface should
+  say so: the next library sync re-grants it if the title is still installed. Permanent fleet-wide
+  suppression is the ignore-rule path (Phase 4), not per-user revocation — otherwise an admin
+  revokes the same junk tile once per user, forever.
+
+**`GET /v1/admin/users/{id}/entitlements` — the per-user direction:**
+```json
+// 200
+{ "items": [ { "subject_type": "user", "app_name": "Foo", ... } ] }
+```
+Ordered by app name. `404 not_found` if the user does not exist.
+
+> **This returns the user's PERSONAL grants only — deliberately not the `all` rows they also
+> benefit from.** It is the one place in this surface where the obvious implementation is the
+> wrong one, so the reasoning is recorded rather than left to be rediscovered. Including the `all`
+> rows would make this screen **a per-user copy of the entire catalogue**, on which every Revoke
+> button has a **fleet-wide** effect — an admin looking at *alice's* page, clicking Revoke on a
+> row shown as alice's, and removing the app from **everyone**. The narrower answer is also the
+> one that matches the question this route exists to answer: *"what has been granted to this
+> person specifically?"* The fleet-wide view of an app's access is the app-direction route above,
+> where an `all` row is unmistakably an app-level fact. A future reader who wants "everything this
+> user can see" should note that it is already answerable — it is `GET /v1/apps` as that user —
+> and that widening *this* route to produce it is the change being warned against.
+
 ### `DELETE /v1/apps/{id}` — remove an app *(admin-delete)*
 Admin-only. Removes an app from the catalog entirely.
 ```json
@@ -1104,7 +1370,9 @@ Admin-only. Removes an app from the catalog entirely.
 - **Cascade.** On success the app row is deleted; its **terminal session history** (and those
   sessions' metrics/tokens) cascade away, and its managed homes are tombstoned for GC. FK policy in
   `schema.md` (`sessions.app_id` → `ON DELETE CASCADE`, `user_homes.app_id` → `ON DELETE SET NULL`,
-  migration `0014`).
+  migration `0014`). *(Phase 2: its **entitlements** cascade away too — `entitlements.app_id` is
+  `ON DELETE CASCADE`. An entitlement to an app that no longer exists has no meaning, and leaving
+  one behind would silently re-grant access if the id were ever reused.)*
 - **Errors:** `404 not_found` (no such app); `409 conflict` (in use by a non-terminal session).
 
 ### Runtime presets *(UI-P3, admin)*
@@ -1354,6 +1622,25 @@ is the single hinge to `signaling.md`.
   enforces the caller's per-user session quota. Rejections (see §Admission control for the exact
   rule) — in all of which **no session row persists** (quota/availability is checked before the
   row is committed, or the row is rolled back):
+  - **`403 forbidden`** *(Steam library discovery Phase 2 — a **new terminal status** on this
+    endpoint, which is why that amendment is not additive)* — the caller holds neither an `all`
+    nor a personal entitlement for `app_id`. **This is the authorization boundary of the whole
+    entitlements feature**; the filtered `GET /v1/apps` is UX, and a client that ignores it and
+    posts an app id directly is refused here.
+    - **`403`, not `404`.** `GET /v1/apps/{id}` answers `404` for a non-entitled app precisely
+      because a *read* can afford to say nothing. A launch cannot: the caller named this app
+      deliberately, and "no such app" would send them to report a broken catalogue instead of
+      asking an admin for access.
+    - **`403`, not `409`.** The three `409`s around it (`profile_ineligible`,
+      `profile_not_launchable_for_app`, quota) all mean "valid request, wrong right now". This one
+      is a statement about the **caller**, which is what `403` means in this contract.
+    - **Checked inside the scheduling transaction, before the quota check and before placement.**
+      Authorization precedes resource accounting — a caller who is both unentitled and at their
+      session limit must be told "you may not launch this", not "you have too many sessions" —
+      and nothing is reserved for a launch that is going to be refused.
+    - **For every role, admin included; there is no bypass.** An admin who wants to launch an app
+      they have restricted grants themselves the entitlement (`POST
+      /v1/admin/apps/{id}/entitlements`), which is one call and leaves an audit row.
   - **`409 session_quota_exceeded`** — the caller already holds `max_concurrent_sessions` active
     sessions (`state ∈ {pending, assigned, starting, running, stopping}`).
   - **`503 no_host_available`** — no online host has a GPU that could serve the request.
@@ -1795,6 +2082,20 @@ interpipe boundary while encode + `webrtcbin` stay up, so the browser stream nev
   - `404 not_found` — no such app, or the app is disabled (same visibility rule as `GET /v1/apps/{id}`).
   - `409 swap_exceeds_reservation` — as above.
   - `403 forbidden` — caller is neither owner nor admin; `404 not_found` — no such session.
+  - **`403 forbidden` — the session's OWNER is not entitled to the target app** *(Steam library
+    discovery Phase 2 — a **new terminal condition** on this endpoint; the status code itself
+    already existed here for the ownership check)*. Same code, same reasoning and same no-role-bypass
+    rule as `POST /v1/sessions`.
+    - **Why it exists at all.** A swap *is* a launch of a different app into a live session, so
+      without this check the launch gate is defeatable in two requests: launch an app you are
+      entitled to, then swap into one you are not, and the launch check never sees the second app.
+      This is the only enforcement site the spec's §6.3 list does not name; it is here because
+      leaving it out makes the rest of the feature decorative.
+    - **Keyed on the session OWNER, not the caller** — and this is the load-bearing half. Swap is
+      owner-**or-admin**, so keying on the caller would let an admin swapping someone else's
+      session launder their own entitlements into that user's session: the session would end up
+      running an app its owner may not launch, and its owner keeps the stream. The question this
+      check asks is "may this session run this app", and a session's access is its owner's.
 
 ---
 

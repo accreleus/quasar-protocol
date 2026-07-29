@@ -250,10 +250,25 @@ paths:
         404 when the app id does not resolve under the SAME visibility rule as GET /v1/apps/{id}
         (non-admin: absent or disabled; admin: absent) — a 204 on a disabled app would confirm
         the existence of something the caller cannot read.
+
+        STEAM LIBRARY DISCOVERY PHASE 2: 403 forbidden when the caller is not entitled, checked
+        AFTER the 404 above rather than folded into it. This is the one read-adjacent place the
+        contract gives a distinguishable answer instead of a uniform 404, and it is a considered
+        trade: GET /v1/apps/{id} is a READ, so collapsing "not entitled" into "not found" costs
+        the caller nothing, but this is a WRITE the client offers as a toggle on a tile - an app
+        the caller can no longer launch should say so rather than appear to have evaporated. The
+        existence signal it concedes is bounded, since the caller must already hold a valid app
+        UUID to reach it. APPLIED TO EVERY ROLE, ADMIN INCLUDED, unlike the visibility rule
+        above: /v1/me/* is the user surface by definition, an admin favouriting an app that is
+        not in their own library is meaningless, and a role arm here would be the first crack in
+        the no-bypass rule.
       responses:
         "204": { description: App favourited. }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: "Phase 2: the caller holds no entitlement for this app."
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       tags: [me]
@@ -289,13 +304,35 @@ paths:
   /v1/apps:
     get:
       tags: [apps]
-      summary: List enabled apps (requires auth; favourite is resolved for the calling user).
+      summary: List the enabled apps the CALLER IS ENTITLED TO (favourite is resolved for the caller).
       description: |
         UI-P1, BREAKING (2026-07-27): this list was previously public (`security: []`) and
         returned the full catalogue — names, descriptions, cover URLs, stream defaults — to any
         unauthenticated caller. That was an information-disclosure defect on a self-hosted
         deployment; it now requires a bearer and returns 401 without one. Both known consumers
         (the web SPA and quasar-client) already send the bearer. See control-api.md.
+
+        STEAM LIBRARY DISCOVERY PHASE 2, NOT ADDITIVE: this list is now `enabled = true` AND
+        entitled. An app appears only if the caller holds an 'all' entitlement (visible to
+        everyone) or a ('user', caller) one. NO SHAPE OR STATUS CODE CHANGES and a client that
+        renders what it receives needs no change - what changes is that the list can now be
+        SHORTER THAN THE CATALOGUE.
+
+        Day one it is byte-identical to the pre-Phase-2 list: migration 0043 backfills an 'all'
+        row for every existing app in the same transaction that creates the table, so the
+        filter's first evaluation returns exactly what the unfiltered query returned. It narrows
+        only as an admin deliberately narrows it.
+
+        THE FILTER APPLIES TO EVERY ROLE, ADMINS INCLUDED, AND THERE IS NO BYPASS. An admin
+        browsing the library is a user browsing THEIR OWN library; a fleet-wide god view here
+        would be actively wrong once library discovery is on, since it would show every other
+        user's games. The god view is GET /v1/admin/apps, which is unfiltered and unchanged, so
+        nothing becomes unreachable. An admin who wants an app in their own library grants
+        themselves the entitlement - one call, and it leaves an audit row, which
+        `if isAdmin { skip }` does not.
+
+        THIS IS UX, NOT THE AUTHORIZATION BOUNDARY. The boundary is POST /v1/sessions: a client
+        that ignores this list and launches an app id directly is refused there, not here.
       responses:
         "200":
           description: OK.
@@ -305,7 +342,15 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [apps]
-      summary: Create an app.
+      summary: Create an app (entitled to everyone by default - see AppWrite.entitle).
+      description: >-
+        Steam library discovery Phase 2 adds the OPTIONAL, CREATE-ONLY `entitle` field
+        ("all" | "none", default "all"). With the default, the created app carries an
+        ('all', granted_by='admin') entitlement and is immediately visible to everyone - exactly
+        the pre-entitlements behaviour. The default grant is part of the create: if writing it
+        fails the create fails whole (500, no app) rather than succeeding into an app that
+        exists but that nobody can see, which is not a security problem but an undiagnosable
+        one.
       x-required-role: admin
       requestBody:
         required: true
@@ -330,6 +375,30 @@ paths:
     get:
       tags: [apps]
       summary: A single app (requires auth; response is wrapped in {app}).
+      description: |
+        This route has always had TWO behaviours: for a non-admin it is the library read; for an
+        admin it returns the full admin shape (disabled apps included, runtime_spec included).
+
+        STEAM LIBRARY DISCOVERY PHASE 2: for a NON-ADMIN caller this is now 404 when the caller
+        is not entitled, folded into the existing no-such-app answer rather than given its own
+        status. The endpoint is already an existence check for a non-admin (a disabled app is
+        404 too), so collapsing "not entitled" into it leaks nothing and is the correct posture
+        for a per-user library. 403 is reserved for the two WRITES
+        (PUT /v1/me/favourites/{app_id}, POST /v1/sessions) where the caller has deliberately
+        named an app and needs an actionable answer.
+
+        THE ADMIN BRANCH IS DELIBERATELY NOT ENTITLEMENT-FILTERED - DO NOT "FIX" IT. It is the
+        admin app-EDITOR's loader (web/src/api/admin.ts:160) and there is no GET
+        /v1/admin/apps/{id} route to move that load onto, so filtering it would make an app
+        UN-EDITABLE the instant an admin restricted it: an operator lockout with no recovery
+        inside the product, reachable by using the feature exactly as intended.
+
+        THE RESULTING ASYMMETRY, STATED SO IT IS NOT READ AS A BUG: an admin can read one app's
+        detail here while that same app is ABSENT from their own GET /v1/apps. That is
+        consistent - the admin surface is "the fleet's configuration", the library is "what I
+        may launch", and this route serves both - and it concedes no information, since
+        GET /v1/admin/apps would hand an admin the same rows. It grants no launch either:
+        POST /v1/sessions and .../swap are entitlement-checked for every role.
       responses:
         "200":
           description: OK.
@@ -340,7 +409,11 @@ paths:
                 properties:
                   app: { $ref: "#/components/schemas/App" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "404": { $ref: "#/components/responses/NotFound" }
+        "404":
+          description: >-
+            No such app; for a non-admin also a disabled app, and (Phase 2) an app the caller
+            holds no entitlement for.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
     patch:
       tags: [apps]
       summary: Edit an app.
@@ -462,6 +535,12 @@ paths:
     get:
       tags: [admin, apps]
       summary: "List all apps incl. disabled + admin fields. (Not yet in control-api.md prose.)"
+      description: >-
+        Steam library discovery Phase 2: THIS IS THE UNFILTERED GOD VIEW and is deliberately
+        NOT entitlement-filtered. That is exactly what lets GET /v1/apps stay filtered for
+        admins too - nothing becomes unreachable, it moves to the route that already means
+        "the whole fleet's catalogue". If an admin "cannot see an app", the answer is to grant
+        the entitlement (audited), never to add a role arm to the library filter.
       x-required-role: admin
       responses:
         "200":
@@ -469,6 +548,99 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/AdminAppsResponse" } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ─── entitlements (Steam library discovery Phase 2) ──────────────────────
+  # An entitlement is one fact: "this subject may see and launch this app".
+  # These four admin routes are the ONLY way to widen visibility, which is what
+  # lets GET /v1/apps and POST /v1/sessions stay entitlement-filtered for admins
+  # too. NOT ADDITIVE as a whole: see control-api.md's Phase 2 amendment for the
+  # behaviour changes on GET /v1/apps, GET /v1/apps/{id},
+  # PUT /v1/me/favourites/{app_id}, POST /v1/sessions and .../swap.
+  /v1/admin/apps/{id}/entitlements:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin, apps]
+      summary: Who may see and launch this app.
+      description: >-
+        Phase 2. Ordered 'all' first, then by username - the admin "Visible to" control reads
+        top-down and "everyone" is the fact that subsumes the rest. An app may carry BOTH an
+        'all' row and personal rows; they are independent facts and revoking one does not
+        revoke the other.
+      x-required-role: admin
+      responses:
+        "200": { description: OK., content: { application/json: { schema: { $ref: "#/components/schemas/EntitlementList" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [admin, apps]
+      summary: Grant an entitlement (409 if the subject already holds one).
+      description: >-
+        Phase 2. subject_type 'all' must OMIT subject_id; subject_type 'user' REQUIRES a user
+        uuid - anything else is 400 validation_failed. 409 conflict when that subject already
+        holds an entitlement for this app, deliberately NOT a silent idempotent 201: the two
+        are different outcomes for an admin who believes they are granting access to someone
+        new. The row is always written granted_by='admin' with the acting admin recorded in
+        granted_by_user - a client cannot assert either - and the grant is written to the admin
+        activity log as app.entitlement.grant.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/EntitlementGrant" } } }
+      responses:
+        "201": { description: Entitlement granted., content: { application/json: { schema: { $ref: "#/components/schemas/EntitlementEnvelope" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/admin/apps/{id}/entitlements/{entitlement_id}:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - { $ref: "#/components/parameters/PathEntitlementId" }
+    delete:
+      tags: [admin, apps]
+      summary: Revoke an entitlement (scoped to the app in the path).
+      description: >-
+        Phase 2. SCOPED TO THE APP IN THE PATH, not a bare delete by id: the entitlement must
+        belong to {id}, and a well-formed pair that does not match is 404 not_found. So a stale
+        admin page cannot revoke an entitlement on some OTHER app by replaying an id it still
+        holds, and the URL means what it reads as. Revoking an 'all' row does not revoke
+        anybody's personal grant, and vice versa. A granted_by='provider' revoke is NOT
+        permanent - the next library sync re-grants it if the title is still installed; the
+        permanent fleet-wide suppression is the Phase 4 ignore rule. Written to the admin
+        activity log as app.entitlement.revoke.
+      x-required-role: admin
+      responses:
+        "204": { description: Entitlement revoked. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/users/{id}/entitlements:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin, users]
+      summary: This user's PERSONAL entitlements only (not the 'all' rows they also benefit from).
+      description: >-
+        Phase 2. Returns only subject_type='user' rows for this user, ordered by app name, and
+        DELIBERATELY NOT the 'all' rows the user also benefits from. Including those would make
+        this screen a per-user copy of the entire catalogue on which every Revoke button has a
+        FLEET-WIDE effect - an admin looking at one user's page, clicking Revoke on a row shown
+        as that user's, and removing the app from everyone. The narrower answer also matches the
+        question this route exists to answer ("what has been granted to this person
+        specifically?"); the fleet-wide view of an app's access is
+        GET /v1/admin/apps/{id}/entitlements, where an 'all' row is unmistakably an app-level
+        fact. "Everything this user can see" is already answerable - it is GET /v1/apps as that
+        user - and widening this route to produce it is the change being warned against.
+      x-required-role: admin
+      responses:
+        "200": { description: OK., content: { application/json: { schema: { $ref: "#/components/schemas/EntitlementList" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   # ─── cover artwork (UI-P7) ───────────────────────────────────────────────
   # The artwork provider SHIPS DARK: with no API key configured the control
@@ -772,6 +944,29 @@ paths:
         launched on an unrestricted app keeps its wider stream when swapped into a restricted
         one. Deliberate - P2-07 swaps are no-resize and must not renegotiate. The allow-list is
         a launch-time rule.
+
+        STEAM LIBRARY DISCOVERY PHASE 2 ADDS A NEW TERMINAL STATUS TO THIS ENDPOINT - 403
+        forbidden - WHICH IS WHY THAT AMENDMENT IS NOT ADDITIVE. It is raised when the caller
+        holds neither an 'all' nor a personal entitlement for app_id, and no session row
+        persists. THIS IS THE AUTHORIZATION BOUNDARY OF THE WHOLE ENTITLEMENTS FEATURE; the
+        entitlement-filtered GET /v1/apps is UX, and a client that ignores it and posts an app
+        id directly is refused here.
+
+        403 rather than 404: GET /v1/apps/{id} answers 404 for a non-entitled app precisely
+        because a READ can afford to say nothing. A launch cannot - the caller named this app
+        deliberately, and "no such app" would send them to report a broken catalogue instead of
+        asking an admin for access. 403 rather than 409: the three 409s around it
+        (profile_ineligible, profile_not_launchable_for_app, quota) all mean "valid request,
+        wrong right now"; this one is a statement about the CALLER, which is what 403 means in
+        this contract.
+
+        CHECKED INSIDE THE SCHEDULING TRANSACTION, BEFORE THE QUOTA CHECK AND BEFORE PLACEMENT.
+        Authorization precedes resource accounting - a caller who is both unentitled and at
+        their session limit must be told "you may not launch this", not "you have too many
+        sessions" - and nothing is reserved for a launch that is going to be refused. It applies
+        to EVERY ROLE, admin included; an admin who wants to launch an app they have restricted
+        grants themselves the entitlement (POST /v1/admin/apps/{id}/entitlements), which is one
+        call and leaves an audit row.
       requestBody:
         required: true
         content:
@@ -783,6 +978,11 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/LaunchResponse" } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >-
+            Phase 2, NEW TERMINAL STATUS ON THIS ENDPOINT: the caller holds no entitlement for
+            app_id. No session row persists.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "503": { $ref: "#/components/responses/Unavailable" }
@@ -834,6 +1034,22 @@ paths:
     post:
       tags: [sessions]
       summary: Swap the running app without WebRTC teardown (owner or admin).
+      description: |
+        STEAM LIBRARY DISCOVERY PHASE 2 adds a NEW TERMINAL CONDITION here - 403 forbidden when
+        the SESSION'S OWNER is not entitled to the target app. The status code itself already
+        existed on this endpoint for the ownership check; what is new is a second way to reach
+        it.
+
+        WHY IT EXISTS AT ALL (it is not in the spec's enforcement list; the implementation added
+        it): a swap IS a launch of a different app into a live session, so without this check
+        the launch gate is defeatable in two requests - launch an app you are entitled to, then
+        swap into one you are not, and the launch check never sees the second app.
+
+        KEYED ON THE SESSION OWNER, NOT THE CALLER, and that is the load-bearing half. Swap is
+        owner-OR-ADMIN, so keying on the caller would let an admin swapping someone else's
+        session launder their own entitlements into it: the session would end up running an app
+        its owner may not launch, and its owner keeps the stream. The question is "may this
+        session run this app", and a session's access is its owner's.
       requestBody:
         required: true
         content:
@@ -846,7 +1062,11 @@ paths:
       responses:
         "200": { description: Swapped. , content: { application/json: { schema: { $ref: "#/components/schemas/SessionEnvelope" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "403":
+          description: >-
+            Caller is neither owner nor admin; or (Phase 2) the SESSION OWNER holds no
+            entitlement for the target app.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
   /v1/sessions/{id}/trace/clock:
@@ -1523,6 +1743,15 @@ components:
       required: true
       description: "UI-P1: an app id in a path whose parameter is named app_id (PathId hardcodes name: id)."
       schema: { type: string, format: uuid }
+    PathEntitlementId:
+      name: entitlement_id
+      in: path
+      required: true
+      description: >-
+        Steam library discovery Phase 2: the entitlement being revoked. It must belong to the
+        app named by the sibling {id}; a well-formed pair that does not match is 404, never a
+        cross-app delete.
+      schema: { type: string, format: uuid }
 
   responses:
     Unauthorized:
@@ -1968,6 +2197,111 @@ components:
             Note crud.decodeJSON sets DisallowUnknownFields(), so sending this to a control plane
             without the UI-P5 amendment is a hard 400 - deploy the control plane before the
             client.
+        entitle:
+          type: string
+          enum: [all, none]
+          default: all
+          description: >-
+            Steam library discovery Phase 2, OPTIONAL and CREATE-ONLY. "all" (the default, and
+            what an absent field means) creates the app with an ('all', granted_by='admin')
+            entitlement, so it is immediately visible to everyone - i.e. EXACTLY the
+            pre-entitlements behaviour of creating an app. "none" creates it entitled to nobody,
+            for an admin who wants to configure access before anyone sees it. THE DEFAULT IS THE
+            WHOLE POINT: once GET /v1/apps is entitlement-filtered a new app is invisible until
+            something entitles it, so without a default grant "I made an app and nobody can see
+            it" becomes the default experience - the same failure as an un-backfilled migration,
+            one app at a time. Any other value is 400 validation_failed, REJECTED rather than
+            treated as "none", because a typo ("nome", "None") that quietly created an invisible
+            app would be diagnosed as "the catalogue is broken". CREATE-ONLY: this property is
+            declared on the shared AppWrite shape, but PATCH /v1/apps/{id} does NOT accept it -
+            sending it there is 400 validation_failed (crud.decodeJSON sets
+            DisallowUnknownFields()). It describes how an app is BORN, not a property it
+            carries; after creation, access is edited through /v1/admin/apps/{id}/entitlements,
+            which is the surface that produces an audit row and can express a per-user grant.
+            NOT a stored column and never returned on any read shape - the resulting entitlement
+            row is what persists.
+
+    SubjectType:
+      type: string
+      description: >-
+        Steam library discovery Phase 2: who an entitlement is granted to. 'all' = everyone
+        (subject_id is null); 'user' = one account. Widening to 'group' is additive - a new value
+        and a third partial unique index, no shape change - which is why an entitlement carries a
+        subject TYPE plus id rather than a bare user_id.
+      enum: [user, all]
+    EntitlementGrantedBy:
+      type: string
+      description: >-
+        Steam library discovery Phase 2: PROVENANCE, NOT AUTHORITY - all three grant identical
+        access. 'admin' = an operator granted it (audited). 'provider' = a library-discovery sync
+        wrote it and a sync may revoke it; NOTHING WRITES IT YET (that is Phase 4) - it is in the
+        contract now so Phase 4 needs no migration and so revoking one is already a working path
+        the day the first appears. 'migration' = the 0043 backfill and only ever that, so "who
+        made this app public" answers "it was public before entitlements existed" rather than
+        falsely attributing it to whichever admin happened to act first.
+      enum: [admin, provider, migration]
+    Entitlement:
+      type: object
+      description: >-
+        Steam library discovery Phase 2. One fact: "this subject may see and launch this app".
+        PRESENCE OF THE ROW IS THE FACT - there is no revoked boolean and no soft delete. An app
+        may carry BOTH an 'all' row and a personal row for the same user: they are independent
+        facts and revoking one must not revoke the other, which is why readers match on EXISTENCE
+        and never by joining entitlements into the app query (a join would emit such an app twice
+        and, because GET /v1/apps pages by offset with a limit+1 overfetch, shift the page
+        boundary and silently drop an app off the far end).
+      required: [id, subject_type, subject_id, subject_username, app_id, app_name, granted_by, granted_by_user, source_ref, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        subject_type: { $ref: "#/components/schemas/SubjectType" }
+        subject_id:
+          type: [string, "null"]
+          format: uuid
+          description: "The subject account; null when subject_type is 'all'."
+        subject_username:
+          type: [string, "null"]
+          description: "Joined for display; null when subject_type is 'all'. Never accepted on the write shape."
+        app_id: { type: string, format: uuid }
+        app_name: { type: string, description: "Joined for display; never accepted on the write shape." }
+        granted_by: { $ref: "#/components/schemas/EntitlementGrantedBy" }
+        granted_by_user:
+          type: [string, "null"]
+          format: uuid
+          description: >-
+            The acting admin for a granted_by='admin' row, null otherwise. Recorded server-side
+            from the bearer identity and never assertable by a client. Deleting that operator
+            NULLs this rather than revoking the entitlement.
+        source_ref:
+          type: string
+          description: "Free-form provenance for a 'provider' grant (Phase 4: which scan, which appid). '' for everything Phase 2 writes."
+        created_at: { type: string, format: date-time }
+    EntitlementList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Entitlement" }
+    EntitlementEnvelope:
+      type: object
+      required: [entitlement]
+      properties:
+        entitlement: { $ref: "#/components/schemas/Entitlement" }
+    EntitlementGrant:
+      type: object
+      description: >-
+        Steam library discovery Phase 2. granted_by / granted_by_user / source_ref are NOT
+        accepted here: a grant made through this route is always recorded as granted_by='admin'
+        with the acting admin resolved server-side from the bearer identity.
+      required: [subject_type]
+      properties:
+        subject_type: { $ref: "#/components/schemas/SubjectType" }
+        subject_id:
+          type: [string, "null"]
+          format: uuid
+          description: >-
+            REQUIRED (a user uuid) when subject_type is 'user'; must be OMITTED, null or "" when
+            subject_type is 'all'. Any other combination is 400 validation_failed.
 
     Session:
       type: object

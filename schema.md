@@ -288,6 +288,58 @@
 > `native-client.md` are unchanged. See
 > `docs/design/plans/2026-07-29-steam-library-discovery-spec.md` §4.1, §10, §12 and §13 "Phase 1".
 
+> **Amendment — Steam library discovery, Phase 2 (`entitlements`). NOT ADDITIVE at the API, and
+> requires Opus + explicit human sign-off.** The *schema* half is one new table
+> (**migration 0043**, `0043_entitlements`) and touches no existing table, column, type,
+> constraint, default, or the session state machine. What is not additive is what reads it:
+> `control-api.md`'s `GET /v1/apps` becomes entitlement-filtered for **every role**, and
+> `POST /v1/sessions` / `POST /v1/sessions/{id}/swap` gain a terminal `403`. Read that amendment
+> for the blast radius; this one is the storage contract behind it.
+> **An entitlement is one fact: "this subject may see and launch this app."** Presence of the row
+> is the fact — no `revoked` boolean, no soft delete. `subject_type`/`subject_id` is deliberately
+> **wider than the Steam use case** (the roadmap's library-provider object, not a narrower
+> parallel mechanism): an admin grant, "everyone", and a future `group` are all expressible
+> without a retrofit. Phase 2 ships only `('user','all')`; `'group'` is additive when it comes —
+> a new `CHECK` value and a third partial unique index, no shape change.
+> **TWO PARTIAL UNIQUE INDEXES, NOT ONE PLAIN `UNIQUE`, and that is a correctness requirement.**
+> Postgres does not treat `NULL`s as equal in a `UNIQUE` constraint, so a single
+> `UNIQUE (subject_type, subject_id, app_id)` would consider every `('all', NULL, <app>)` row
+> distinct from every other and **silently permit unlimited duplicate `all` rows for one app**.
+> Not merely untidy: the read predicate is `EXISTS`, so duplicates would not corrupt the library
+> list and nothing would fail loudly — but a revoke that deletes *"the"* row would leave the app
+> still visible, and a grant's `ON CONFLICT` idempotency would have nothing to conflict on.
+> Splitting by shape gives each shape a real uniqueness key. (Postgres 15+ `NULLS NOT DISTINCT`
+> would also work; two partial indexes are used because they additionally serve as the lookup
+> indexes for the two halves of the filter predicate and carry no version floor.)
+> **THE BACKFILL IS IN THE SAME TRANSACTION AS THE `CREATE TABLE`, and it is the single most
+> load-bearing statement in the migration.** Filtering goes live in the same deploy that creates
+> the table, and against an empty table that filter returns nothing — **every user's library goes
+> blank on every existing deployment, simultaneously.** And it would ship: the migration applies
+> cleanly, the control plane boots, `go-test-db` passes (the tests create their own entitlements)
+> and the web build passes. **There is no automated gate between "empty table" and "every library
+> is empty" other than this `INSERT`.** Granting `('all', granted_by='migration')` for every app
+> that exists makes Phase 2's day-one behaviour change **exactly zero** — every user sees
+> precisely the apps they saw before, because "no entitlements" is what universal visibility
+> meant before this table existed — and every subsequent narrowing is then a deliberate admin
+> action measured against a visible baseline.
+> **Disabled apps are backfilled too.** The filter is ANDed with `apps.enabled = true`, so a
+> disabled app is invisible either way today — but skipping it would mean re-enabling an app
+> silently failed to bring it back, months later, with nothing to point at. The backfill is over
+> the **catalogue**, not over what is currently visible.
+> **The down migration drops the table**, which drops the backfill *and every grant an admin has
+> made since*. Re-applying 0043 re-runs the backfill, so the catalogue comes back **fully open**
+> rather than at whatever narrower state the operator had configured: a **widening**, so it fails
+> safe for availability and **unsafe for confidentiality**. Dump `entitlements` before rolling
+> back any deployment where access has actually been restricted. Note this is for a deliberate,
+> operator-run down migration — never for "deploy `main` over the phase branch", which the
+> one-way migration rule in `CLAUDE.md` already forbids.
+> **`agent-api.md` is byte-identical** — the whole Steam library discovery spec deliberately
+> avoids touching the agent contract (spec §14). `signaling.md`, `input.md`, `native-client.md`
+> are unchanged. See `docs/design/plans/2026-07-29-steam-library-discovery-spec.md` §6 and §13
+> "Phase 2". *(Numbering note: the spec calls this migration 0042 throughout, written when
+> Phases 1 and 2 shared one. Phase 1 shipped first and took 0042; §13's "0042 continued, or 0043
+> if Phase 2 shipped separately" is the clause that applies.)*
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
@@ -1302,6 +1354,72 @@ store a list for a `force` app and clears any existing one when an app is switch
 **Empty set = today's behaviour**, which is why no backfill exists and why upgrading changes
 nothing for any app.
 
+## `entitlements` (Steam library discovery Phase 2)
+> *Migration 0043. The table is new and changes no existing table; **what reads it is not
+> additive** — `control-api.md`'s `GET /v1/apps` becomes entitlement-filtered for every role and
+> the launch/swap paths gain a terminal `403`. Requires Opus + explicit human sign-off. Unlike
+> `user_app_favourites` (presentation state) and `app_launch_profiles` (stream-quality curation,
+> explicitly never an authorization boundary), **this table IS an authorization boundary.***
+
+One row per grant. **Presence of the row is the fact**: there is no `revoked` boolean and no soft
+delete, so the table can never hold a row a reader must interpret before trusting.
+
+| column | type | notes |
+|---|---|---|
+| `id` | `UUID` PRIMARY KEY DEFAULT `gen_random_uuid()` | a **surrogate** key, unlike the composite-PK join tables above, because the revoke API addresses one grant by id (`DELETE /v1/admin/apps/{id}/entitlements/{entitlement_id}`) and a composite key would put a subject id in a URL. Uniqueness is carried by the two partial indexes below, not by this. |
+| `subject_type` | `TEXT` NOT NULL | `CHECK (subject_type IN ('user','all'))`. `'all'` = everyone; `'user'` = one account. **Widening to `'group'` is additive**: a new `CHECK` value and a third partial unique index, no shape change — which is the reason this is a subject *type* + id and not a `user_id` column. The `TEXT` + `CHECK` convention, as elsewhere in this schema. |
+| `subject_id` | `UUID` NULL → `users(id)` **ON DELETE CASCADE** | the subject, `NULL` for `'all'`. **`CASCADE`, deliberately not `SET NULL`** — a `NULL`ed `subject_id` on a `'user'` row would violate the shape `CHECK` below anyway, and a grant to a deleted account has no meaning. Same call as `user_app_favourites`. |
+| `app_id` | `UUID` NOT NULL → `apps(id)` **ON DELETE CASCADE** | the app. An entitlement to an app that no longer exists has no meaning, and leaving one behind would silently re-grant access if an id were ever reused. |
+| `granted_by` | `TEXT` NOT NULL | `CHECK (granted_by IN ('admin','provider','migration'))`. **Provenance, not authority** — all three grant identical access. `'admin'` = an operator granted it (audited in `admin_activity`). `'provider'` = a library-discovery sync wrote it, and a sync may revoke it — **nothing writes this yet; it is Phase 4.** It is in the `CHECK` now so Phase 4 needs no `ALTER`, and so revoking one is already a working path the day the first one is written. `'migration'` = the 0043 backfill and *only* the backfill, so an operator auditing "who made this app public" gets "it was public before entitlements existed" rather than a false attribution to whichever admin happened to act first. |
+| `granted_by_user` | `UUID` NULL → `users(id)` **ON DELETE SET NULL** | who performed an `'admin'` grant. **`SET NULL` rather than `CASCADE`** — and the difference matters: deleting the operator who granted an entitlement must not silently **revoke** it. Same posture as `instance_secrets.updated_by`. |
+| `source_ref` | `TEXT` NOT NULL DEFAULT `''` | free-form provenance for a `'provider'` grant (Phase 4: which scan, which appid). `''` for everything Phase 2 writes. |
+| `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | when it was granted. |
+
+```
+CONSTRAINT entitlements_subject_shape_ck
+  CHECK ((subject_type = 'all') = (subject_id IS NULL))
+```
+The two legal shapes and nothing else: `('all', NULL)` or `('user', <uuid>)`. Written as an
+**equivalence** rather than two `OR`ed clauses so it stays one readable line when `'group'` is
+added — it becomes `subject_type = 'all'` on the left and nothing else changes.
+
+```
+CREATE UNIQUE INDEX entitlements_all_uk  ON entitlements (app_id)             WHERE subject_type = 'all';
+CREATE UNIQUE INDEX entitlements_user_uk ON entitlements (subject_id, app_id) WHERE subject_type = 'user';
+CREATE INDEX        entitlements_app_idx ON entitlements (app_id);
+```
+
+**Two partial unique indexes, not one plain `UNIQUE` — a correctness requirement, not a style
+choice.** Postgres does not treat `NULL`s as equal in a `UNIQUE` constraint, so a single
+`UNIQUE (subject_type, subject_id, app_id)` would consider every `('all', NULL, <app>)` row
+distinct from every other and **silently permit unlimited duplicate `all` rows for the same app**.
+That is not merely untidy, and the failure is quiet in a specific way worth spelling out: the read
+predicate is `EXISTS`, so duplicates would *not* corrupt the library list and nothing would break
+loudly — but a revoke that deletes *"the"* row would leave the app still visible, and a grant's
+`ON CONFLICT` idempotency would have nothing to conflict on. Splitting by shape gives each shape a
+real uniqueness key. (Postgres 15+ has `NULLS NOT DISTINCT`, which would also work; two partial
+indexes are used because they additionally serve as the **lookup** indexes for the two halves of
+the filter predicate and carry no version floor.)
+
+**Both shapes may coexist for one (user, app), deliberately.** The unique indexes prevent
+duplicates *within* a shape, never *across* them: "everyone may see it" and "you specifically were
+granted it" are two independent facts, and revoking one must not revoke the other. The consequence
+for readers is that the filter must match on **existence**, never by joining the entitlement rows
+into the app query — a join emits such an app twice, and `GET /v1/apps` pages by offset with a
+`limit + 1` overfetch, so a duplicated row consumes a slot, shifts the page boundary and silently
+drops an app off the far end. Every single-user test passes that defect.
+
+`entitlements_app_idx` is the app-direction lookup (`GET /v1/admin/apps/{id}/entitlements`) and the
+index the `apps` cascade needs: Postgres does not auto-index the *referencing* side of a foreign
+key, and `DELETE /v1/apps/{id}` is a real operator path.
+
+**The 0043 backfill — `INSERT ... SELECT 'all', NULL, id, 'migration' FROM apps`, in the same
+transaction.** This is the most load-bearing statement in the migration and the reason this table
+cannot be created ahead of its readers or after them. It is described in full in the amendment
+block at the top of this document; the one-line version is that **filtering an empty table blanks
+every user's library on every deployment at once, and every automated gate passes while it
+happens.** The backfill makes the day-one behaviour change exactly zero.
+
 ## Session state machine (shared contract)
 This is the canonical lifecycle. `agent-api.md` and `control-api.md` use exactly these
 names. State is owned by the **control plane** (it writes the row); the agent *reports*
@@ -1408,6 +1526,7 @@ control-plane/migrations/
   -- (migration 0041 also predates this ledger's last refresh; the committed SQL in migrations/ is
   --  authoritative, and its prose lives at §host_encoder_certification. Phase 1 adds the line below.)
   0042_app_external_ref.up.sql -- (Steam library discovery Phase 1, purely additive) ALTER apps ADD external_source TEXT NOT NULL DEFAULT '' CHECK (external_source IN ('', 'steam')) + external_id TEXT NOT NULL DEFAULT '' CHECK (external_id = '' OR external_id ~ '^[1-9][0-9]{0,9}$'); CREATE INDEX apps_external_ref_idx ON apps (external_source, external_id) WHERE external_id <> ''. Together the two columns say "this app IS provider X's title Y", today only ('steam', <appid>). NOTHING existing changes: both default to '' = "not a provider title", the state of every existing row, so no backfill and no behaviour change on upgrade. The apps_external_id_ck regex is ARGUMENT-INJECTION CONTAINMENT, not tidiness — the appid is eventually rendered into STEAM_STARTUP_FLAGS, which the quasar-steam entrypoint word-splits with `read -r -a`, so the constraint is what stops a stored '480 -foo' reaching the Steam client as two extra arguments; it is one of four validation points and the only one that survives an admin editing the column by hand later. The index is PARTIAL because every app in a pre-discovery catalogue has '' and a full index would be almost entirely one dead key. SCOPE: spec §4.1 lands five columns; parent_app_id, origin, library_provider, the derived-tile shape CHECK and the (parent_app_id, external_source, external_id) unique index are all PHASE 3 and deliberately not here — Phase 1 ships only what it reads, which is artwork resolution by id instead of by fuzzy title. The down migration drops the index, both CHECKs and both columns in symmetric order; which apps were tagged is lost, so a re-apply leaves every app back on the fuzzy title path until an admin re-tags them — a tagging, not a cache (the app_artwork rows are keyed on app_id and survive).
+  0043_entitlements.up.sql -- (Steam library discovery Phase 2 — the TABLE is additive, WHAT READS IT IS NOT: GET /v1/apps becomes entitlement-filtered for every role and the launch/swap paths gain a terminal 403; see control-api.md. Opus + human sign-off.) CREATE entitlements (id UUID PK, subject_type TEXT CHECK IN ('user','all'), subject_id UUID NULL -> users ON DELETE CASCADE, app_id UUID -> apps ON DELETE CASCADE, granted_by TEXT CHECK IN ('admin','provider','migration'), granted_by_user UUID NULL -> users ON DELETE SET NULL, source_ref TEXT DEFAULT '', created_at) + CONSTRAINT entitlements_subject_shape_ck CHECK ((subject_type = 'all') = (subject_id IS NULL)) + UNIQUE INDEX entitlements_all_uk (app_id) WHERE subject_type='all' + UNIQUE INDEX entitlements_user_uk (subject_id, app_id) WHERE subject_type='user' + INDEX entitlements_app_idx (app_id) + THE BACKFILL. TWO PARTIAL UNIQUE INDEXES, NOT ONE PLAIN UNIQUE: Postgres does not treat NULLs as equal in a UNIQUE, so a single UNIQUE (subject_type, subject_id, app_id) would consider every ('all', NULL, <app>) row distinct and silently permit unlimited duplicate 'all' rows — quietly, because the read predicate is EXISTS, so the list would look right while a revoke that deletes "the" row left the app visible and a grant's ON CONFLICT had nothing to conflict on. THE BACKFILL (INSERT SELECT 'all', NULL, id, 'migration' FROM apps) IS IN THIS TRANSACTION AND IS THE MOST LOAD-BEARING STATEMENT IN THE MIGRATION: filtering goes live in the same deploy, and against an empty table it returns nothing — every user's library goes blank on every deployment simultaneously, and it would SHIP (migration applies, service boots, go-test-db passes because the tests create their own entitlements, web build passes). There is no automated gate between "empty table" and "every library is empty" other than this INSERT; with it, Phase 2's day-one behaviour change is EXACTLY ZERO. Disabled apps ARE backfilled — the filter is ANDed with enabled=true so they are invisible either way today, but skipping them would mean re-enabling an app silently failed to bring it back months later with nothing to point at. granted_by='migration' (not 'admin') keeps the backfill distinguishable forever. 'provider' is in the CHECK but NOTHING WRITES IT YET — that is Phase 4; it is here so Phase 4 needs no ALTER and so revoking one is already a working path. NUMBERING: the spec says 0042 throughout, written when Phases 1 and 2 shared a migration; Phase 1 shipped first and took it, and §13's "0042 continued, or 0043 if Phase 2 shipped separately" is the clause that applies. The down migration drops the table, and therefore the backfill AND every grant made since — a re-apply re-runs the backfill, so the catalogue returns FULLY OPEN rather than at whatever narrower state was configured: a widening, safe for availability and UNSAFE for confidentiality, so dump entitlements before rolling back any deployment where access has actually been restricted.
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`
