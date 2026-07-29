@@ -526,7 +526,9 @@ paths:
         UI-P7. Exactly one intent per request. `provider_ref` accepts a candidate from
         POST .../artwork/search. `tile_url`/`hero_url` fetch operator-supplied art - the path for
         anything a games database does not have, including every desktop app. `rematch` re-runs
-        automatic matching now instead of waiting for the background sweep.
+        automatic matching now instead of waiting for the background sweep; it REFUSES a locked
+        record with 409 unless `force` is also sent (#385 - it previously cleared unconditionally,
+        silently discarding the correction the flag exists to protect).
         An operator-supplied URL is ATTACKER-ADJACENT input (an operator pastes what they were
         sent) and goes through the same guards as a provider URL with no exception for admin
         privilege: http(s) only, resolved address must be publicly routable (loopback, RFC1918,
@@ -614,6 +616,48 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "413": { description: "The image exceeds the configured byte cap." }
+
+  /v1/admin/artwork/reresolve:
+    post:
+      tags: [admin, apps]
+      summary: Re-resolve artwork for the whole catalogue.
+      description: >-
+        #385. Clears and re-runs automatic matching for every app. Exists because a change to the
+        PROVIDER QUERY cannot reach apps that already have a record - automatic resolution returns
+        early for those by design - so the move to a 2:3 portrait tile crop would otherwise leave
+        existing apps on their old landscape art forever. Deliberately an explicit admin action
+        rather than a boot-time migration: the bytes come from a third party, and spending a
+        deployment's third-party budget unasked would be the wrong default.
+        LOCKED RECORDS ARE SKIPPED AND COUNTED, never overwritten; `force` is the only way past an
+        operator's manual correction. Per-app failures are counted and stepped over, leaving that
+        app with no record - which is the background sweep's own work-queue predicate, so it is
+        retried on the next tick rather than lost. Orphaned blobs are reclaimed by the existing
+        boot-time orphan sweep; no new reclamation path is added here.
+      x-required-role: admin
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                force: { type: boolean, description: "Also re-resolve locked records. Default false." }
+      responses:
+        "200":
+          description: The sweep's counts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, resolved, skipped_locked, failed]
+                properties:
+                  total: { type: integer, description: "Apps considered." }
+                  resolved: { type: integer, description: "Apps cleared and re-resolved." }
+                  skipped_locked: { type: integer, description: "Apps left alone because their record is locked." }
+                  failed: { type: integer, description: "Apps that errored; logged and stepped over." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   # ─── hosts ───────────────────────────────────────────────────────────────
   /v1/hosts:
@@ -1727,7 +1771,9 @@ components:
         cover_url:
           type: [string, "null"]
           description: >-
-            UI-P7: the TILE crop - the 16:10 library-tile artwork. Null when the app has no
+            UI-P7: the TILE crop - the 2:3 PORTRAIT library-tile artwork (16:10 before #385; the
+            move to portrait box art is an operator-directed deviation from the signed-off mockup,
+            and the hero crop stays wide). Null when the app has no
             artwork, which is the shipped default and renders the gradient tile. Written
             EXCLUSIVELY by the artwork service (/v1/admin/apps/{id}/artwork) for any app that
             has an artwork record; a value set directly via AppWrite is honoured only while the
@@ -2201,7 +2247,7 @@ components:
           description: >-
             The provider-side title that was matched. Surfaced so an operator can SEE that
             "Portal" matched "Portal Knights" before deciding to override it.
-        tile_url: { type: [string, "null"], description: "Local /v1/artwork/... path for the 16:10 tile crop, or null." }
+        tile_url: { type: [string, "null"], description: "Local /v1/artwork/... path for the 2:3 portrait tile crop, or null." }
         hero_url: { type: [string, "null"], description: "Local /v1/artwork/... path for the wide hero crop, or null." }
         attribution: { type: string, description: "Credit line to render beside the art, when the source asks for one." }
         locked:
@@ -2249,7 +2295,8 @@ components:
         provider_ref: { type: string, description: "Accept this candidate from a prior .../artwork/search." }
         tile_url: { type: string, description: "Fetch operator-supplied art for the tile crop. Absent leaves the existing tile untouched." }
         hero_url: { type: string, description: "Fetch operator-supplied art for the hero crop. Absent leaves the existing hero untouched." }
-        rematch: { type: boolean, description: "Re-run automatic matching now instead of waiting for the background sweep." }
+        rematch: { type: boolean, description: "Re-run automatic matching now instead of waiting for the background sweep. 409 conflict when the record is locked, unless force is also sent." }
+        force: { type: boolean, description: "Qualifies `rematch` ONLY: replace a locked record. The other intents set locked themselves and were never blocked by it." }
     AppArtworkCandidates:
       type: object
       required: [candidates, provider_configured, provider_name, provider_origin]

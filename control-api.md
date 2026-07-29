@@ -2737,11 +2737,17 @@ database will never carry a solved case rather than a permanent gradient.
 
 ### Two crops, not one image scaled
 
-`cover_url` is the **TILE** crop for the 16:10 library-tile frame; `hero_url` is the **HERO**
-crop, a much wider banner for the detail/hero panels. They are **different source assets**. A
-~2.1:1 tile stretched into a ~3:1 hero reads as a blown-up thumbnail, which is the specific
-failure this split exists to avoid. Either may be null independently; a client falls back
-`hero_url` → `cover_url` → the gradient tile.
+`cover_url` is the **TILE** crop for the **2:3 portrait** library-tile frame; `hero_url` is the
+**HERO** crop, a much wider banner for the detail/hero panels. They are **different source
+assets**. A 2:3 tile stretched into a ~3:1 hero reads as a blown-up thumbnail, which is the
+specific failure this split exists to avoid. Either may be null independently; a client falls
+back `hero_url` → `cover_url` → the gradient tile.
+
+**The tile was 16:10 until issue #385.** The provider's most common grid dimension is portrait
+box art (600×900), which is far more recognisable per pixel, so the tile frame and the provider
+query both moved to portrait. This is an **operator-directed deviation** from the signed-off
+16:10 mockup, and `design_handoff_quasar/` was updated alongside it. **The hero crop is
+unchanged and still wide** — the two-crop split survives the change intact.
 
 ### Cached locally, never hotlinked
 
@@ -2814,9 +2820,16 @@ Exactly one intent per request:
   leaves that crop untouched, so an operator can replace just the hero.
 - `{"rematch": true}` — re-run automatic matching now instead of waiting for the sweep. Wanted
   right after a key is first configured, when every app carries a `none` row from before.
+- `{"rematch": true, "force": true}` — the same, but past a `locked` record. `force` qualifies
+  **only** `rematch`; the other two intents set `locked` themselves and were never blocked by it.
 
 Any override sets `locked: true`, and **the automatic sweep never touches a locked record** — a
 correction must not be silently re-broken.
+
+**`rematch` now honours `locked` too *(#385 amendment)*.** It previously cleared the record
+unconditionally, so an explicit rematch silently discarded an admin's correction — the one thing
+the flag exists to prevent. A `rematch` against a locked record is now `409 conflict`; `force:
+true` is the deliberate override.
 
 An operator-supplied URL is **attacker-adjacent input**: an operator pastes what they were sent.
 It goes through exactly the same guards as a provider URL, with **no exception for admin
@@ -2839,11 +2852,32 @@ Clears the record and NULLs both URLs: back to the gradient tile. Cached blobs a
 content-addressed and possibly **shared** with another app, so they are deliberately not deleted
 here; unreferenced ones are reclaimed by the service's orphan sweep.
 
+### `POST /v1/admin/artwork/reresolve` *(admin)* — bulk re-resolve *(#385)*
+
+Catalogue-wide "fetch it all again". Body `{"force": false}` (optional; absent means `false`).
+Returns `{ "total", "resolved", "skipped_locked", "failed" }`.
+
+It exists because a change to the **provider query** cannot reach apps that already have a
+record — automatic resolution returns early for those, by design — so the portrait tile change
+above would leave existing apps on their old landscape art forever. **Not automatic and not a
+migration:** the bytes come from a third party, and spending a deployment's third-party budget
+without anyone asking would be the wrong default. It is an explicit operator action.
+
+- **`locked` records are skipped and counted**, never overwritten. `{"force": true}` overrides
+  that, and is the only way to replace an operator's manual correction in bulk.
+- Per-app failures are counted, logged and stepped over — one unmatchable app never stalls the
+  queue. A failed app is left with **no** record, which is exactly the background sweep's own
+  work-queue predicate, so it is picked up again on the next tick rather than lost.
+- `409 conflict` when no provider is configured, resolved once up front rather than N times.
+- Cached blobs the re-resolve orphans are reclaimed by the existing boot-time orphan sweep; this
+  route adds no new reclamation path.
+- Audited as `app.artwork.reresolve` with counts only — no app names or ids in the payload.
+
 ### Authorization
 
 Every route except `GET /v1/artwork/{asset}` is `RequireAuth → RequireAdmin`, enforced by the
 middleware at route registration. Hiding the Artwork panel from a non-admin UI is **not** the
-access control (invariant #6): a valid non-admin token is `403` on all five admin routes, and a
+access control (invariant #6): a valid non-admin token is `403` on all six admin routes, and a
 missing token is `401`.
 
 ### The app write shape and `cover_url` (UI-P7 amendment, 2026-07-28)
