@@ -751,6 +751,24 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > companion to the counters). **No route, status code, or error code changes; `agent-api.md`
 > untouched.**
 >
+> **Amendment — scan observability + backfill (2026-08-01, same-day follow-on), additive,
+> signed off.** Two things one idea: make a scan's work **visible** and make it **complete-able**.
+> (1) Per-scan outcome counts (`observed, suppressed, created, disabled, granted, revoked,
+> rejected, backfilled`) are **stored on the scan row** at reconcile (migration 0048 — rows from
+> before it read zero, which a UI presents as "not recorded") and surfaced as
+> `LibraryStatus.recent_scans` (last 20 terminal scans, newest first, with `user`/`host` names
+> and the failure `error`). Under auto-publish, "nothing appeared" and "nothing ran" were
+> indistinguishable to an operator whose library was already fully published; this closes that
+> at the per-scan grain, the same failure `inert_reason` closes at the instance grain.
+> (2) Reconcile gains a **backfill** step: existing tiles of the scanned parent whose enrichable
+> fields are **empty** (`description`, initially) are filled from the same appdetails source the
+> suppression rung uses — gated by the **same** appdetails switch (off ⇒ no backfill, no
+> third-party call), bounded per scan, and **fill-blanks-only** (a non-empty field is never
+> overwritten; operator edits survive every scan). "Scan now" thereby also becomes "fetch
+> newly-supported data for tiles I already have" as enrichment grows — no delete-and-rediscover.
+> **No route, status code, or error code changes; `agent-api.md` untouched** (the agent's report
+> body is unchanged; backfill is server-side reconciliation behaviour).
+>
 > Backed by `schema.md` (migration 0045: `library_scans`, `library_observations`,
 > `library_appid_rules`, and `instance_settings.library_discovery_enabled`) and `openapi.yaml`
 > (the seven paths, the `Library*` shapes, and the settings field). **Migration numbering:** the

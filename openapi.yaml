@@ -2094,7 +2094,17 @@ paths:
         granted and revoked. Tile creation and the first entitlement commit TOGETHER, because
         auto-publish means they are no longer separated by an admin decision and a tile that exists
         with no entitlement is a window in which a user sees nothing where the feature just claimed
-        to add something. An ok:false report CHANGES NOTHING BUT ITS OWN ROW: revocation is driven
+        to add something.
+        Scan-observability amendment (2026-08-01): reconciliation additionally BACKFILLS existing
+        tiles of this parent whose enrichable fields are EMPTY (description, initially), from the
+        same appdetails source the suppression rung uses - gated by the SAME appdetails switch (off
+        = no backfill, no third-party call), bounded per scan, and FILL-BLANKS-ONLY: a non-empty
+        field is never overwritten, so an operator's edit survives every scan. This is why "Scan
+        now" is also the "fetch newly-supported data for what I already have" button - as
+        enrichment capabilities grow, a re-scan tops up blanks instead of requiring tiles to be
+        deleted and re-discovered. The per-scan outcome counts (including backfilled) are stored
+        on the scan row (migration 0048) and surfaced via LibraryStatus.recent_scans.
+        An ok:false report CHANGES NOTHING BUT ITS OWN ROW: revocation is driven
         by absence, and absence is exactly what a transient error looks like, so "reconcile whatever
         entries did arrive" would make a partial walk indistinguishable from an uninstall. 404 for a
         scan the calling host does not own - indistinguishable from one that does not exist,
@@ -4724,7 +4734,7 @@ components:
         failed: { type: integer }
     LibraryStatus:
       type: object
-      required: [enabled, storage_provider, scan_interval_secs, appdetails_lookup, interval_overridden_by_env, appdetails_overridden_by_env, last_scan_completed_at, inert_reason, scans]
+      required: [enabled, storage_provider, scan_interval_secs, appdetails_lookup, interval_overridden_by_env, appdetails_overridden_by_env, last_scan_completed_at, recent_scans, inert_reason, scans]
       properties:
         interval_overridden_by_env:
           type: boolean
@@ -4746,6 +4756,38 @@ components:
             Admin-libraries amendment (2026-08-01). When the most recent scan finished (any
             terminal outcome), or null when no scan has ever completed - the one-glance
             "is discovery actually doing anything" companion to the counters.
+        recent_scans:
+          type: array
+          maxItems: 20
+          description: >-
+            Scan-observability amendment (2026-08-01, same-day follow-on). The last 20 TERMINAL
+            scans (reported or failed), newest first, each with its stored outcome counts - the
+            validation surface the log line used to be the only copy of. Under auto-publish the
+            only observable signal of a working scan was tiles appearing; an operator whose
+            library is already fully published pressed "Scan now" and could not tell it from a
+            no-op. Counts are STORED AT RECONCILE (migration 0048) - scans reported before 0048
+            display zeros, which the UI should present as "not recorded", not as "nothing
+            happened". `backfilled` counts existing tiles whose missing data (description,
+            initially) a scan filled in - see the backfill paragraph on the scan-report route:
+            a backfill FILLS BLANKS AND NEVER OVERWRITES a non-empty field, so an operator edit
+            is never clobbered by a scan.
+          items:
+            type: object
+            required: [user, host, state, completed_at, observed, suppressed, created, disabled, granted, revoked, rejected, backfilled, error]
+            properties:
+              user: { type: string, description: "Username of the scanned home's owner." }
+              host: { type: string, description: "node_name of the host that ran the walk." }
+              state: { type: string, enum: [reported, failed] }
+              completed_at: { type: string, format: date-time }
+              observed: { type: integer }
+              suppressed: { type: integer }
+              created: { type: integer }
+              disabled: { type: integer }
+              granted: { type: integer }
+              revoked: { type: integer }
+              rejected: { type: integer }
+              backfilled: { type: integer }
+              error: { type: string, description: "Empty for reported scans." }
         enabled: { type: boolean, description: "instance_settings.library_discovery_enabled - the master switch and the only switch." }
         storage_provider: { $ref: "#/components/schemas/StorageProvider" }
         scan_interval_secs:
