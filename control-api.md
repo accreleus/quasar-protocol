@@ -2223,6 +2223,32 @@ than the account's last-seen probe, so a native session can never poison a subse
 launch on the same account with a profile Chrome cannot decode. The web SPA does not send this
 field; a native client (Phase 9) must send `client_type:"native"` to receive the lift.
 
+#### `mic` — microphone capture request (2026-08-02)
+> *Additive amendment — one optional top-level boolean request field on `POST /v1/sessions`, one
+> boolean on every session `stream` body, one instance setting. Changes no existing shape or
+> status code (absent ⇒ today's behavior exactly).*
+
+`POST /v1/sessions` accepts an optional `"mic": true | false` field (absent ⇒ `false`). When
+`true` **and** the instance setting `mic_capture_enabled` is on, the control plane grants
+microphone capture for the session: `session_assign.stream.mic = true` is dispatched to the
+agent (`agent-api.md`), and the host's `pc:"audio"` offer carries a client→host microphone
+m-line (`signaling.md` §Microphone m-line). When the instance setting is off (or the field is
+absent/`false`), the launch **succeeds normally** with no microphone — a mic request against a
+mic-disabled instance is not an error, it is silently not granted, and the response reflects
+what was granted.
+
+Every session body's `stream` object gains **`mic`: bool** — the granted state, not the
+requested state. Enforcement is server-side at launch; there is no per-app or per-user
+granularity in v1.
+
+`mic_capture_enabled` (boolean, default `false`) joins `instance_settings` and appears on
+`GET /v1/admin/settings` / `PATCH /v1/admin/settings` (optional-pointer decode rule, same as
+every other settings field). Admin-gated server-side via the standard `RequireAuth →
+RequireAdmin` chain. Flipping it affects only **subsequent** launches; live sessions are
+untouched. Microphone *content* is never recorded, relayed to any endpoint other than the
+session's own app container, or logged; admin surfaces see only the granted/negotiated state
+(`session.effective_media`).
+
 #### Codec resolution (multi-codec)
 > *Additive amendment — session bodies gain `stream.codec`; `POST /v1/sessions` gains an optional
 > `stream.codec` override. Signed off 2026-07-25. Changes no existing shape or status code.*

@@ -54,7 +54,8 @@ PeerConnection the message belongs to:
 ```
 
 - `pc` is `"video"` or `"audio"`. The **video** PeerConnection carries the video track and the
-  `"input"` DataChannel; the **audio** PeerConnection carries only the audio track.
+  `"input"` DataChannel; the **audio** PeerConnection carries the host→client audio track and,
+  when negotiated, the client→host microphone m-line (see the microphone amendment below).
 - `pc` is **optional**. When absent, the message belongs to the `"video"` PeerConnection (this
   is the pre-amendment behaviour — a single PeerConnection carrying video + audio + DataChannel).
   This keeps the field backwards-compatible: an old client that doesn't send `pc` still works
@@ -72,6 +73,30 @@ PeerConnection the message belongs to:
 - Both PeerConnections use the same STUN/TURN config. ICE gathering runs in parallel for both.
 - An audio-disabled session (`QUASAR_AUDIO_DISABLED=1` on the agent) creates only the video
   PeerConnection; no `pc: "audio"` messages are sent.
+
+### Microphone m-line on the audio PeerConnection (amendment, 2026-08-02)
+
+When a session is launched with microphone capture granted (see `control-api.md`
+`POST /v1/sessions` `mic` and `agent-api.md` `session_assign` `stream.mic`), the host's
+`pc:"audio"` offer carries **two** audio m-lines instead of one:
+
+1. the existing host→client audio m-line (host `sendonly`), and
+2. a client→host microphone m-line (host `recvonly`), Opus, clock-rate 48000.
+
+Rules:
+
+- The mic m-line is present in the **first** (and only) audio offer or not at all. The
+  single-offer-per-PeerConnection rule is unchanged — microphone availability is decided at
+  launch and never renegotiated mid-session.
+- The client answers the mic m-line with `sendonly` (its perspective). It MAY answer with no
+  live track attached and attach/replace the microphone track later
+  (`RTCRtpSender.replaceTrack`); enabling/disabling the mic mid-session is a client-local
+  track operation and produces **no signaling messages**.
+- A session launched without mic (or on a host/instance where the feature is disabled)
+  produces exactly today's single-m-line audio offer — the pre-amendment wire is unchanged.
+- Message vocabulary, `pc` values, and all other signaling rules are unchanged.
+- An audio-disabled session (`QUASAR_AUDIO_DISABLED=1`) has no audio PeerConnection and
+  therefore no microphone path.
 
 ## Phase 0 simplifications (revisit later)
 - No authentication on the WebSocket. Phase 1 puts signaling behind the control plane with an authenticated, single-use session token in the connect URL.

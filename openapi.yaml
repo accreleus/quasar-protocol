@@ -1491,6 +1491,12 @@ paths:
                   description: >-
                     Admin-libraries amendment (2026-08-01). Absent = unchanged (pointer decode,
                     same rule as library_discovery_enabled above).
+                mic_capture_enabled:
+                  type: boolean
+                  description: >-
+                    Microphone capture amendment (2026-08-02). Absent = unchanged (pointer
+                    decode). Default false. Gates the POST /v1/sessions mic request; affects
+                    subsequent launches only.
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SettingsEnvelope" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
@@ -2486,6 +2492,7 @@ components:
         h264_profile: { $ref: "#/components/schemas/H264Profile" }
         codec: { allOf: [ { $ref: "#/components/schemas/Codec" } ], description: "Multi-codec: the resolved session video codec on session.stream; absent on an app's display_stream. Additive; h264 for every pre-multi-codec session. h264_profile applies only when codec is h264." }
         playout0_ms: { type: integer, description: "AS-02: tier-selected initial receiver playout target (ms) on session.stream; absent on an app's display_stream." }
+        mic: { type: boolean, description: "Microphone capture (2026-08-02): the GRANTED state on session.stream (request mic AND instance mic_capture_enabled); absent on an app's display_stream and on pre-amendment sessions (absent = false)." }
     AppListItem:
       # UI-P1: kind + favourite are added HERE, so App and AdminApp — which are allOf
       # compositions over this schema — inherit both. There is no read shape that omits them.
@@ -2934,6 +2941,7 @@ components:
         app_id: { type: string, format: uuid }
         profile_id: { type: string, description: "User-facing selector (AS10-03)." }
         client_type: { type: string, enum: [browser, native], description: "Absent ⇒ browser." }
+        mic: { type: boolean, description: "Microphone capture request (2026-08-02). Absent ⇒ false. Granted only when instance setting mic_capture_enabled is on; an ungranted request is not an error — the session stream body reports the granted state." }
         stream:
           type: object
           description: "Admin/debug/back-compat override; beats profile_id field-by-field."
@@ -3070,10 +3078,16 @@ components:
       properties:
         settings:
           type: object
-          required: [registration_mode, storage_provider, library_discovery_enabled, library_discovery_interval_minutes, library_discovery_appdetails_enabled, updated_by, updated_at]
+          required: [registration_mode, storage_provider, library_discovery_enabled, library_discovery_interval_minutes, library_discovery_appdetails_enabled, mic_capture_enabled, updated_by, updated_at]
           properties:
             registration_mode: { $ref: "#/components/schemas/RegistrationMode" }
             storage_provider: { $ref: "#/components/schemas/StorageProvider" }
+            mic_capture_enabled:
+              type: boolean
+              description: >-
+                Microphone capture amendment (2026-08-02). Instance-wide gate for the
+                POST /v1/sessions mic request. Default false (ship-dark). Server-enforced at
+                launch; flipping it affects subsequent launches only.
             library_discovery_interval_minutes:
               type: integer
               minimum: 15

@@ -473,6 +473,19 @@ capability but does not by itself mirror ordinary browser sessions to a physical
 > plane) ⇒ H.264, so every pre-multi-codec session and older agent is unaffected. Additive; no
 > existing field or shape changes.
 
+> *(microphone capture, additive, 2026-08-02)* The `stream` block may also carry an optional
+> **`mic`: bool** (omitted ⇒ `false`). When `true`, the agent adds a `recvonly` Opus
+> transceiver (clock-rate 48000) to the audio webrtcbin **before** the first offer, decodes the
+> client's microphone track, and plays it into the session's PulseAudio sidecar `quasar_mic`
+> sink, whose remapped source (`quasar_mic_src`) the app container records for voice chat (see
+> `signaling.md` §Microphone m-line). The control plane sends `true` only when the instance
+> setting `mic_capture_enabled` is on **and** the client requested a microphone at launch
+> (`control-api.md` `POST /v1/sessions` `mic`). Omitted/`false` (older control plane, feature
+> disabled, or not requested) ⇒ today's single-m-line audio offer, byte-identical wire.
+> `local_only` topology has no WebRTC pipeline and ignores the flag. The agent reports the
+> microphone state in its `session.effective_media` trace payload (`mic`:
+> `"off" | "negotiated" | "active"`). Additive; no existing field or shape changes.
+
 ### `session_start` — bring the pipeline up
 ```json
 { "type": "session_start", "id": "<command-id>", "session_id": "<uuid>" }
