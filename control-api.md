@@ -734,6 +734,23 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > party — the same trade the artwork work rejected for hotlinking, which is why it is an
 > operator's decision and never a default.
 >
+> **Amendment — admin-libraries (2026-08-01), additive, signed off.** The two env knobs above
+> gain **database-settable counterparts** so the admin UI's Steam library page can configure
+> them: `instance_settings.library_discovery_interval_minutes` (integer, 15–10080, default 360;
+> out-of-bounds `PATCH` is 400 `validation_failed`) and
+> `instance_settings.library_discovery_appdetails_enabled` (boolean, default false). Both appear
+> on `GET /v1/admin/settings` (always) and are accepted by `PATCH /v1/admin/settings` (absent =
+> unchanged, the same pointer-decode rule as `library_discovery_enabled`). **The env vars are
+> overrides, not defaults**: when set, `QUASAR_LIBRARY_SCAN_INTERVAL` wins — its `0` = dark
+> regardless-of-the-database semantics unchanged — and `QUASAR_STEAM_APPDETAILS_LOOKUP` wins,
+> so a privacy-hardened deployment can pin the lookup off in the environment.
+> `LibraryStatus.scan_interval_secs` and `.appdetails_lookup` stay the **resolved** values, and
+> `LibraryStatus` additionally reports `interval_overridden_by_env`,
+> `appdetails_overridden_by_env` (so a UI greys a control the environment pinned) and
+> `last_scan_completed_at` (nullable; when the most recent scan finished, the one-glance
+> companion to the counters). **No route, status code, or error code changes; `agent-api.md`
+> untouched.**
+>
 > Backed by `schema.md` (migration 0045: `library_scans`, `library_observations`,
 > `library_appid_rules`, and `instance_settings.library_discovery_enabled`) and `openapi.yaml`
 > (the seven paths, the `Library*` shapes, and the settings field). **Migration numbering:** the

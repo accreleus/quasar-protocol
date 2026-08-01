@@ -1478,6 +1478,19 @@ paths:
                     library_discovery_enabled would read false and silently switch discovery off
                     every time an admin changed the registration mode. A PATCH naming no known
                     field is a no-op that returns current state.
+                library_discovery_interval_minutes:
+                  type: integer
+                  minimum: 15
+                  maximum: 10080
+                  description: >-
+                    Admin-libraries amendment (2026-08-01). Absent = unchanged. Out of bounds
+                    (below 15 or above 10080 minutes) is 400 validation_failed. Setting it does
+                    not lift an environment override - LibraryStatus reports the resolved value.
+                library_discovery_appdetails_enabled:
+                  type: boolean
+                  description: >-
+                    Admin-libraries amendment (2026-08-01). Absent = unchanged (pointer decode,
+                    same rule as library_discovery_enabled above).
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SettingsEnvelope" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
@@ -3047,10 +3060,31 @@ components:
       properties:
         settings:
           type: object
-          required: [registration_mode, storage_provider, library_discovery_enabled, updated_by, updated_at]
+          required: [registration_mode, storage_provider, library_discovery_enabled, library_discovery_interval_minutes, library_discovery_appdetails_enabled, updated_by, updated_at]
           properties:
             registration_mode: { $ref: "#/components/schemas/RegistrationMode" }
             storage_provider: { $ref: "#/components/schemas/StorageProvider" }
+            library_discovery_interval_minutes:
+              type: integer
+              minimum: 15
+              maximum: 10080
+              description: >-
+                Admin-libraries amendment (2026-08-01). The operator-set scan interval, minutes,
+                default 360. THE DATABASE COLUMN IS THE OPERATOR PATH AND THE ENV VAR IS AN
+                OVERRIDE, NOT A DEFAULT: when QUASAR_LIBRARY_SCAN_INTERVAL is set it wins - and
+                its documented 0 = hard-kill-regardless-of-the-database-flag semantics are
+                unchanged. LibraryStatus.scan_interval_secs remains the RESOLVED value
+                (database-then-env-override), and LibraryStatus.interval_overridden_by_env says
+                which source won so a UI can grey a control the environment has pinned.
+            library_discovery_appdetails_enabled:
+              type: boolean
+              description: >-
+                Admin-libraries amendment (2026-08-01). The operator-set third-party appdetails
+                lookup switch, default false - the same privacy decision
+                QUASAR_STEAM_APPDETAILS_LOOKUP carried, now settable from the admin UI. Same
+                override rule as the interval: a SET env var wins (a privacy-hardened deployment
+                can pin it off in the environment), and
+                LibraryStatus.appdetails_overridden_by_env reports when that happened.
             library_discovery_enabled:
               type: boolean
               description: >-
@@ -4690,25 +4724,51 @@ components:
         failed: { type: integer }
     LibraryStatus:
       type: object
-      required: [enabled, storage_provider, scan_interval_secs, appdetails_lookup, inert_reason, scans]
+      required: [enabled, storage_provider, scan_interval_secs, appdetails_lookup, interval_overridden_by_env, appdetails_overridden_by_env, last_scan_completed_at, inert_reason, scans]
       properties:
+        interval_overridden_by_env:
+          type: boolean
+          description: >-
+            Admin-libraries amendment (2026-08-01). True when QUASAR_LIBRARY_SCAN_INTERVAL is set
+            in the environment, so scan_interval_secs resolved from it rather than from
+            instance_settings.library_discovery_interval_minutes. A UI should grey its interval
+            control and say the environment pinned it.
+        appdetails_overridden_by_env:
+          type: boolean
+          description: >-
+            Admin-libraries amendment (2026-08-01). True when QUASAR_STEAM_APPDETAILS_LOOKUP is
+            set in the environment; appdetails_lookup then reports the env value, not the
+            database column. Same UI treatment as interval_overridden_by_env.
+        last_scan_completed_at:
+          type: [string, "null"]
+          format: date-time
+          description: >-
+            Admin-libraries amendment (2026-08-01). When the most recent scan finished (any
+            terminal outcome), or null when no scan has ever completed - the one-glance
+            "is discovery actually doing anything" companion to the counters.
         enabled: { type: boolean, description: "instance_settings.library_discovery_enabled - the master switch and the only switch." }
         storage_provider: { $ref: "#/components/schemas/StorageProvider" }
         scan_interval_secs:
           type: number
           description: >-
-            The RESOLVED QUASAR_LIBRARY_SCAN_INTERVAL in seconds (default 6h = 21600), so an operator
-            can see what their duration string actually became. 0 disables discovery ENTIRELY
-            regardless of the database flag - the kill switch that lets an operator guarantee no scan
-            and no third-party call without database access.
+            The RESOLVED scan interval in seconds, so an operator can see what their setting
+            actually became. Admin-libraries amendment (2026-08-01): resolution is
+            instance_settings.library_discovery_interval_minutes (default 360 = 21600s) unless
+            QUASAR_LIBRARY_SCAN_INTERVAL is set, in which case the env var wins - including its
+            unchanged 0 semantics: 0 disables discovery ENTIRELY regardless of the database
+            flag, the kill switch that lets an operator guarantee no scan and no third-party
+            call without database access.
         appdetails_lookup:
           type: boolean
           description: >-
-            QUASAR_STEAM_APPDETAILS_LOOKUP, DEFAULT OFF. Rung 5 of the ladder. IT DISCLOSES TO A
-            THIRD PARTY EXACTLY WHICH STEAM APPIDS THIS INSTANCE HAS INSTALLED - the same privacy
-            class as artwork hotlinking, which was rejected for the same reason - which is why it is
-            an operator's decision and never a default. Contained so that enabling it cannot override
-            a rule an admin wrote, and bounded per scan.
+            The RESOLVED third-party appdetails switch, DEFAULT OFF. Rung 5 of the ladder. IT
+            DISCLOSES TO A THIRD PARTY EXACTLY WHICH STEAM APPIDS THIS INSTANCE HAS INSTALLED -
+            the same privacy class as artwork hotlinking, which was rejected for the same reason
+            - which is why it is an operator's decision and never a default. Admin-libraries
+            amendment (2026-08-01): resolution is
+            instance_settings.library_discovery_appdetails_enabled unless
+            QUASAR_STEAM_APPDETAILS_LOOKUP is set, in which case the env var wins. Contained so
+            that enabling it cannot override a rule an admin wrote, and bounded per scan.
         inert_reason:
           type: string
           description: >-
