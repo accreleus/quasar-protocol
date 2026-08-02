@@ -69,6 +69,26 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > `h265` is the wire spelling of HEVC (the control-plane profile catalog's `hevc` maps to `h265` on
 > this wire). See §`session_assign` and §`capacity`.
 
+> **Amendment — transport slot #2 (WebTransport, EXPERIMENTAL), additive, requires sign-off.**
+> Adds the second media transport (`transport-webtransport.md`; spec
+> `docs/design/plans/2026-08-02-webtransport-webcodecs-spec.md`, quasar#430). Two additive pieces
+> on this wire. **(1)** The agent `capacity` report gains optional **`transports`:
+> `["webrtc", ...]`** — the media transports the agent can serve — and, when `"webtransport"` is
+> listed, **`wt_port`: int**, the agent's QUIC/WebTransport listener port. Omitted ⇒ the control
+> plane assumes `["webrtc"]` (an older agent keeps working byte-identically). **(2)** The
+> `session_assign` message gains an optional **`transport`: `"webrtc" | "webtransport"`** (omitted ⇒
+> `"webrtc"`) and, when `"webtransport"`, a **`wt_token_hash`** + **`wt_token_expires_at`** pair —
+> the hash of the single-use connect token the control plane minted for the client
+> (`transport-webtransport.md` §Authentication), which the agent validates locally at WebTransport
+> connect time (no control-plane round trip on the connect path). A fresh token from
+> `POST /v1/sessions/{id}/transport-token` reaches the agent as a new control→node message
+> **`session_transport_token`** `{session_id, wt_token_hash, wt_token_expires_at}` (additive
+> `ControlMsg` variant; an older agent ignores the unknown `type`, which is safe because an older
+> agent never advertised `"webtransport"`). A `"webtransport"` session changes nothing upstream of
+> the transport slot: the assign/start/stop lifecycle, `session_state` callbacks, metrics, and
+> trace messages are identical, and the signaling relay (§Signaling relay) is simply never used for
+> it. No existing field, message, or ack contract changes.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated

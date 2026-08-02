@@ -894,6 +894,31 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > or required-field change, so `TestOpenAPIDrift` sees nothing move — which is correct, and is the
 > known limit of that gate rather than a gap in this amendment).
 
+> **Amendment — transport slot #2 (WebTransport, EXPERIMENTAL), additive, requires sign-off.**
+> Adds the second media transport (`transport-webtransport.md`; spec
+> `docs/design/plans/2026-08-02-webtransport-webcodecs-spec.md`, quasar#430). Ship-dark: a client
+> that never asks sees byte-identical behaviour. Three additive pieces. **(1)** `POST /v1/sessions`
+> accepts an optional **`transport`: `"webrtc" | "webtransport"`** preference (omitted ⇒
+> `"webrtc"`; bad value ⇒ `400 validation_failed`). Resolution is server-side, like codecs:
+> request ∩ host transport support (`agent-api.md` `capacity.transports`), with a **guaranteed
+> webrtc floor** — a `"webtransport"` request on a host that cannot serve it resolves to
+> `"webrtc"`, recorded, never an error. **(2)** When a session resolves to `"webtransport"`, the
+> launch response (and `GET /v1/sessions/{id}`) carries, **alongside the normal `signaling` block**
+> (kept so the client's automatic WebRTC fallback needs no second API call), a
+> **`transport_options.webtransport`** object: `{ url, token, expires_at, cert_hashes? }` — the
+> agent's WebTransport endpoint URL, the single-use connect token (plaintext exactly once, stored
+> hashed, 60 s TTL — the `signaling.token` policy verbatim), and optional SHA-256 certificate
+> hashes for `serverCertificateHashes`-pinned dev setups. The resolved transport also appears as
+> **`session.transport`** on every session body (`"webrtc"` for every pre-amendment session).
+> **(3)** A new endpoint **`POST /v1/sessions/{id}/transport-token`** mirrors
+> `POST /v1/sessions/{id}/signaling-token` exactly (same states, same error codes, same
+> single-use/concurrency semantics) but mints a WebTransport connect token, delivered to the agent
+> via `session_transport_token` (`agent-api.md` amendment). Authorization-table rows: both are
+> **owner-or-admin**, like the signaling-token endpoint. `openapi.yaml` changes land **with the
+> control-plane implementation** (M2) so `TestOpenAPIDrift` stays green — recorded here so the
+> prose, not the schema file, is the contract of record until then. No existing shape, status
+> code, or endpoint changes.
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives

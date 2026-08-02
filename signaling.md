@@ -123,6 +123,17 @@ Co-defined with `control-api.md` (mints the token) and `agent-api.md` (relays th
 > escalate** (Opus + sign-off), do not add a signaling message to make swap work. No shape on this
 > page changes. See `docs/phase2/P2-02-contract-app-swap.md`.
 
+> **Amendment — transport slot #2 (WebTransport, EXPERIMENTAL): signaling is BYPASSED, not
+> changed.** A session that resolves to the `"webtransport"` transport
+> (`transport-webtransport.md`) performs **no SDP exchange, no ICE, and opens no DataChannel** —
+> the client connects straight to the agent's WebTransport endpoint with the single-use token from
+> the launch response, and input rides a datagram channel carrying the `input.md` payload
+> verbatim. The control-plane signaling relay and this document's message shapes are unused for
+> such a session and **unchanged** for every WebRTC session (which remains the default and the
+> guaranteed fallback: the launch response still carries the `signaling` block even for a
+> webtransport session, so a client whose WebTransport connect fails falls back to this protocol
+> without a second API call). No shape on this page changes.
+
 ## What changes vs Phase 0
 1. **The WebSocket endpoint is the control plane, not the host.** The browser connects to the
    control plane's signaling endpoint (`wss://<control-plane>/v1/signal`), the same origin it
