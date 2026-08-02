@@ -2477,6 +2477,28 @@ ends `stopped` with `state_detail = "game exited"` — a normal end, not a failu
 other `state_detail` value it is free-text, human-readable and advisory (`schema.md`); clients
 must not branch on it for correctness.
 
+### `GET /v1/sessions/{id}/events` — session lifecycle push (SSE, 2026-08-02)
+> *Additive amendment — one new read-only endpoint, no existing shape changes. Signed off
+> alongside the game-exit lifecycle work; exists to replace client lifecycle POLLING with
+> push. The endpoint is for API clients (the browser SPA, a native client); app containers
+> never reach the control plane and are unaffected.*
+
+`text/event-stream` (SSE). Owner-or-admin bearer, exactly the authorization of
+`GET /v1/sessions/{id}` (`403` otherwise). Browsers consume it with fetch-streaming rather
+than `EventSource` so the `Authorization` header carries as normal.
+
+**One event type: `session`.** Its `data` is the same `{ "session": { ... } }` envelope as
+`GET /v1/sessions/{id}` — no new vocabulary, no delta encoding. Sent once immediately on
+subscribe (snapshot), then on every change to `state`, `state_detail`, `app_launch_state`,
+or `health_state` (coalesced, best-effort). The event carrying a **terminal** state is
+final: the server sends it and closes the stream. Comment lines (`:`) act as keep-alives
+(~25 s cadence).
+
+**A latency optimization, never an authority.** `GET /v1/sessions/{id}` remains canonical.
+A client MUST keep polling as its fallback: an older control plane answers `404` (feature
+absent — poll exactly as before this amendment), and a dropped stream is re-subscribed or
+polled — a client MUST NOT treat stream loss as a session-state signal.
+
 ### `GET /v1/sessions` — the user's sessions
 List, newest first, owner-scoped. Same item shape as `GET /v1/sessions/{id}`.
 

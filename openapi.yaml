@@ -1302,6 +1302,31 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/events:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [sessions]
+      summary: Server-sent session lifecycle events (owner or admin).
+      description: >-
+        Session-events amendment (2026-08-02): SSE stream (text/event-stream) replacing
+        lifecycle polling for clients that support it. One event type, `session`, whose data
+        is the same envelope as GET /v1/sessions/{id} — sent once on subscribe (snapshot) and
+        on every change to state / state_detail / app_launch_state / health_state; the event
+        for a terminal state is final and the server then closes the stream. Comment lines
+        (`:`) are keep-alives (~25s). Best-effort latency optimization, never an authority:
+        the GET remains canonical, and a client MUST retain polling as fallback (older
+        control plane -> 404; dropped stream -> re-subscribe or poll). Bearer-authenticated
+        like every session read (browsers use fetch-streaming, not EventSource, so the
+        Authorization header carries as normal).
+      responses:
+        "200":
+          description: SSE stream of `session` events (see description for framing).
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /v1/sessions/{id}/stats:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
