@@ -338,7 +338,9 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   "rtp_fps": 60.0,
   "rtp_bitrate_kbps": 15040,
   "frames_encoded": 299,
-  "frames_dropped": 1
+  "frames_dropped": 1,
+  "app_launch_state": "game_running",
+  "bytes_used": 123456789
 }
 ```
 - **Lightweight fields (always present):** realized `fps`, actual `bitrate_kbps`, mean
@@ -358,6 +360,31 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   configure-only commits do not increment `source_fps`. Maximum interpipe queue level, queue dwell p50/p95 and drop count; encode-time
   p50/p95; and RTP access-unit fps plus wire bitrate. Optional percentile fields are omitted
   in an empty window. Counters and maxima are per-window, bounded, and observational only.
+- **`app_launch_state`** *(optional string)* — coarse in-container application launch
+  state, when the app image reports one:
+  `"starting" | "client_only" | "game_running" | "game_exited"`.
+  `starting`: the app container is up but the application has not finished its own
+  startup. `client_only`: an intermediary client (e.g. the Steam client) is up but the
+  target title is not running. `game_running`: the target title is running (and, where
+  the image can tell, foreground). `game_exited`: the target title ran and has exited.
+  **Omitted entirely** when the image does not report launch state — absence means
+  *unknown*, and consumers MUST treat absence and `"unknown"`-like values identically
+  (fall back to transport-level readiness). It is a **hint and a metric, never a
+  session-state authority and never access control**: `session_state` remains the only
+  progress signal, and a session MUST function identically if the field never appears.
+  Detection is best-effort by construction (launcher-shim titles, out-of-tree
+  executables, and client quirks produce false negatives); consumers MUST NOT fail a
+  session on its value. An unrecognized value is treated as absent, not an error.
+- **`bytes_used`** *(optional, P5-03)* — last reported managed-home usage in bytes: the
+  agent's post-session measurement of the session's home directory (the `local` driver
+  measures the host path under the effective `QUASAR_HOME_ROOT`; `volume`-driver usage is
+  measured the same way via the mounted path). Emitted **once**, in the pre-terminal sample
+  just before the session goes `stopped`, and omitted from every other sample and whenever
+  the effective home root is empty. The control plane updates `user_homes.bytes_used` on
+  receipt (`schema.md`); freshness is **advisory** — a quota, if ever added, is enforced
+  against the last report, and storage usage is visibility-only today (`control-api.md`).
+  *Documented here as doc-drift repair: this field has been on the wire since P5-03; no
+  wire change.*
 - The control plane writes a `session_metrics` row with `source='agent'` (`schema.md`).
   A malformed or unparsable message is dropped without dropping the connection. A sample whose
   `session_id` is not currently `running` on this host (e.g. it arrived as the session went
@@ -386,11 +413,15 @@ samples; the control plane joins the two on one timeline for the diagnostic bund
 ```
 - **`type`** is the WS message discriminator (`"session_trace_event"`). **`event`** is the trace
   event type from the agent allow-list (`abr.retarget`, `pipeline.source_swapped`,
-  `encoder.drop_detected`, `webrtc.state_changed` — `trace-format.md` §3.2). **`payload`** is the
+  `encoder.drop_detected`, `webrtc.state_changed`, `app.launch_state` — `trace-format.md` §3.2). **`payload`** is the
   per-type object (`trace-format.md` §3). `ts_unix_ms` is the agent wall-clock at the event (same
   convention as `session_metrics.ts_unix_ms`).
 - **`webrtc.state_changed` — Connected/Completed both mean established.** ICE may jump
   `Checking → Completed`, skipping `Connected`; a reader treats both as transport-established.
+- **`app.launch_state`** — emitted on each launch-state transition, with
+  `payload = {"state": "<new state>", "appid": "<provider app id, when known>"}`.
+  Event-driven counterpart of `session_metrics.app_launch_state` (same authority
+  caveats: observability only).
 - The control plane writes a `session_trace_events` row with `source='agent'` (`schema.md`) after
   validating host ownership (`GetSessionHostState`). A malformed or unparsable message is dropped
   without dropping the connection. An event whose `session_id` is not currently `running` on this

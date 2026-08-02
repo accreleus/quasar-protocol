@@ -2872,6 +2872,7 @@ components:
     Session:
       type: object
       # health_state/health_reason are additive (present only when running/unsustainable);
+      # app_launch_state is additive (present only when the app image reports one);
       # every other key is always serialized (nullable ones present-but-null).
       required: [id, user_id, app_id, host_id, state, state_detail, error_message, profile_id, stream_profile_id, stream, codec_decision, negotiated_codec, created_at, started_at, ended_at]
       properties:
@@ -2918,6 +2919,17 @@ components:
           description: "AS10-06: computed stream-health classification; present only when the session is running/unsustainable."
           enum: [healthy, network_degrading, abr_at_floor, client_decode_degrading, client_presentation_degrading, unsustainable, failed]
         health_reason: { type: string, description: "AS10-06: optional human explanation accompanying a degraded health state." }
+        app_launch_state:
+          type: string
+          description: >-
+            Steam game-exit lifecycle amendment (2026-08-02): coarse in-container application
+            launch state last reported by the agent (agent-api.md session_metrics.
+            app_launch_state, the normative definition). Read-only; there is no request field.
+            OMITTED when the app image does not report launch state - absence means UNKNOWN,
+            and a client must treat an absent field and an unrecognised value identically and
+            fall back to transport-level readiness. A hint and a metric, never a session-state
+            authority and never access control: `state` remains the only progress signal.
+          enum: [starting, client_only, game_running, game_exited]
         created_at: { type: string, format: date-time }
         started_at: { type: [string, "null"], format: date-time }
         ended_at: { type: [string, "null"], format: date-time }

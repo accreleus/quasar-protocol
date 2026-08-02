@@ -2454,6 +2454,29 @@ well-formed and authorized; the server simply has no room to place it now.
 Only the owner (or an admin) may read a session (`403` otherwise). The signaling token is
 **never** returned here — only in the launch response.
 
+#### `app_launch_state` — in-container application launch state (2026-08-02)
+> *Additive amendment — one optional, read-only string on the session resource (user and admin
+> session GET/list alike), plus one new conventional `state_detail` value. Changes no existing
+> shape, field or status code; a client that ignores it behaves exactly as before.*
+
+Every session read shape gains an optional **`app_launch_state`**:
+`"starting" | "client_only" | "game_running" | "game_exited"` — the coarse in-container
+application launch state last reported by the agent (`agent-api.md`
+`session_metrics.app_launch_state`, which is the normative definition of the enum and its
+semantics). Read-only: there is no request field and no endpoint that sets it.
+
+**Absence semantics, by reference to `agent-api.md`.** The field is **omitted entirely** when
+the app image does not report launch state, and absence means *unknown*. A client MUST treat an
+absent field and an unrecognized value identically — as unknown — and fall back to
+transport-level readiness. It is a **hint and a metric, never a session-state authority and
+never access control**: `state` remains the only progress signal, and every session must
+function identically if the field never appears. An unrecognized value is not an error.
+
+**`state_detail` gains `"game exited"`.** A session that ends because the target title exited
+ends `stopped` with `state_detail = "game exited"` — a normal end, not a failure. Like every
+other `state_detail` value it is free-text, human-readable and advisory (`schema.md`); clients
+must not branch on it for correctness.
+
 ### `GET /v1/sessions` — the user's sessions
 List, newest first, owner-scoped. Same item shape as `GET /v1/sessions/{id}`.
 

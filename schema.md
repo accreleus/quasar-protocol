@@ -1060,10 +1060,14 @@ the key suffix (`_ms`, `_kbps`). The `source` column scopes which set applies.
   + migration 0014 land in **P9-07**.
 - **The dictionary is NUMERIC.** A reporter fact that is a string has no home inside `metrics`
   and travels as a **sibling field on the sample** instead: `client_health` /
-  `client_health_reason` / `device_key` (AS10-11) and `codec_mime_type` (UI-P6). `is_hidden` is
+  `client_health_reason` / `device_key` (AS10-11), `codec_mime_type` (UI-P6), and
+  `app_launch_state` (steam-game-exit). `is_hidden` is
   the shape of the rule rather than an exception — tab visibility rides *in* the dictionary
   because it can be expressed as `0`/`1`. Sibling fields are not stored in `metrics`; each has
-  its own destination (`codec_mime_type` normalises into `sessions.negotiated_codec`).
+  its own destination (`codec_mime_type` normalises into `sessions.negotiated_codec`;
+  `app_launch_state` is cached in-memory on the session and surfaced read-only on the session
+  resource (`control-api.md`) — never persisted here; its durable timeline is the
+  `app.launch_state` row in `session_trace_events`).
 - **Cross-source note:** `frames_dropped` exists under **both** sources with **different**
   meaning (encoder-side vs receiver-side). It is disambiguated by `source`; a merged
   `latest_metrics` (`control-api.md`) **must** keep them source-scoped (namespace or pick by
@@ -1130,7 +1134,7 @@ them distinct so the admin surface can reconcile a host→browser timeline (the 
 | `session_id` | `UUID` NOT NULL → `sessions(id)` ON DELETE CASCADE | the session this event belongs to; cascade so a deleted session takes its events with it (identical to `session_metrics`). |
 | `source` | `TEXT` NOT NULL | `CHECK (source IN ('agent','browser'))`. Which reporter produced the event. (No `'native'` value in v1 — the native client rides the browser ingest as `source='browser'`; widening, if ever wanted, is a later migration, mirroring how `session_metrics.source` widened in 0014.) |
 | `ts_unix_ms` | `BIGINT` NOT NULL | reporter wall-clock at the event (ms since epoch), same convention as `session_metrics.ts_unix_ms` / `agent-api.md` `heartbeat.ts_unix_ms`. |
-| `type` | `TEXT` NOT NULL | the event type from the `trace-format.md` §3 v1 allow-list (`abr.retarget`, `pipeline.source_swapped`, `encoder.drop_detected`, `webrtc.state_changed`, `playout.changed`, `client.freeze_detected`, `client.visibility_changed`; plus the reserved `operator.annotation`). Browser-source unknown types are dropped at ingest (never stored). |
+| `type` | `TEXT` NOT NULL | the event type from the `trace-format.md` §3 v1 allow-list (`abr.retarget`, `pipeline.source_swapped`, `encoder.drop_detected`, `webrtc.state_changed`, `app.launch_state`, `playout.changed`, `client.freeze_detected`, `client.visibility_changed`; plus the reserved `operator.annotation`). Browser-source unknown types are dropped at ingest (never stored). |
 | `payload` | `JSONB` NOT NULL DEFAULT `'{}'` | the per-type payload (`trace-format.md` §3). JSONB (not frozen columns) so a new event field is not a migration. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | **server-only** ingestion time (distinct from `ts_unix_ms`, the reporter's clock); used by the retention prune. |
 
