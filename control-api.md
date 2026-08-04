@@ -1012,6 +1012,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/me/devices` | user (self) | *(AS10-08; **LP-SEC-01**)* read the caller's own devices — **now the full list** (was AS10-08 latest-only); owner is the bearer identity |
 | `GET /v1/me/profiles` | user (self) | *(AS10-02; **UI-P4**: now evaluates **launch profiles**, each with its per-rung verdicts; **UI-P5**: optional `?app_id=` narrows the result to that app's allow-list — a convenience, **never the gate**, which is `POST /v1/sessions`)* eligibility + recommendation for the caller's device; owner is the bearer identity |
 | `PATCH /v1/me/profile-preferences` | user (self) | *(AS10-03; prose added UI-P4)* the caller's preferred **launch profile**; honoured only while the global policy allows user overrides |
+| `GET` / `PATCH /v1/me/ui-preferences` | user (self only) | client UI presentation preferences, synced across the caller's devices. No admin variant exists: these are keyed on the authenticated caller and there is no `{id}` form, so one user's preferences are unreadable by anyone else. |
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `GET /v1/me/storage` | user (self) | *(P5-01)* the caller's own per-app storage usage |
@@ -1986,6 +1987,22 @@ every `inherit` app for every user in one invisible step.
 `default_profile_id` names a **launch profile**, owner is the bearer identity, and it is honoured
 only while `user_overrides_allowed` is true. The two policy fields are echoed read-only so a client
 can render "your admin has pinned everyone to the default" without a second call.
+
+### `GET` / `PATCH /v1/me/ui-preferences`
+
+Per-user client presentation state. The server stores and validates it; it never
+acts on it. Nothing in the session pipeline, scheduler, or encode path reads this
+table — a corrupt value can only produce a differently-drawn overlay.
+
+`PATCH` is a **partial merge, one level deep**: a body of
+`{"session_overlay": {"strip_position": "top"}}` changes only that field and
+leaves `strip_preset`, `strip_items` and `strip_auto_hide` alone. Top-level keys
+the server does not recognise are **preserved verbatim**, so an older control
+plane cannot silently delete a newer client's preferences.
+
+Invalid enum values are a `400 validation_failed`, not a silent clamp: a client
+sending `strip_position: "left"` has a bug, and clamping it to `bottom` would
+hide that bug on every device the user owns.
 
 ---
 

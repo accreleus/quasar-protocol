@@ -299,6 +299,23 @@ paths:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/ProfilePreferencesResponse" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/me/ui-preferences:
+    get:
+      tags: [me]
+      summary: "Read the caller's client UI preferences. Never readable by another user, including admins."
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/UIPreferences" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      tags: [me]
+      summary: "Update the caller's client UI preferences. Partial: absent fields are left unchanged; unknown keys are preserved verbatim."
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/UIPreferences" } } }
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/UIPreferences" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   # ─── apps ────────────────────────────────────────────────────────────────
   /v1/apps:
@@ -3879,6 +3896,50 @@ components:
           description: "UI-P4: the caller's preferred LAUNCH PROFILE; honoured only while user_overrides_allowed is true."
         global_default_profile_id: { type: [string, "null"] }
         user_overrides_allowed: { type: boolean }
+
+    SessionOverlayPreferences:
+      type: object
+      description: >
+        In-session overlay presentation. The server validates the vocabulary but
+        never interprets the values — they only shape what the client draws.
+      properties:
+        strip_preset:
+          type: string
+          enum: [full, minimal, metrics, custom]
+          description: >
+            Named starting point for strip_items. "custom" means the item set was
+            hand-edited and no longer matches a named preset. The client, not the
+            server, decides when a preset becomes custom.
+        strip_items:
+          type: object
+          description: Per-item visibility. Absent keys default to visible.
+          properties:
+            signal:   { type: boolean }
+            identity: { type: boolean }
+            codec:    { type: boolean }
+            metrics:  { type: boolean }
+            hint:     { type: boolean }
+          additionalProperties: false
+        strip_position:
+          type: string
+          enum: [top, bottom]
+        strip_auto_hide:
+          type: string
+          enum: [on_capture, always_visible, never_visible]
+          description: >
+            never_visible suppresses the strip entirely. The microphone "hot"
+            indicator is NOT part of the strip and remains visible regardless —
+            a live microphone must never become invisible.
+      additionalProperties: false
+
+    UIPreferences:
+      type: object
+      description: >
+        Per-user client presentation preferences, synced across that user's
+        devices. One key per client surface so a new surface needs no new
+        endpoint. Unknown top-level keys are preserved through a PATCH.
+      properties:
+        session_overlay: { $ref: "#/components/schemas/SessionOverlayPreferences" }
 
     # ─── admin: users ─────────────────────────────────────────────────────────
     AdminUser:
