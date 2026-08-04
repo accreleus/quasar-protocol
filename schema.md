@@ -1447,6 +1447,22 @@ backing store to reap and no meaning to preserve in "somebody once favourited an
 longer exists". It is derived presentation state whose only consumer is a per-user library view,
 so the correct behaviour on either parent's deletion is for the row to disappear.
 
+## `user_ui_preferences`
+
+| column          | type          | notes |
+|-----------------|---------------|-------|
+| `user_id`       | `UUID` PK     | `REFERENCES users(id) ON DELETE CASCADE` |
+| `session_overlay` | `JSONB` NOT NULL DEFAULT `'{}'` | validated key-by-key on write; unknown keys preserved |
+| `updated_at`    | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` |
+
+JSONB rather than columns: these are pure client presentation values that the
+server never joins, filters or aggregates on, and adding a knob must not cost a
+migration. Validation still happens on write (see `control-api.md`) — JSONB is a
+storage decision, not a licence to store anything.
+
+A missing row is not an error state; it means "all defaults". Reads return the
+default object rather than 404.
+
 ## `app_launch_profiles` (UI-P5)
 > *Additive amendment (migration 0037). A new join table; it changes no existing table
 > semantics. It is **stream-quality curation** — which launch profiles an app offers from the menu
