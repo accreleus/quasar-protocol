@@ -3875,13 +3875,23 @@ components:
             server, decides when a preset becomes custom.
         strip_items:
           type: object
-          description: Per-item visibility. Absent keys default to visible.
+          description: >
+            Per-item visibility. Absent keys default to visible — which is what
+            makes adding an item additive: a client that has never written the
+            key still gets the new item, and an older client simply ignores it.
+            signal/identity/codec/metrics/hint are readouts; capture/exit are
+            ACTIONS, and a client that draws them must keep them inert while
+            input is captured (the pointer is locked, so they cannot be clicked
+            anyway, and drawing a live control that cannot be reached is worse
+            than drawing none).
           properties:
             signal:   { type: boolean }
             identity: { type: boolean }
             codec:    { type: boolean }
             metrics:  { type: boolean }
             hint:     { type: boolean }
+            capture:  { type: boolean }
+            exit:     { type: boolean }
           additionalProperties: false
         strip_position:
           type: string

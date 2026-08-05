@@ -2004,6 +2004,14 @@ Invalid enum values are a `400 validation_failed`, not a silent clamp: a client
 sending `strip_position: "left"` has a bug, and clamping it to `bottom` would
 hide that bug on every device the user owns.
 
+`strip_items` mixes two kinds of thing. `signal`, `identity`, `codec`, `metrics`
+and `hint` are **readouts** — turning one off removes information. `capture` and
+`exit` are **actions**: they put "take control of the game" and "leave the
+session" on the always-on strip so neither requires summoning the drawer first.
+The server treats all seven identically (a validated boolean it never reads),
+but a client must not: an action drawn while input is captured is unreachable,
+because the pointer is locked to the game. Draw them only while input is free.
+
 ---
 
 ## Sessions (launch + lifecycle)
