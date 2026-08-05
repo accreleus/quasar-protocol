@@ -1013,6 +1013,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/me/profiles` | user (self) | *(AS10-02; **UI-P4**: now evaluates **launch profiles**, each with its per-rung verdicts; **UI-P5**: optional `?app_id=` narrows the result to that app's allow-list — a convenience, **never the gate**, which is `POST /v1/sessions`)* eligibility + recommendation for the caller's device; owner is the bearer identity |
 | `PATCH /v1/me/profile-preferences` | user (self) | *(AS10-03; prose added UI-P4)* the caller's preferred **launch profile**; honoured only while the global policy allows user overrides |
 | `GET` / `PATCH /v1/me/ui-preferences` | user (self only) | client UI presentation preferences, synced across the caller's devices. No admin variant exists: these are keyed on the authenticated caller and there is no `{id}` form, so one user's preferences are unreadable by anyone else. |
+| `GET /v1/me/highlights` | user (self only) | *(home-rail amendment, 2026-08-05)* the caller's server-ranked home rail, derived from their own session history. No `user_id` parameter and no admin variant. **Entitlement-filtered**, and that filter is load-bearing rather than cosmetic — see below. |
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `GET /v1/me/storage` | user (self) | *(P5-01)* the caller's own per-app storage usage |
@@ -2020,6 +2021,51 @@ decision, and the two are independent. `mic=true` on a session with
 `mic_granted=false` means "the user wants this control on their strip" and must
 render as unavailable — not hidden (the user asked for it) and not enabled (the
 server said no).
+
+---
+
+### `GET /v1/me/highlights` *(home-rail amendment, 2026-08-05)*
+
+The featured rail on the logged-in landing page. Additive: a new path, no
+existing shape changed.
+
+**The server owns the ranking.** That was the explicit decision at sign-off, and
+it is the reason this endpoint exists rather than a pair of fields on
+`AppListItem`. Order and the per-item `reason` are produced here; a client
+renders what it is handed. A client must **not** re-derive the rail by sorting
+`/v1/apps` against `/v1/sessions` — two rankers drifting apart is the failure
+this design forecloses.
+
+**Why not fields on `AppListItem`.** `AppListItem` is `allOf`-inherited by both
+`App` and `AdminApp`, so a field there lands on three read shapes at once,
+including admin ones with no use for it. `GET /v1/apps` is also paginated, and
+"most played" cannot be *ordered by* a value computed after `LIMIT/OFFSET` has
+already been applied — ranking the catalogue by play time would push a
+per-row aggregate over `sessions` into the sort key of the hottest endpoint in
+the product, to render five cards.
+
+**Entitlement filtering is a correctness requirement, not politeness.** A
+session row outlives the entitlement that authorised it: revoking a user's
+entitlement does not delete their history. This endpoint therefore applies the
+same entitled + enabled predicate as `GET /v1/apps`. Omit it and a revoked title
+reappears on the user's home page with its play time attached. The launch itself
+is still refused at `POST /v1/sessions` — this endpoint is UX, not the
+authorization boundary — but surfacing a revoked app is an information leak on
+its own terms.
+
+**Best-effort by contract.** `items` may be shorter than five and is empty for a
+user who has never launched anything. An empty rail is a normal state a client
+must render, never an error.
+
+`play_seconds` is clamped per session, so an unreconciled `NULL ended_at` is
+bounded rather than open-ended, and `state='failed'` sessions are excluded — a
+launch that never ran is not play time.
+
+Deliberately **absent** from `Highlight`: the app's name, artwork, kind and
+favourite flag (the client already holds the full `AppListItem` and joins on
+`app_id` — a second copy would drift the moment artwork is re-resolved), and any
+host name (a user-facing `Session` carries `host_id` only, and `GET /v1/hosts`
+is admin-gated).
 
 ---
 

@@ -317,6 +317,48 @@ paths:
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /v1/me/highlights:
+    get:
+      tags: [me]
+      summary: The calling user's home-page featured rail (server-ranked, at most 5).
+      description: |
+        The home landing page's hero rail. Per-caller, resolved entirely from the bearer
+        identity: it accepts no user_id and there is no admin variant.
+
+        THE SERVER OWNS THE RANKING. This was the explicit sign-off decision (2026-08-05):
+        the rail's order and its per-item `reason` are produced here, and a client renders
+        what it is given. A client MUST NOT re-derive or re-sort the rail from /v1/apps and
+        /v1/sessions — two rankers is precisely the drift this endpoint exists to prevent.
+
+        ENTITLEMENT-FILTERED, AND THIS IS NOT COSMETIC. The rail is derived from `sessions`,
+        and a session row outlives the entitlement that authorised it — an admin revoking a
+        user's entitlement does not delete their history. Highlights therefore applies the
+        SAME entitled + enabled predicate as GET /v1/apps (internal/crud/store.go
+        entitledSQL). Without it, a revoked app reappears on the user's home page with its
+        play time attached. The launch itself is still refused at POST /v1/sessions — this
+        endpoint is UX, not the authorization boundary — but surfacing a revoked title is an
+        information leak in its own right.
+
+        BEST-EFFORT BY CONTRACT. `items` may be shorter than 5, and is empty for a user who
+        has never launched anything. A client MUST render the page with an empty rail rather
+        than treating it as an error.
+      parameters:
+        - name: window_days
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 90, default: 7 }
+          description: >-
+            The lookback for the "most played" ranking. Does not affect "resume" or "recently
+            added" reasons, which are unbounded and newest-first respectively.
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HighlightList" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   # ─── apps ────────────────────────────────────────────────────────────────
   /v1/apps:
     get:
@@ -3922,6 +3964,64 @@ components:
         endpoint. Unknown top-level keys are preserved through a PATCH.
       properties:
         session_overlay: { $ref: "#/components/schemas/SessionOverlayPreferences" }
+
+    # ─── home rail (GET /v1/me/highlights) ────────────────────────────────────
+    HighlightList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 5
+          items: { $ref: "#/components/schemas/Highlight" }
+
+    HighlightReason:
+      type: string
+      description: >-
+        WHY this app is on the rail. The server ranks and labels; the client renders the
+        kicker and never re-derives the reason. Enumerated so a client can style each kicker
+        (live = success, most_played / resume = accent, recently_added = info) without
+        string-matching prose. Widening this enum is a later amendment; a client pinned to
+        this version holds a closed union and must fall through to a neutral kicker for an
+        unknown value rather than dropping the item.
+      enum: [live, most_played, resume, recently_added]
+
+    Highlight:
+      type: object
+      required: [app_id, reason, session_id, session_started_at, play_seconds, last_played_at]
+      properties:
+        app_id:
+          type: string
+          format: uuid
+          description: >-
+            The app this highlight is about. The client already holds the full AppListItem
+            from GET /v1/apps and joins on this id — name, cover_url, hero_url, kind and
+            favourite are DELIBERATELY NOT duplicated here. One source of truth for
+            presentation; a second copy would drift the moment artwork is re-resolved.
+        reason: { $ref: "#/components/schemas/HighlightReason" }
+        session_id:
+          type: [string, "null"]
+          format: uuid
+          description: 'The live session, when reason is "live". Null for every other reason.'
+        session_started_at:
+          type: [string, "null"]
+          format: date-time
+          description: >-
+            sessions.started_at for the live session, so the client renders the elapsed clock
+            itself and it ticks without polling. Null unless reason is "live".
+        play_seconds:
+          type: integer
+          description: >-
+            Total play time in the requested window, clamped per-session (an unreconciled
+            NULL ended_at is bounded, never open-ended) and excluding state='failed'. 0 when
+            not applicable to the reason.
+        last_played_at:
+          type: [string, "null"]
+          format: date-time
+          description: >-
+            MAX(ended_at) over the user's non-failed sessions for this app. Null when the app
+            has never been played to completion - which is the state of every app for a user
+            whose only session is the currently-live one.
 
     # ─── admin: users ─────────────────────────────────────────────────────────
     AdminUser:
