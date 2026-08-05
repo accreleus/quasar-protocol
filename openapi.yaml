@@ -3879,19 +3879,28 @@ components:
             Per-item visibility. Absent keys default to visible — which is what
             makes adding an item additive: a client that has never written the
             key still gets the new item, and an older client simply ignores it.
-            signal/identity/codec/metrics/hint are readouts; capture/exit are
-            ACTIONS, and a client that draws them must keep them inert while
-            input is captured (the pointer is locked, so they cannot be clicked
-            anyway, and drawing a live control that cannot be reached is worse
-            than drawing none).
+            signal/identity/codec/metrics/hint are readouts;
+            capture/exit/mic/fullscreen are ACTIONS, and a client that draws
+            them must keep them inert while input is captured (the pointer is
+            locked, so they cannot be clicked anyway, and drawing a live control
+            that cannot be reached is worse than drawing none).
+
+            An action item is a request to DRAW the control, never a grant of
+            the underlying capability. `mic` in particular is independent of
+            whether the session actually permits microphone capture — that is
+            `session.mic_granted`, a server decision. A client honouring
+            mic=true on a session with mic_granted=false must render the
+            control unavailable, not hide it and not enable it.
           properties:
-            signal:   { type: boolean }
-            identity: { type: boolean }
-            codec:    { type: boolean }
-            metrics:  { type: boolean }
-            hint:     { type: boolean }
-            capture:  { type: boolean }
-            exit:     { type: boolean }
+            signal:     { type: boolean }
+            identity:   { type: boolean }
+            codec:      { type: boolean }
+            metrics:    { type: boolean }
+            hint:       { type: boolean }
+            capture:    { type: boolean }
+            exit:       { type: boolean }
+            mic:        { type: boolean }
+            fullscreen: { type: boolean }
           additionalProperties: false
         strip_position:
           type: string

@@ -2005,12 +2005,21 @@ sending `strip_position: "left"` has a bug, and clamping it to `bottom` would
 hide that bug on every device the user owns.
 
 `strip_items` mixes two kinds of thing. `signal`, `identity`, `codec`, `metrics`
-and `hint` are **readouts** — turning one off removes information. `capture` and
-`exit` are **actions**: they put "take control of the game" and "leave the
-session" on the always-on strip so neither requires summoning the drawer first.
-The server treats all seven identically (a validated boolean it never reads),
-but a client must not: an action drawn while input is captured is unreachable,
-because the pointer is locked to the game. Draw them only while input is free.
+and `hint` are **readouts** — turning one off removes information. `capture`,
+`exit`, `mic` and `fullscreen` are **actions**: they put the controls that were
+previously drawer-only onto the always-on strip, so none of them requires
+summoning the drawer first. The server treats all nine identically (a validated
+boolean it never reads), but a client must not: an action drawn while input is
+captured is unreachable, because the pointer is locked to the game. Draw them
+only while input is free.
+
+An action item asks the client to **draw** a control; it never grants the
+capability behind it. `mic` is the case where the distinction bites: whether a
+session may capture microphone audio is `session.mic_granted`, a server
+decision, and the two are independent. `mic=true` on a session with
+`mic_granted=false` means "the user wants this control on their strip" and must
+render as unavailable — not hidden (the user asked for it) and not enabled (the
+server said no).
 
 ---
 
