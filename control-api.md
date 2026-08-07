@@ -1378,8 +1378,10 @@ current".
 - **Errors:** `404 not_installed`; `409 conflict` when the image is pinned (unpin first).
 
 ### Update-policy semantics (`instance_settings.image_update_policy`)
+*(DDL default is `notify` — migration 0054; an earlier draft of this section said `manual`.
+The settings envelope carries the field from P3, optional for pre-P3 conformance.)*
 `POST /v1/admin/images/sync` applies the instance-wide policy after refreshing the catalog:
-- **`manual`** (default) — sync only refreshes the catalog; `update_available` is
+- **`manual`** — sync only refreshes the catalog; `update_available` is
   recomputed per image; nothing installs or re-adopts on its own.
 - **`notify`** — identical effect to `manual`. The distinction is UI-only today (the badge
   is surfaced more prominently); a notification channel is a documented future hook, not

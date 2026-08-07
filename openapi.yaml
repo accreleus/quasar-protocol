@@ -3505,6 +3505,14 @@ components:
           properties:
             registration_mode: { $ref: "#/components/schemas/RegistrationMode" }
             storage_provider: { $ref: "#/components/schemas/StorageProvider" }
+            image_update_policy:
+              type: string
+              enum: [manual, notify, auto]
+              description: >-
+                P3 (image management). Instance-wide update policy applied by
+                POST /v1/admin/images/sync. Column exists since migration 0054
+                (DDL default notify) but only reaches the wire from P3. Optional
+                in the envelope so pre-P3 servers stay conformant.
             mic_capture_enabled:
               type: boolean
               description: >-
