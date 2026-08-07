@@ -1237,7 +1237,8 @@ Lets the SPA route a virgin instance to `/setup` rather than an unsatisfiable lo
 ### `POST /v1/setup/claim`
 ```json
 // request — header X-Quasar-Setup-Token: <per-boot token>
-{ "email": "...", "username": "...", "password": "<plaintext, TLS only>" }
+// device_key is OPTIONAL and absent is accepted (unchanged behaviour)
+{ "email": "...", "username": "...", "password": "<plaintext, TLS only>", "device_key": "<opaque>" }
 // 201 — login-shaped; the caller is now authenticated as the new admin
 { "access_token": "...", "token_type": "Bearer", "expires_at": "...", "user": { "...": "role=admin" } }
 ```
@@ -1247,7 +1248,9 @@ across boots). Gating, fail-closed: (1) `409 setup_already_complete` if any admi
 checked in the insert transaction under the **same advisory lock** as `BOOTSTRAP_ADMIN_*`, so
 the two paths can never both create an admin; (2) wrong/missing token → `401`, constant-time,
 no missing-vs-wrong distinction; (3) password obeys the `/v1/auth/register` strength rule; (4)
-every attempt logged at `WARN` with source address. The token is never returned by any endpoint.
+every attempt logged at `WARN` with source address. The token is never returned by any endpoint, and (amended 2026-08-07) is **never written to the log** either — only its file path is, because log aggregators routinely expose logs to principals who have no host access and any of them could otherwise claim a fresh instance. A failed token-file write fails the boot rather than degrading to log-only.
+
+`device_key` (optional, additive) binds the founding admin's token to a device exactly as `POST /v1/auth/login` does, so that token is revocable from Account > Devices like any other; omitted, the token carries no `device_id` and behaves exactly as before.
 
 ### `POST /v1/setup/complete`
 ```json

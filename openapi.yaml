@@ -2741,6 +2741,14 @@ components:
         email: { type: string }
         username: { type: string }
         password: { type: string, description: "Obeys the same strength rule as /v1/auth/register; never logged or returned." }
+        device_key:
+          type: string
+          description: >-
+            Optional; binds the minted founding-admin token to this device, exactly as
+            POST /v1/auth/login does (LP-SEC-01). Without it the first admin's token carries
+            no device_id and is therefore invisible to per-device revocation in Account >
+            Devices — the longest-lived, highest-privilege session would be the one that
+            cannot be killed if stolen. Absent is accepted and behaves as before.
 
     ImageCatalogEnvelope:
       type: object
