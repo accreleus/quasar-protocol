@@ -239,6 +239,26 @@ paths:
         "409":
           description: setup_already_complete — an admin already exists.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  /v1/setup/complete:
+    post:
+      tags: [setup]
+      summary: Mark the first-run wizard finished or skipped (admin, idempotent).
+      description: |
+        Sets `instance_settings.setup_completed_at` if it is null and returns the
+        resulting status. Idempotent: calling it again is a no-op that returns the
+        same body. This is what makes `setup_completed` mean anything — completion
+        is INSTANCE state, so a skip must be permanent for every admin on every
+        device, not a per-browser marker. The wizard's furthest-step position stays
+        client-side by design; only completion is server-side.
+      x-required-role: admin
+      responses:
+        "200":
+          description: Setup marked complete (or already was).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   # ─── me (devices / profiles / storage) ───────────────────────────────────
   /v1/me/devices:

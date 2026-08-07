@@ -1249,6 +1249,19 @@ the two paths can never both create an admin; (2) wrong/missing token → `401`,
 no missing-vs-wrong distinction; (3) password obeys the `/v1/auth/register` strength rule; (4)
 every attempt logged at `WARN` with source address. The token is never returned by any endpoint.
 
+### `POST /v1/setup/complete`
+```json
+// 200 — RequireAuth → RequireAdmin; idempotent
+{ "admin_exists": true, "setup_completed": true }
+```
+Marks the wizard finished **or skipped** by setting `instance_settings.setup_completed_at`
+when it is null; a second call is a no-op returning the same body. Completion is **instance
+state**, not a per-browser marker: a skip must be permanent for every admin on every device,
+which is exactly what `GET /v1/setup/status.setup_completed` advertises. The wizard's
+furthest-step position deliberately stays client-side — it is per-operator convenience, not
+instance truth — so `instance_settings.setup_state` remains reserved for a later cross-device
+resume rather than being written here.
+
 ---
 
 ## App-image catalog + management (amendment — image management, additive — signed off 2026-08-07)
