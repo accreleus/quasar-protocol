@@ -1416,6 +1416,17 @@ unresolved image is refused (`409 digest_unresolved`) until a later sync resolve
 change is required — `quasar-manifest.json` keeps publishing the human-readable tag; digest
 resolution is a control-plane-side, sync-time lookup, not a build-time one.
 
+**SSRF containment.** Because the registry host derives from remote catalog data (and a
+registry's `WWW-Authenticate` realm from the registry's own response), the resolver is
+constrained: HTTPS only; the registry host and any token realm must match an allowlist
+(`QUASAR_IMAGE_REGISTRY_HOSTS`, default `ghcr.io`); HTTP redirects are not followed; and the
+dialer refuses connections to loopback/private/link-local/multicast/unspecified addresses
+(DNS-rebind guard). A ref or realm failing these checks resolves to an empty digest (the
+image is then un-installable until the catalog names an allowed registry), never an outbound
+request to an internal address. **Private/credentialed registries are out of scope for P3**
+(anonymous pull tokens only) — tracked separately; a private image simply stays
+`digest_unresolved`.
+
 ### Sync-state persistence
 
 `GET /v1/admin/images`'s `fetched_at` / `sync_error` fields (P1) are now backed by

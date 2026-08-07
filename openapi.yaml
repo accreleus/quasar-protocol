@@ -1805,6 +1805,12 @@ paths:
                     Microphone capture amendment (2026-08-02). Absent = unchanged (pointer
                     decode). Default false. Gates the POST /v1/sessions mic request; affects
                     subsequent launches only.
+                image_update_policy:
+                  type: string
+                  enum: [manual, notify, auto]
+                  description: >-
+                    P3 (image management). Absent = unchanged (pointer decode). Applied by
+                    POST /v1/admin/images/sync — see the App-image management P3 section.
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SettingsEnvelope" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
@@ -2849,6 +2855,7 @@ components:
           items: { $ref: "#/components/schemas/ImageHostState" }
     ImageInstallRequest:
       type: object
+      description: "P3. Optional body; an omitted body or {} installs eagerly (lazy defaults false)."
       properties:
         lazy: { type: boolean, default: false, description: "P3. When true, seeds the installed_images adoption row without dispatching ensure-everywhere; hosts pull on first launch placement instead." }
     ImageUpdateResult:
