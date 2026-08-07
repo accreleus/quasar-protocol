@@ -1220,6 +1220,59 @@ handed to tooling. Semantics:
 
 ---
 
+## First-run setup (amendment — first-run wizard, additive — sign-off pending)
+
+> Two additive routes let a fresh instance be claimed through the UI instead of the
+> `BOOTSTRAP_ADMIN_*` env dance (which is retained for unattended provisioning). Both are
+> always registered; `claim` self-disables once an admin exists. Server-enforced, never
+> UI-gated. Full design: `docs/design/plans/2026-08-07-first-run-wizard-spec.md`.
+
+### `GET /v1/setup/status`
+```json
+// 200 — unauthenticated; only routing booleans, nothing an attacker can use
+{ "admin_exists": false, "setup_completed": false }
+```
+Lets the SPA route a virgin instance to `/setup` rather than an unsatisfiable login screen.
+
+### `POST /v1/setup/claim`
+```json
+// request — header X-Quasar-Setup-Token: <per-boot token>
+{ "email": "...", "username": "...", "password": "<plaintext, TLS only>" }
+// 201 — login-shaped; the caller is now authenticated as the new admin
+{ "access_token": "...", "token_type": "Bearer", "expires_at": "...", "user": { "...": "role=admin" } }
+```
+Creates the **first** admin. Auth is the per-boot **setup token** (minted at boot when no admin
+exists; written to the CP log at `WARN` and to `/run/quasar/setup-token`, 0600; not persisted
+across boots). Gating, fail-closed: (1) `409 setup_already_complete` if any admin exists —
+checked in the insert transaction under the **same advisory lock** as `BOOTSTRAP_ADMIN_*`, so
+the two paths can never both create an admin; (2) wrong/missing token → `401`, constant-time,
+no missing-vs-wrong distinction; (3) password obeys the `/v1/auth/register` strength rule; (4)
+every attempt logged at `WARN` with source address. The token is never returned by any endpoint.
+
+---
+
+## App-image catalog + management (amendment — image management, additive — sign-off pending)
+
+> The catalog mirrors the `accretion-io/quasar-images` **manifest** (Quasar-owned, versioned;
+> Quasar refuses an unknown `manifest_version`). Installing an image also lands its **runtime
+> preset** (the `runtime_presets` object, `schema.md`). This section documents the **P1 surface
+> only** — read + sync; install/update/remove/pin land in later phases with their own routes.
+> Full design: `docs/design/plans/2026-08-07-image-management-spec.md`. All routes
+> `RequireAuth → RequireAdmin`.
+
+### `GET /v1/admin/images`
+Returns the cached catalog: each image's manifest metadata (`id`, `display_name`, `kind`,
+`version`, `registry_ref`, `artwork`, `library_provider`), its per-instance install state
+(`installed`, `installed_version`, `pinned`, `update_available`), and its per-host presence
+(`hosts[]`: `state ∈ {absent,pulling,building,ready,failed}`, `version`, `error`, `bytes`).
+
+### `POST /v1/admin/images/sync`
+Re-fetches the manifest at `instance_settings.image_catalog_ref`, validates `manifest_version`,
+upserts the cached catalog, and returns it. **A fetch failure never affects launches** — the
+cached catalog keeps serving and the error is reported as `sync_error` in the envelope.
+
+---
+
 ## Account security — invites + device management (LP-SEC-01)
 
 > **Amendment — LP-SEC-01 (W1 security wave), additive, requires sign-off.** Adds the admin

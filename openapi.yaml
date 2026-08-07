@@ -63,6 +63,10 @@ tags:
     description: WebRTC signaling (WebSocket; not a REST body — see signaling.md).
   - name: dev
     description: Development-only surface — registered ONLY when QUASAR_DEV_AGENT_AUTH=1, never in production (the control plane refuses to boot with the flag set and QUASAR_ENV=production). Paths carry x-dev-only true; the route-coverage drift test skips them (their registration semantics are asserted by dedicated tests instead).
+  - name: setup
+    description: First-run setup — claim the instance (create the first admin, token-gated) and read setup status. `POST /v1/setup/claim` self-disables (409) once any admin exists; `GET /v1/setup/status` is unauthenticated and returns only routing booleans.
+  - name: images
+    description: App-image catalog + management (admin). The catalog mirrors the accretion-io/quasar-images manifest; installing an image also lands its runtime preset. (P1 surface below is read + sync only; install/update/remove land in later phases.)
 
 paths:
   # ─── auth ────────────────────────────────────────────────────────────────
@@ -182,6 +186,59 @@ paths:
               schema: { $ref: "#/components/schemas/DevAgentSessionResponse" }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ─── setup (first-run; claim self-disables once an admin exists) ──────────
+  /v1/setup/status:
+    get:
+      tags: [setup]
+      summary: Routing booleans for the SPA — is the instance claimed, is setup finished.
+      description: |
+        Unauthenticated and deliberately minimal: returns only whether an admin
+        exists and whether the setup flow has been completed, so the SPA can send
+        a virgin instance to /setup instead of a login screen no one can satisfy.
+        Exposes nothing an attacker can use beyond those two booleans.
+      security: []
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupStatus" }
+  /v1/setup/claim:
+    post:
+      tags: [setup]
+      summary: Create the first admin (token-gated); self-disables once any admin exists (#first-run wizard).
+      description: |
+        First-run claim. Auth is the per-boot setup token (written to the control
+        plane log at WARN and to /run/quasar/setup-token, 0600) — NOT a bearer
+        token. Wrong or missing token → 401 with no message/timing distinction.
+        Refused with 409 setup_already_complete once any admin exists (checked
+        under the same advisory lock as BOOTSTRAP_ADMIN_* provisioning, so the two
+        paths can never both create an admin). Response is login-shaped so the
+        operator is signed in as their new admin.
+      security: []
+      parameters:
+        - name: X-Quasar-Setup-Token
+          in: header
+          required: true
+          schema: { type: string }
+          description: The per-boot setup token. Wrong/missing → 401, indistinguishable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetupClaimRequest" }
+      responses:
+        "201":
+          description: First admin created; caller is now authenticated as that admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: setup_already_complete — an admin already exists.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
 
   # ─── me (devices / profiles / storage) ───────────────────────────────────
   /v1/me/devices:
@@ -1544,6 +1601,39 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  # ─── admin: images (catalog; P1 = read + sync only) ──────────────────────
+  /v1/admin/images:
+    get:
+      tags: [images]
+      summary: The app-image catalog with per-instance install + per-host presence state.
+      x-required-role: admin
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImageCatalogEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/images/sync:
+    post:
+      tags: [images]
+      summary: Re-fetch the quasar-images manifest at the pinned ref and refresh the cached catalog.
+      description: |
+        Fetches the manifest at instance_settings.image_catalog_ref, validates
+        manifest_version, and upserts the cached catalog. A fetch failure is
+        reported here and surfaced in the UI; it never affects launches (the
+        cached catalog continues to serve). Returns the refreshed catalog.
+      x-required-role: admin
+      responses:
+        "200":
+          description: Catalog refreshed (or served from cache with sync_error set).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImageCatalogEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   # ─── admin: settings / invites ───────────────────────────────────────────
   /v1/admin/settings:
     get:
@@ -2580,6 +2670,62 @@ components:
           type: object
           description: "Convenience: the three web-SPA localStorage entries (quasar.auth.token / quasar.auth.expires_at / quasar.auth.user) ready to inject."
           additionalProperties: { type: string }
+
+    SetupStatus:
+      type: object
+      required: [admin_exists, setup_completed]
+      properties:
+        admin_exists: { type: boolean, description: "True once any admin account exists (env-bootstrap or claim)." }
+        setup_completed: { type: boolean, description: "True once the wizard finished or was explicitly skipped." }
+    SetupClaimRequest:
+      type: object
+      required: [email, username, password]
+      properties:
+        email: { type: string }
+        username: { type: string }
+        password: { type: string, description: "Obeys the same strength rule as /v1/auth/register; never logged or returned." }
+
+    ImageCatalogEnvelope:
+      type: object
+      required: [images]
+      properties:
+        manifest_version: { type: integer, description: "The manifest schema version the cached catalog was parsed from." }
+        catalog_ref: { type: string, description: "The pinned quasar-images ref the catalog was fetched at (instance_settings.image_catalog_ref)." }
+        fetched_at: { type: [string, "null"], format: date-time, description: "When the cached catalog was last successfully refreshed." }
+        sync_error: { type: [string, "null"], description: "Non-null when the last sync failed; the cached catalog is still served." }
+        images:
+          type: array
+          items: { $ref: "#/components/schemas/CatalogImage" }
+    CatalogImage:
+      type: object
+      required: [id, display_name, kind, version, installed]
+      properties:
+        id: { type: string, description: "Stable manifest id; never reused for a different image." }
+        display_name: { type: string }
+        description: { type: string }
+        kind: { type: string, enum: [prebuilt, template], description: "prebuilt = pull a registry ref; template = build locally (later phase)." }
+        version: { type: string, description: "Upstream's version for this entry; an update is available when this exceeds installed_version." }
+        registry_ref: { type: [string, "null"], description: "Pinned image reference for a prebuilt entry (never a floating tag)." }
+        artwork: { type: object, additionalProperties: true }
+        library_provider: { type: [string, "null"], description: "Set when this image is a library provider's canonical image (e.g. steam)." }
+        installed: { type: boolean }
+        installed_version: { type: [string, "null"] }
+        pinned: { type: boolean, description: "A pinned image is never auto-updated under any policy." }
+        update_available: { type: boolean }
+        hosts:
+          type: array
+          description: "Per-host presence (present from the phase that ships host_images; may be empty in the read-only P1 surface)."
+          items: { $ref: "#/components/schemas/ImageHostState" }
+    ImageHostState:
+      type: object
+      required: [host_id, state]
+      properties:
+        host_id: { type: string, format: uuid }
+        node_name: { type: string }
+        version: { type: [string, "null"] }
+        state: { type: string, enum: [absent, pulling, building, ready, failed] }
+        error: { type: [string, "null"] }
+        bytes: { type: [integer, "null"] }
 
     Device:
       type: object
