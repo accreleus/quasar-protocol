@@ -1480,8 +1480,20 @@ paths:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     get:
       tags: [sessions]
-      summary: Server-sent session lifecycle events (owner or admin).
+      x-unimplemented: true
+      summary: Server-sent session lifecycle events (owner or admin). NOT CURRENTLY SERVED — see x-unimplemented.
       description: >-
+        NOT IMPLEMENTED AS OF 2026-08-07. The Steam game-exit lifecycle arc that
+        introduced this endpoint was parked and its control-plane implementation
+        reverted; this contract text was deliberately left in place so the agreed
+        shape survives for a future resurrection. `x-unimplemented: true` marks
+        that: the route-coverage drift test skips such operations, because a
+        documented-but-unserved route would otherwise fail every branch as a
+        phantom. Remove the marker in the same change that registers the route.
+        Original amendment text follows.
+
+
+        Session-events amendment (2026-08-02): SSE stream (text/event-stream) replacing
         Session-events amendment (2026-08-02): SSE stream (text/event-stream) replacing
         lifecycle polling for clients that support it. One event type, `session`, whose data
         is the same envelope as GET /v1/sessions/{id} — sent once on subscribe (snapshot) and
