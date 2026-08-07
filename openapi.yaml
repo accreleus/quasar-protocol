@@ -61,6 +61,12 @@ tags:
     description: Node-agent ↔ control-plane internal endpoints (not operator-facing).
   - name: signaling
     description: WebRTC signaling (WebSocket; not a REST body — see signaling.md).
+  - name: dev
+    description: Development-only surface — registered ONLY when QUASAR_DEV_AGENT_AUTH=1, never in production (the control plane refuses to boot with the flag set and QUASAR_ENV=production). Paths carry x-dev-only true; the route-coverage drift test skips them (their registration semantics are asserted by dedicated tests instead).
+  - name: setup
+    description: First-run setup — claim the instance (create the first admin, token-gated) and read setup status. `POST /v1/setup/claim` self-disables (409) once any admin exists; `GET /v1/setup/status` is unauthenticated and returns only routing booleans.
+  - name: images
+    description: App-image catalog + management (admin). The catalog mirrors the accretion-io/quasar-images manifest; installing an image also lands its runtime preset. (P1 surface below is read + sync only; install/update/remove land in later phases.)
 
 paths:
   # ─── auth ────────────────────────────────────────────────────────────────
@@ -144,6 +150,95 @@ paths:
         "204": { description: Password rotated; all tokens revoked. }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ─── dev (dev-gated; absent unless QUASAR_DEV_AGENT_AUTH=1) ───────────────
+  /v1/dev/agent-session:
+    post:
+      tags: [dev]
+      x-dev-only: true
+      summary: Mint a throwaway, auto-reaped ephemeral identity + token for automated UI validation (dev-gated; #399).
+      description: |
+        Registered ONLY when `QUASAR_DEV_AGENT_AUTH=1`; absent the flag the route
+        does not exist (404), and the control plane refuses to boot with the flag
+        set while `QUASAR_ENV=production`. Auth is the per-boot dev key (written to
+        the container log and `/run/quasar/dev-agent-key`), not a bearer token.
+        Response is shape-compatible with `POST /v1/auth/login` so every existing
+        client path works unchanged. The minted identity is a REAL user row with a
+        real token — server-side role enforcement is untouched — and is deleted
+        (with its sessions and device bindings) when its TTL lapses.
+      security: []
+      parameters:
+        - name: X-Quasar-Dev-Key
+          in: header
+          required: true
+          schema: { type: string }
+          description: The per-boot dev secret. Wrong or missing → 401 with no message/timing distinction.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DevAgentSessionRequest" }
+      responses:
+        "200":
+          description: Ephemeral identity minted (login-shape + storage_keys).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DevAgentSessionResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ─── setup (first-run; claim self-disables once an admin exists) ──────────
+  /v1/setup/status:
+    get:
+      tags: [setup]
+      summary: Routing booleans for the SPA — is the instance claimed, is setup finished.
+      description: |
+        Unauthenticated and deliberately minimal: returns only whether an admin
+        exists and whether the setup flow has been completed, so the SPA can send
+        a virgin instance to /setup instead of a login screen no one can satisfy.
+        Exposes nothing an attacker can use beyond those two booleans.
+      security: []
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupStatus" }
+  /v1/setup/claim:
+    post:
+      tags: [setup]
+      summary: Create the first admin (token-gated); self-disables once any admin exists (#first-run wizard).
+      description: |
+        First-run claim. Auth is the per-boot setup token (written to the control
+        plane log at WARN and to /run/quasar/setup-token, 0600) — NOT a bearer
+        token. Wrong or missing token → 401 with no message/timing distinction.
+        Refused with 409 setup_already_complete once any admin exists (checked
+        under the same advisory lock as BOOTSTRAP_ADMIN_* provisioning, so the two
+        paths can never both create an admin). Response is login-shaped so the
+        operator is signed in as their new admin.
+      security: []
+      parameters:
+        - name: X-Quasar-Setup-Token
+          in: header
+          required: true
+          schema: { type: string }
+          description: The per-boot setup token. Wrong/missing → 401, indistinguishable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetupClaimRequest" }
+      responses:
+        "201":
+          description: First admin created; caller is now authenticated as that admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: setup_already_complete — an admin already exists.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
 
   # ─── me (devices / profiles / storage) ───────────────────────────────────
   /v1/me/devices:
@@ -314,6 +409,48 @@ paths:
         content: { application/json: { schema: { $ref: "#/components/schemas/UIPreferences" } } }
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/UIPreferences" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/me/highlights:
+    get:
+      tags: [me]
+      summary: The calling user's home-page featured rail (server-ranked, at most 5).
+      description: |
+        The home landing page's hero rail. Per-caller, resolved entirely from the bearer
+        identity: it accepts no user_id and there is no admin variant.
+
+        THE SERVER OWNS THE RANKING. This was the explicit sign-off decision (2026-08-05):
+        the rail's order and its per-item `reason` are produced here, and a client renders
+        what it is given. A client MUST NOT re-derive or re-sort the rail from /v1/apps and
+        /v1/sessions — two rankers is precisely the drift this endpoint exists to prevent.
+
+        ENTITLEMENT-FILTERED, AND THIS IS NOT COSMETIC. The rail is derived from `sessions`,
+        and a session row outlives the entitlement that authorised it — an admin revoking a
+        user's entitlement does not delete their history. Highlights therefore applies the
+        SAME entitled + enabled predicate as GET /v1/apps (internal/crud/store.go
+        entitledSQL). Without it, a revoked app reappears on the user's home page with its
+        play time attached. The launch itself is still refused at POST /v1/sessions — this
+        endpoint is UX, not the authorization boundary — but surfacing a revoked title is an
+        information leak in its own right.
+
+        BEST-EFFORT BY CONTRACT. `items` may be shorter than 5, and is empty for a user who
+        has never launched anything. A client MUST render the page with an empty rail rather
+        than treating it as an error.
+      parameters:
+        - name: window_days
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 90, default: 7 }
+          description: >-
+            The lookback for the "most played" ranking. Does not affect "resume" or "recently
+            added" reasons, which are unbounded and newest-first respectively.
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HighlightList" }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
@@ -1489,6 +1626,39 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  # ─── admin: images (catalog; P1 = read + sync only) ──────────────────────
+  /v1/admin/images:
+    get:
+      tags: [images]
+      summary: The app-image catalog with per-instance install + per-host presence state.
+      x-required-role: admin
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImageCatalogEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/images/sync:
+    post:
+      tags: [images]
+      summary: Re-fetch the quasar-images manifest at the pinned ref and refresh the cached catalog.
+      description: |
+        Fetches the manifest at instance_settings.image_catalog_ref, validates
+        manifest_version, and upserts the cached catalog. A fetch failure is
+        reported here and surfaced in the UI; it never affects launches (the
+        cached catalog continues to serve). Returns the refreshed catalog.
+      x-required-role: admin
+      responses:
+        "200":
+          description: Catalog refreshed (or served from cache with sync_error set).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImageCatalogEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   # ─── admin: settings / invites ───────────────────────────────────────────
   /v1/admin/settings:
     get:
@@ -2498,6 +2668,89 @@ components:
         user: { $ref: "#/components/schemas/User" }
         min_client_version: { type: string }
         latest_client_version: { type: string }
+
+    DevAgentSessionRequest:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [user, admin]
+          default: user
+          description: role=admin mints a REAL admin (same enforcement path); the server logs it at WARN with the source address.
+        ttl_seconds:
+          type: integer
+          minimum: 60
+          maximum: 28800
+          default: 1800
+          description: Identity lifetime. Default 30 min, hard cap 8 h. The token TTL is clamped to this — a token cannot outlive its user.
+    DevAgentSessionResponse:
+      type: object
+      required: [access_token, token_type, expires_at, user, storage_keys]
+      properties:
+        access_token: { type: string, description: "The only credential ever returned — the identity's password is random and never exposed." }
+        token_type: { type: string, enum: [Bearer] }
+        expires_at: { type: string, format: date-time, description: "Token AND identity expiry; the reaper deletes the user at/after this instant." }
+        user: { $ref: "#/components/schemas/User" }
+        storage_keys:
+          type: object
+          description: "Convenience: the three web-SPA localStorage entries (quasar.auth.token / quasar.auth.expires_at / quasar.auth.user) ready to inject."
+          additionalProperties: { type: string }
+
+    SetupStatus:
+      type: object
+      required: [admin_exists, setup_completed]
+      properties:
+        admin_exists: { type: boolean, description: "True once any admin account exists (env-bootstrap or claim)." }
+        setup_completed: { type: boolean, description: "True once the wizard finished or was explicitly skipped." }
+    SetupClaimRequest:
+      type: object
+      required: [email, username, password]
+      properties:
+        email: { type: string }
+        username: { type: string }
+        password: { type: string, description: "Obeys the same strength rule as /v1/auth/register; never logged or returned." }
+
+    ImageCatalogEnvelope:
+      type: object
+      required: [images]
+      properties:
+        manifest_version: { type: integer, description: "The manifest schema version the cached catalog was parsed from." }
+        catalog_ref: { type: string, description: "The pinned quasar-images ref the catalog was fetched at (instance_settings.image_catalog_ref)." }
+        fetched_at: { type: [string, "null"], format: date-time, description: "When the cached catalog was last successfully refreshed." }
+        sync_error: { type: [string, "null"], description: "Non-null when the last sync failed; the cached catalog is still served." }
+        images:
+          type: array
+          items: { $ref: "#/components/schemas/CatalogImage" }
+    CatalogImage:
+      type: object
+      required: [id, display_name, kind, version, installed]
+      properties:
+        id: { type: string, description: "Stable manifest id; never reused for a different image." }
+        display_name: { type: string }
+        description: { type: string }
+        kind: { type: string, enum: [prebuilt, template], description: "prebuilt = pull a registry ref; template = build locally (later phase)." }
+        version: { type: string, description: "Upstream's version for this entry; an update is available when this exceeds installed_version." }
+        registry_ref: { type: [string, "null"], description: "Pinned image reference for a prebuilt entry (never a floating tag)." }
+        artwork: { type: object, additionalProperties: true }
+        library_provider: { type: [string, "null"], description: "Set when this image is a library provider's canonical image (e.g. steam)." }
+        installed: { type: boolean }
+        installed_version: { type: [string, "null"] }
+        pinned: { type: boolean, description: "A pinned image is never auto-updated under any policy." }
+        update_available: { type: boolean }
+        hosts:
+          type: array
+          description: "Per-host presence (present from the phase that ships host_images; may be empty in the read-only P1 surface)."
+          items: { $ref: "#/components/schemas/ImageHostState" }
+    ImageHostState:
+      type: object
+      required: [host_id, state]
+      properties:
+        host_id: { type: string, format: uuid }
+        node_name: { type: string }
+        version: { type: [string, "null"] }
+        state: { type: string, enum: [absent, pulling, building, ready, failed] }
+        error: { type: [string, "null"] }
+        bytes: { type: [integer, "null"] }
 
     Device:
       type: object
@@ -3912,13 +4165,32 @@ components:
             server, decides when a preset becomes custom.
         strip_items:
           type: object
-          description: Per-item visibility. Absent keys default to visible.
+          description: >
+            Per-item visibility. Absent keys default to visible — which is what
+            makes adding an item additive: a client that has never written the
+            key still gets the new item, and an older client simply ignores it.
+            signal/identity/codec/metrics/hint are readouts;
+            capture/exit/mic/fullscreen are ACTIONS, and a client that draws
+            them must keep them inert while input is captured (the pointer is
+            locked, so they cannot be clicked anyway, and drawing a live control
+            that cannot be reached is worse than drawing none).
+
+            An action item is a request to DRAW the control, never a grant of
+            the underlying capability. `mic` in particular is independent of
+            whether the session actually permits microphone capture — that is
+            `session.mic_granted`, a server decision. A client honouring
+            mic=true on a session with mic_granted=false must render the
+            control unavailable, not hide it and not enable it.
           properties:
-            signal:   { type: boolean }
-            identity: { type: boolean }
-            codec:    { type: boolean }
-            metrics:  { type: boolean }
-            hint:     { type: boolean }
+            signal:     { type: boolean }
+            identity:   { type: boolean }
+            codec:      { type: boolean }
+            metrics:    { type: boolean }
+            hint:       { type: boolean }
+            capture:    { type: boolean }
+            exit:       { type: boolean }
+            mic:        { type: boolean }
+            fullscreen: { type: boolean }
           additionalProperties: false
         strip_position:
           type: string
@@ -3940,6 +4212,64 @@ components:
         endpoint. Unknown top-level keys are preserved through a PATCH.
       properties:
         session_overlay: { $ref: "#/components/schemas/SessionOverlayPreferences" }
+
+    # ─── home rail (GET /v1/me/highlights) ────────────────────────────────────
+    HighlightList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 5
+          items: { $ref: "#/components/schemas/Highlight" }
+
+    HighlightReason:
+      type: string
+      description: >-
+        WHY this app is on the rail. The server ranks and labels; the client renders the
+        kicker and never re-derives the reason. Enumerated so a client can style each kicker
+        (live = success, most_played / resume = accent, recently_added = info) without
+        string-matching prose. Widening this enum is a later amendment; a client pinned to
+        this version holds a closed union and must fall through to a neutral kicker for an
+        unknown value rather than dropping the item.
+      enum: [live, most_played, resume, recently_added]
+
+    Highlight:
+      type: object
+      required: [app_id, reason, session_id, session_started_at, play_seconds, last_played_at]
+      properties:
+        app_id:
+          type: string
+          format: uuid
+          description: >-
+            The app this highlight is about. The client already holds the full AppListItem
+            from GET /v1/apps and joins on this id — name, cover_url, hero_url, kind and
+            favourite are DELIBERATELY NOT duplicated here. One source of truth for
+            presentation; a second copy would drift the moment artwork is re-resolved.
+        reason: { $ref: "#/components/schemas/HighlightReason" }
+        session_id:
+          type: [string, "null"]
+          format: uuid
+          description: 'The live session, when reason is "live". Null for every other reason.'
+        session_started_at:
+          type: [string, "null"]
+          format: date-time
+          description: >-
+            sessions.started_at for the live session, so the client renders the elapsed clock
+            itself and it ticks without polling. Null unless reason is "live".
+        play_seconds:
+          type: integer
+          description: >-
+            Total play time in the requested window, clamped per-session (an unreconciled
+            NULL ended_at is bounded, never open-ended) and excluding state='failed'. 0 when
+            not applicable to the reason.
+        last_played_at:
+          type: [string, "null"]
+          format: date-time
+          description: >-
+            MAX(ended_at) over the user's non-failed sessions for this app. Null when the app
+            has never been played to completion - which is the state of every app for a user
+            whose only session is the currently-live one.
 
     # ─── admin: users ─────────────────────────────────────────────────────────
     AdminUser:

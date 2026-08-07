@@ -1013,6 +1013,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/me/profiles` | user (self) | *(AS10-02; **UI-P4**: now evaluates **launch profiles**, each with its per-rung verdicts; **UI-P5**: optional `?app_id=` narrows the result to that app's allow-list — a convenience, **never the gate**, which is `POST /v1/sessions`)* eligibility + recommendation for the caller's device; owner is the bearer identity |
 | `PATCH /v1/me/profile-preferences` | user (self) | *(AS10-03; prose added UI-P4)* the caller's preferred **launch profile**; honoured only while the global policy allows user overrides |
 | `GET` / `PATCH /v1/me/ui-preferences` | user (self only) | client UI presentation preferences, synced across the caller's devices. No admin variant exists: these are keyed on the authenticated caller and there is no `{id}` form, so one user's preferences are unreadable by anyone else. |
+| `GET /v1/me/highlights` | user (self only) | *(home-rail amendment, 2026-08-05)* the caller's server-ranked home rail, derived from their own session history. No `user_id` parameter and no admin variant. **Entitlement-filtered**, and that filter is load-bearing rather than cosmetic — see below. |
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `GET /v1/me/storage` | user (self) | *(P5-01)* the caller's own per-app storage usage |
@@ -1158,6 +1159,117 @@ the new password (the bearer used for this call is invalid immediately after the
 fails the password-strength rule (the same length bounds as `/v1/auth/register`). No new field on
 any existing shape; reuses the login password-verify path, the registration strength rule, and the
 existing token-revocation path. Gated by `RequireAuth` like the other `/v1/me` routes.
+
+---
+
+## Dev-only agent auth (amendment #399, additive, dev-gated — signed off 2026-08-07)
+
+> **Never part of the production surface.** The route below is registered ONLY when
+> `QUASAR_DEV_AGENT_AUTH=1`; absent the flag it does not exist (404 from the mux, not a 403
+> guard). The control plane **refuses to boot** (`fatal`) with the flag set while
+> `QUASAR_ENV=production`. Every boot with the flag on emits a `WARN` banner naming the flag.
+> In `openapi.yaml` the path carries `x-dev-only: true` and is excluded from the route-coverage
+> drift test; its registration semantics (absent when off, present when on) are asserted by
+> dedicated control-plane tests instead.
+
+### `POST /v1/dev/agent-session`
+```json
+// request — header X-Quasar-Dev-Key: <per-boot secret>; body optional
+{ "role": "user", "ttl_seconds": 1800 }
+// 200 — login-shape + storage_keys
+{
+  "access_token": "<opaque>",
+  "token_type": "Bearer",
+  "expires_at": "<RFC3339 — token AND identity expiry>",
+  "user": { "id": "<uuid>", "email": "agent-<uuid>@dev.invalid", "username": "...", "role": "user", "created_at": "..." },
+  "storage_keys": {
+    "quasar.auth.token": "...",
+    "quasar.auth.expires_at": "...",
+    "quasar.auth.user": "{...}"
+  }
+}
+```
+
+Mints a **throwaway, auto-reaped** identity for automated UI validation (unattended test
+agents), so no shared long-lived credential exists and no real operator password is ever
+handed to tooling. Semantics:
+
+- **Auth** is the per-boot random secret (generated at startup, never persisted across
+  boots, written to the container log and to `/run/quasar/dev-agent-key`). Wrong or missing
+  key → `401` with no message or timing distinction (constant-time compare).
+- **The identity is real.** A real `users` row (random email `agent-<uuid>@dev.invalid`,
+  random username, random password that is **never returned** — the token is the only
+  credential) and a real bearer token minted through the normal issuance path.
+  `role=admin` mints a real admin via the same enforcement path as everything else
+  (`RequireAuth → RequireAdmin` is untouched); every admin mint is logged at `WARN` with
+  the request's source address. This endpoint is provisioning, not a bypass.
+  **Durable side effects are the operator's to weigh:** because the minted admin is real,
+  admin writes it performs (e.g. flipping `instance_settings.registration_mode`, granting
+  entitlements) persist after the identity is reaped, with `updated_by`/`granted_by`
+  nulled rather than attributed. Point automated admin-surface tests at throwaway stacks,
+  not production instances.
+- **TTL**: `ttl_seconds` default 1800 (30 min), hard cap 28800 (8 h), minimum 60. The token
+  TTL is clamped to the identity TTL — a token cannot outlive its user. `expires_at` in the
+  response is both.
+- **Reaping**: `users.ephemeral_expires_at` (nullable; non-null = throwaway) marks the row;
+  a reaper deletes expired ephemeral users at boot and on an interval, and the existing
+  user-delete cascade removes their sessions and device bindings. A reaped identity's token
+  stops working immediately. A crashed test run cannot leave an identity behind.
+- **Response shape** is compatible with `POST /v1/auth/login`, plus `storage_keys` — the
+  three web-SPA localStorage entries ready for injection by browser-automation tooling.
+
+---
+
+## First-run setup (amendment — first-run wizard, additive — signed off 2026-08-07)
+
+> Two additive routes let a fresh instance be claimed through the UI instead of the
+> `BOOTSTRAP_ADMIN_*` env dance (which is retained for unattended provisioning). Both are
+> always registered; `claim` self-disables once an admin exists. Server-enforced, never
+> UI-gated. Full design: `docs/design/plans/2026-08-07-first-run-wizard-spec.md`.
+
+### `GET /v1/setup/status`
+```json
+// 200 — unauthenticated; only routing booleans, nothing an attacker can use
+{ "admin_exists": false, "setup_completed": false }
+```
+Lets the SPA route a virgin instance to `/setup` rather than an unsatisfiable login screen.
+
+### `POST /v1/setup/claim`
+```json
+// request — header X-Quasar-Setup-Token: <per-boot token>
+{ "email": "...", "username": "...", "password": "<plaintext, TLS only>" }
+// 201 — login-shaped; the caller is now authenticated as the new admin
+{ "access_token": "...", "token_type": "Bearer", "expires_at": "...", "user": { "...": "role=admin" } }
+```
+Creates the **first** admin. Auth is the per-boot **setup token** (minted at boot when no admin
+exists; written to the CP log at `WARN` and to `/run/quasar/setup-token`, 0600; not persisted
+across boots). Gating, fail-closed: (1) `409 setup_already_complete` if any admin exists —
+checked in the insert transaction under the **same advisory lock** as `BOOTSTRAP_ADMIN_*`, so
+the two paths can never both create an admin; (2) wrong/missing token → `401`, constant-time,
+no missing-vs-wrong distinction; (3) password obeys the `/v1/auth/register` strength rule; (4)
+every attempt logged at `WARN` with source address. The token is never returned by any endpoint.
+
+---
+
+## App-image catalog + management (amendment — image management, additive — signed off 2026-08-07)
+
+> The catalog mirrors the `accretion-io/quasar-images` **manifest** (Quasar-owned, versioned;
+> Quasar refuses an unknown `manifest_version`). Installing an image also lands its **runtime
+> preset** (the `runtime_presets` object, `schema.md`). This section documents the **P1 surface
+> only** — read + sync; install/update/remove/pin land in later phases with their own routes.
+> Full design: `docs/design/plans/2026-08-07-image-management-spec.md`. All routes
+> `RequireAuth → RequireAdmin`.
+
+### `GET /v1/admin/images`
+Returns the cached catalog: each image's manifest metadata (`id`, `display_name`, `kind`,
+`version`, `registry_ref`, `artwork`, `library_provider`), its per-instance install state
+(`installed`, `installed_version`, `pinned`, `update_available`), and its per-host presence
+(`hosts[]`: `state ∈ {absent,pulling,building,ready,failed}`, `version`, `error`, `bytes`).
+
+### `POST /v1/admin/images/sync`
+Re-fetches the manifest at `instance_settings.image_catalog_ref`, validates `manifest_version`,
+upserts the cached catalog, and returns it. **A fetch failure never affects launches** — the
+cached catalog keeps serving and the error is reported as `sync_error` in the envelope.
 
 ---
 
@@ -2003,6 +2115,68 @@ plane cannot silently delete a newer client's preferences.
 Invalid enum values are a `400 validation_failed`, not a silent clamp: a client
 sending `strip_position: "left"` has a bug, and clamping it to `bottom` would
 hide that bug on every device the user owns.
+
+`strip_items` mixes two kinds of thing. `signal`, `identity`, `codec`, `metrics`
+and `hint` are **readouts** — turning one off removes information. `capture`,
+`exit`, `mic` and `fullscreen` are **actions**: they put the controls that were
+previously drawer-only onto the always-on strip, so none of them requires
+summoning the drawer first. The server treats all nine identically (a validated
+boolean it never reads), but a client must not: an action drawn while input is
+captured is unreachable, because the pointer is locked to the game. Draw them
+only while input is free.
+
+An action item asks the client to **draw** a control; it never grants the
+capability behind it. `mic` is the case where the distinction bites: whether a
+session may capture microphone audio is `session.mic_granted`, a server
+decision, and the two are independent. `mic=true` on a session with
+`mic_granted=false` means "the user wants this control on their strip" and must
+render as unavailable — not hidden (the user asked for it) and not enabled (the
+server said no).
+
+---
+
+### `GET /v1/me/highlights` *(home-rail amendment, 2026-08-05)*
+
+The featured rail on the logged-in landing page. Additive: a new path, no
+existing shape changed.
+
+**The server owns the ranking.** That was the explicit decision at sign-off, and
+it is the reason this endpoint exists rather than a pair of fields on
+`AppListItem`. Order and the per-item `reason` are produced here; a client
+renders what it is handed. A client must **not** re-derive the rail by sorting
+`/v1/apps` against `/v1/sessions` — two rankers drifting apart is the failure
+this design forecloses.
+
+**Why not fields on `AppListItem`.** `AppListItem` is `allOf`-inherited by both
+`App` and `AdminApp`, so a field there lands on three read shapes at once,
+including admin ones with no use for it. `GET /v1/apps` is also paginated, and
+"most played" cannot be *ordered by* a value computed after `LIMIT/OFFSET` has
+already been applied — ranking the catalogue by play time would push a
+per-row aggregate over `sessions` into the sort key of the hottest endpoint in
+the product, to render five cards.
+
+**Entitlement filtering is a correctness requirement, not politeness.** A
+session row outlives the entitlement that authorised it: revoking a user's
+entitlement does not delete their history. This endpoint therefore applies the
+same entitled + enabled predicate as `GET /v1/apps`. Omit it and a revoked title
+reappears on the user's home page with its play time attached. The launch itself
+is still refused at `POST /v1/sessions` — this endpoint is UX, not the
+authorization boundary — but surfacing a revoked app is an information leak on
+its own terms.
+
+**Best-effort by contract.** `items` may be shorter than five and is empty for a
+user who has never launched anything. An empty rail is a normal state a client
+must render, never an error.
+
+`play_seconds` is clamped per session, so an unreconciled `NULL ended_at` is
+bounded rather than open-ended, and `state='failed'` sessions are excluded — a
+launch that never ran is not play time.
+
+Deliberately **absent** from `Highlight`: the app's name, artwork, kind and
+favourite flag (the client already holds the full `AppListItem` and joins on
+`app_id` — a second copy would drift the moment artwork is re-resolved), and any
+host name (a user-facing `Session` carries `host_id` only, and `GET /v1/hosts`
+is admin-gated).
 
 ---
 
