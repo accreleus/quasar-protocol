@@ -1220,7 +1220,7 @@ handed to tooling. Semantics:
 
 ---
 
-## First-run setup (amendment — first-run wizard, additive — sign-off pending)
+## First-run setup (amendment — first-run wizard, additive — signed off 2026-08-07)
 
 > Two additive routes let a fresh instance be claimed through the UI instead of the
 > `BOOTSTRAP_ADMIN_*` env dance (which is retained for unattended provisioning). Both are
@@ -1251,7 +1251,7 @@ every attempt logged at `WARN` with source address. The token is never returned 
 
 ---
 
-## App-image catalog + management (amendment — image management, additive — sign-off pending)
+## App-image catalog + management (amendment — image management, additive — signed off 2026-08-07)
 
 > The catalog mirrors the `accretion-io/quasar-images` **manifest** (Quasar-owned, versioned;
 > Quasar refuses an unknown `manifest_version`). Installing an image also lands its **runtime
