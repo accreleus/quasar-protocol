@@ -69,6 +69,22 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > `h265` is the wire spelling of HEVC (the control-plane profile catalog's `hevc` maps to `h265` on
 > this wire). See §`session_assign` and §`capacity`.
 
+> **Amendment — image management P2 (ensure images onto hosts), additive, requires sign-off
+> (signed off 2026-08-08).** Adds two downstream (control → node) messages — `image_ensure`
+> (pull a prebuilt catalog image into the host's docker daemon) and `image_remove` (best-effort
+> removal) — one upstream message, `image_state` (pull progress / terminal state), and one
+> optional field on `register`: `images: [{image_id, version, state}]` so a reconnecting agent
+> reports what it actually has and the control plane reconciles `host_images` against reality
+> (same wholesale-snapshot principle as `capacity`). **Additive** — new `type` values and one
+> optional field; no existing message, field, or ack contract changes. An older agent never
+> receives `image_ensure` (the control plane only sends it to agents that reported `images` on
+> register or acked a prior ensure — conservatively, it may send and tolerate silence, since an
+> unknown downstream `type` is ignored by existing discipline) and never sends `image_state`;
+> an older control plane ignores both unknown upstream shapes. `registry_ref` is always a
+> concrete immutable sha- tag, never a floating tag. See §`image_ensure`, §`image_remove`,
+> §`image_state`, §`register`, and `docs/design/plans/2026-08-08-image-management-p2-spec.md`
+> in the quasar repo.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -136,6 +152,15 @@ A node must prove it's allowed to join before it can register.
 ```
 On reconnect, `auth` is `{ "node_secret": "<issued-earlier>" }` and `node_name` must match.
 The control plane replies `registered` (below) or `{type:"error", ...}` and closes on auth failure.
+
+**Optional `images` array (image-management P2 amendment).** The agent may include
+`"images": [{ "image_id": "steam", "version": "2026.08.07", "state": "ready" }, ...]` — the
+managed catalog images it actually has (verified against its docker daemon, by `image_id`s it
+was previously told to ensure). When present, the control plane reconciles its `host_images`
+rows for this host **wholesale for the reported ids**, and any id the control plane believed
+`ready` on this host but absent from the report is flipped to `absent` (a reconnected agent
+that lost an image must not read as ready). Absent field ⇒ the control plane keeps its stored
+rows unchanged (older agent).
 
 ### `capacity` — full capacity report
 Sent immediately after `registered`, and again whenever hardware/topology changes. Replaces
@@ -428,6 +453,37 @@ samples; the control plane joins the two on one timeline for the diagnostic bund
   host is **dropped, not stored** — events never resurrect or alter a session (identical posture to
   `session_metrics`).
 
+### `image_state` — managed-image pull/remove progress (image-management P2)
+> *Additive amendment. A new upstream message; an older control plane ignores the unknown
+> `type`. Fire-and-forget (no `ack`), image-presence authority only — it never touches
+> sessions.*
+
+Sent on every state transition of a managed image on this host, and throttled during a pull
+(at most every 2 s or per ≥5 % progress delta, whichever is coarser — never per docker layer
+event).
+```json
+{
+  "type": "image_state",
+  "image_id": "steam",
+  "version": "2026.08.07",
+  "state": "pulling",
+  "progress_pct": 42,
+  "bytes": 1234567,
+  "error": ""
+}
+```
+- **`state` ∈ `{absent, pulling, ready, failed}`** for prebuilt images. (`building` is reserved
+  for the template-build amendment — a P2 control plane accepts it in the schema CHECK but no
+  P2 agent sends it.)
+- **`progress_pct`** (0–100, int) and **`bytes`** (downloaded so far) are best-effort and only
+  meaningful while `pulling`; `bytes` on `ready` is the image's on-disk size when cheaply known,
+  else omitted/0.
+- **`error`** is non-empty only when `state = "failed"` and is a short operator-readable
+  message ("insufficient disk: 3.2 GiB free, image needs ~9 GiB", "registry auth denied",
+  "manifest not found"), never a raw docker error blob.
+- The control plane upserts `host_images(host_id, image_id)` from this message. Unknown
+  `image_id` (not in `image_catalog`) is dropped, not stored.
+
 ---
 
 ## Messages — control → node (downstream)
@@ -689,6 +745,44 @@ agent re-registers, the control plane sends `config_update` with the new setting
 Running sessions are **not** forcibly stopped by the `restart` command. Operators who want a
 clean cut should drain the host first (`POST /v1/hosts/{id}/drain`, `control-api.md`) before
 changing a restart-class knob.
+
+### `image_ensure` — pull a prebuilt catalog image onto this host (image-management P2)
+> *Additive amendment. A new downstream command; an older agent silently ignores the unknown
+> `type` (existing discipline).*
+
+Reserve/prepare semantics like `session_assign`: the agent acks acceptance immediately, then
+does the pull asynchronously and reports progress via `image_state`.
+```json
+{
+  "type": "image_ensure",
+  "id": "<command-id>",
+  "image_id": "steam",
+  "registry_ref": "ghcr.io/accretion-io/quasar-steam:sha-969cc14ea168",
+  "version": "2026.08.07"
+}
+```
+- Agent replies `{type:"ack", id, ok:true}` (accepted — not "done") and starts/continues the
+  pull. An ensure for an `(image_id, version)` already in flight or already `ready` is
+  **idempotent**: ack, no second pull, current state re-emitted via `image_state`.
+- `ack{ok:false, error}` only when the command is un-actionable on its face (malformed ref,
+  managed-image support disabled on this agent). Runtime failures (disk, registry, network)
+  are reported as `image_state{state:"failed", error}` after an `ok:true` ack.
+- **`registry_ref` is a concrete immutable ref** (a `sha-` tag or digest), never a floating
+  tag — "ensure" is deterministic and re-runnable.
+- The agent checks free disk on the docker data filesystem **before** pulling and fails fast
+  with a readable `image_state` error when headroom is insufficient.
+- The agent records `image_id → registry_ref` so `image_remove` and the `register` `images`
+  report can speak in `image_id` terms.
+
+### `image_remove` — best-effort removal of a managed image (image-management P2)
+```json
+{ "type": "image_remove", "id": "<command-id>", "image_id": "steam" }
+```
+`ack{ok:true}` then a best-effort `docker rmi` of the ref the agent recorded for that
+`image_id`; terminal `image_state` follows (`absent` on success, `failed` with a readable
+`error` if the daemon refused — e.g. the image backs a container). The agent **never**
+force-removes an image backing a live container. An `image_id` the agent has no record of
+acks `ok:true` and reports `absent` (already gone — idempotent).
 
 ---
 

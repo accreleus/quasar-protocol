@@ -461,6 +461,25 @@
 > `docs/design/plans/2026-07-29-steam-library-discovery-spec.md` §7, §8, §9, §10, §11 and §13
 > "Phase 4".
 
+> **Amendment — image management P1+P2 (catalog + ensure), additive, requires sign-off (signed
+> off 2026-08-08).** Records the P1 catalog DDL retroactively and adds the P2 ensure tables.
+> **P1 (migration 0054, shipped in quasar PR #437):** creates **`image_catalog`** (the synced
+> read-model of `quasar-manifest.json`: `id TEXT PK`, `name`, `description`, `version`,
+> `registry_ref`, `kind CHECK (kind IN ('prebuilt','template'))`, `runtime_preset JSONB`,
+> `artwork JSONB`, `synced_at`) and two `instance_settings` columns:
+> `image_update_policy TEXT NOT NULL DEFAULT 'manual'` and
+> `image_catalog_ref TEXT NOT NULL DEFAULT 'stable'`. **P2 (migration 0055):** creates
+> **`host_images`** (per-host image presence: PK `(host_id, image_id)`, FKs `hosts(id)` and
+> `image_catalog(id)` both `ON DELETE CASCADE`, `state CHECK (state IN
+> ('absent','pulling','building','ready','failed'))` — `building` reserved for the template
+> phase, `error`, `bytes`, `version`, `updated_at`) and **`installed_images`** (the
+> per-instance adoption set: `image_id TEXT PK REFERENCES image_catalog(id) ON DELETE
+> CASCADE`, `version`, `lazy BOOLEAN NOT NULL DEFAULT false`, `installed_at`). It changes no
+> existing table, column, type, default, or constraint, and not the session state machine.
+> `host_images` is written only from the agent's `image_state`/`register.images` reports
+> (`agent-api.md` image-management amendment) and read by launch placement. See
+> `docs/design/plans/2026-08-08-image-management-p2-spec.md` in the quasar repo.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
