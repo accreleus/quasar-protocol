@@ -85,6 +85,21 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > §`image_state`, §`register`, and `docs/design/plans/2026-08-08-image-management-p2-spec.md`
 > in the quasar repo.
 
+> **Amendment — image management P4 (template builds), additive, requires sign-off (delegated
+> sign-off 2026-08-08 overnight campaign, flagged for review).** Adds one downstream (control →
+> node) command, `image_build` — the template analogue of `image_ensure`: instead of pulling a
+> prebuilt ref, the agent fetches a build context, runs `docker build` locally, and reports the
+> same `host_images` state machine as a pull. It reuses `image_state` verbatim, sending the
+> `building` state that P2 **already reserved** in the wire enum note and the schema CHECK — a P2
+> control plane accepts `building` but never sent it; **P4 is the first sender.** No existing
+> message, field, or ack contract changes: `image_ensure`, `image_remove`, and `image_state` keep
+> their exact shapes; `image_build` is a new sibling `type`. An older agent that ignores
+> `image_build` never becomes ready for a template image — wire-silent, exactly as for
+> `image_ensure` (the control plane's ack-timeout "unsupported until next register" logic covers
+> it). `image_remove` removes a template image by the `local_tag` the agent recorded, exactly as
+> it removes a pulled `registry_ref`. See §`image_build`, §`image_remove`, §`image_state`, and
+> `docs/design/plans/2026-08-08-image-management-p4-spec.md` in the quasar repo.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -783,6 +798,57 @@ does the pull asynchronously and reports progress via `image_state`.
 `error` if the daemon refused — e.g. the image backs a container). The agent **never**
 force-removes an image backing a live container. An `image_id` the agent has no record of
 acks `ok:true` and reports `absent` (already gone — idempotent).
+
+### `image_build` — build a template catalog image on this host (image-management P4)
+> *Additive amendment. A new downstream command; an older agent silently ignores the unknown
+> `type` (existing discipline) and so never becomes ready for a template image.*
+
+The template analogue of `image_ensure`. Reserve/prepare semantics are identical: the agent
+acks acceptance immediately, then fetches the build context and runs `docker build`
+asynchronously, reporting progress via `image_state` — reusing the `building` state P2 already
+reserved.
+```json
+{
+  "type": "image_build",
+  "id": "<command-id>",
+  "image_id": "xfce-desktop",
+  "context_url": "https://codeload.github.com/accretion-io/quasar-images/tar.gz/<commit-sha>",
+  "context_subdir": "xfce-desktop",
+  "dockerfile": "Dockerfile",
+  "build_args": { "BASE": "..." },
+  "local_tag": "quasar-local/xfce-desktop:2026.08.08",
+  "version": "2026.08.08"
+}
+```
+- Agent replies `{type:"ack", id, ok:true}` (accepted — not "done") and starts/continues the
+  build. A build for an `(image_id, version)` already in flight or already `ready` is
+  **idempotent**: ack, no second build, current state re-emitted via `image_state`.
+- `ack{ok:false, error}` only when the command is un-actionable on its face (malformed
+  `context_url`, disallowed host, managed-image support disabled on this agent). Runtime
+  failures (download, extraction, disk, build) are reported as `image_state{state:"failed",
+  error}` after an `ok:true` ack.
+- Progress rides `image_state{state:"building", progress_pct, ...}`; terminal `ready` (built and
+  tagged `local_tag`, `bytes` = image size when cheaply known) or `failed` (short
+  operator-readable error, never a raw build-log blob). `progress_pct` for a build is
+  best-effort — docker build has only coarse step output, so the agent parses `Step N/M` when
+  present and omits `progress_pct` otherwise.
+- **`context_url`** is a tarball of the source repo pinned to a **commit sha**, never a floating
+  ref — the control plane resolves the catalog ref to a sha at sync, so a template build is as
+  deterministic as a digest-pinned pull (the sha is stored in `image_catalog.context_sha`,
+  `schema.md`). It is a GitHub codeload tarball for the configured repo; the agent downloads it,
+  extracts `context_subdir` as the build context, and builds `dockerfile` within it.
+- **`local_tag`** is CP-assigned and deterministic: `quasar-local/<image_id>:<version>`. It is
+  **never a registry ref** — a template image is built locally and **never pushed** anywhere. The
+  agent records `image_id → local_tag` in the same state map it uses for `image_id → registry_ref`
+  (P2), so `image_remove` and the `register` `images` report speak in `image_id` terms exactly as
+  for a pulled image. `image_remove` for a template `docker rmi`s the recorded `local_tag`, same
+  path as a pulled ref.
+- **SSRF containment.** Before downloading, the agent validates the `context_url` host against an
+  allowlist (`QUASAR_IMAGE_SOURCE_HOSTS`, default `codeload.github.com,github.com`), requires
+  HTTPS, enforces a download **size cap**, and guards tar extraction against path traversal
+  (zip-slip) so an entry cannot escape the scratch context dir. A build with insufficient free
+  disk fails fast with a readable `image_state` error (a build needs more headroom than a pull),
+  and the scratch dir is always cleaned.
 
 ---
 

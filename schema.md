@@ -501,6 +501,24 @@
 > a semantic note on an existing column, not a DDL change. See
 > `docs/design/plans/2026-08-08-image-management-p3-spec.md` in the quasar repo.
 
+> **Amendment — image management P4 (template builds), additive, requires sign-off per
+> §Authorization's documented exception (delegated sign-off 2026-08-08 overnight campaign,
+> flagged for review).** **Migration 0057:** `image_catalog` ADD `context_sha TEXT NOT NULL
+> DEFAULT ''` (the resolved commit sha the template's build context is pinned to, populated at
+> sync alongside the P3 digest resolution for prebuilts — the deterministic analogue of
+> `registry_digest`, sent to the agent as the pinned ref inside `image_build.context_url`,
+> `agent-api.md`; empty when the last sync could not resolve it, which also refuses install of
+> that template); and `installed_images` ADD `local_tag TEXT NOT NULL DEFAULT ''` (the
+> CP-assigned build tag `quasar-local/<image_id>:<version>`, captured **at adoption** — the
+> template analogue of the P3 rule that `registry_ref` holds the immutable ref captured at
+> adoption). A template's `installed_images.registry_ref` stays empty and its `local_tag`
+> carries the build tag; a prebuilt's `local_tag` stays empty and its `registry_ref` carries the
+> ref — dispatch and launch placement match an app's image against whichever of the two is
+> populated. It changes no existing table, column, type, default, or constraint, and not the
+> session state machine. **No new tables** — `host_images` already models `building` in its
+> `state` CHECK (reserved by the P1+P2 amendment above) and is reused as-is. See
+> `docs/design/plans/2026-08-08-image-management-p4-spec.md` in the quasar repo.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
