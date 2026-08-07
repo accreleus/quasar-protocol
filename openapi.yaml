@@ -61,6 +61,8 @@ tags:
     description: Node-agent ↔ control-plane internal endpoints (not operator-facing).
   - name: signaling
     description: WebRTC signaling (WebSocket; not a REST body — see signaling.md).
+  - name: dev
+    description: Development-only surface — registered ONLY when QUASAR_DEV_AGENT_AUTH=1, never in production (the control plane refuses to boot with the flag set and QUASAR_ENV=production). Paths carry x-dev-only true; the route-coverage drift test skips them (their registration semantics are asserted by dedicated tests instead).
 
 paths:
   # ─── auth ────────────────────────────────────────────────────────────────
@@ -142,6 +144,42 @@ paths:
                 new_password: { type: string }
       responses:
         "204": { description: Password rotated; all tokens revoked. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ─── dev (dev-gated; absent unless QUASAR_DEV_AGENT_AUTH=1) ───────────────
+  /v1/dev/agent-session:
+    post:
+      tags: [dev]
+      x-dev-only: true
+      summary: Mint a throwaway, auto-reaped ephemeral identity + token for automated UI validation (dev-gated; #399).
+      description: |
+        Registered ONLY when `QUASAR_DEV_AGENT_AUTH=1`; absent the flag the route
+        does not exist (404), and the control plane refuses to boot with the flag
+        set while `QUASAR_ENV=production`. Auth is the per-boot dev key (written to
+        the container log and `/run/quasar/dev-agent-key`), not a bearer token.
+        Response is shape-compatible with `POST /v1/auth/login` so every existing
+        client path works unchanged. The minted identity is a REAL user row with a
+        real token — server-side role enforcement is untouched — and is deleted
+        (with its sessions and device bindings) when its TTL lapses.
+      security: []
+      parameters:
+        - name: X-Quasar-Dev-Key
+          in: header
+          required: true
+          schema: { type: string }
+          description: The per-boot dev secret. Wrong or missing → 401 with no message/timing distinction.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DevAgentSessionRequest" }
+      responses:
+        "200":
+          description: Ephemeral identity minted (login-shape + storage_keys).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DevAgentSessionResponse" }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
@@ -2515,6 +2553,33 @@ components:
         user: { $ref: "#/components/schemas/User" }
         min_client_version: { type: string }
         latest_client_version: { type: string }
+
+    DevAgentSessionRequest:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [user, admin]
+          default: user
+          description: role=admin mints a REAL admin (same enforcement path); the server logs it at WARN with the source address.
+        ttl_seconds:
+          type: integer
+          minimum: 60
+          maximum: 28800
+          default: 1800
+          description: Identity lifetime. Default 30 min, hard cap 8 h. The token TTL is clamped to this — a token cannot outlive its user.
+    DevAgentSessionResponse:
+      type: object
+      required: [access_token, token_type, expires_at, user, storage_keys]
+      properties:
+        access_token: { type: string, description: "The only credential ever returned — the identity's password is random and never exposed." }
+        token_type: { type: string, enum: [Bearer] }
+        expires_at: { type: string, format: date-time, description: "Token AND identity expiry; the reaper deletes the user at/after this instant." }
+        user: { $ref: "#/components/schemas/User" }
+        storage_keys:
+          type: object
+          description: "Convenience: the three web-SPA localStorage entries (quasar.auth.token / quasar.auth.expires_at / quasar.auth.user) ready to inject."
+          additionalProperties: { type: string }
 
     Device:
       type: object

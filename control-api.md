@@ -1162,6 +1162,59 @@ existing token-revocation path. Gated by `RequireAuth` like the other `/v1/me` r
 
 ---
 
+## Dev-only agent auth (amendment #399, additive, dev-gated — signed off 2026-08-07)
+
+> **Never part of the production surface.** The route below is registered ONLY when
+> `QUASAR_DEV_AGENT_AUTH=1`; absent the flag it does not exist (404 from the mux, not a 403
+> guard). The control plane **refuses to boot** (`fatal`) with the flag set while
+> `QUASAR_ENV=production`. Every boot with the flag on emits a `WARN` banner naming the flag.
+> In `openapi.yaml` the path carries `x-dev-only: true` and is excluded from the route-coverage
+> drift test; its registration semantics (absent when off, present when on) are asserted by
+> dedicated control-plane tests instead.
+
+### `POST /v1/dev/agent-session`
+```json
+// request — header X-Quasar-Dev-Key: <per-boot secret>; body optional
+{ "role": "user", "ttl_seconds": 1800 }
+// 200 — login-shape + storage_keys
+{
+  "access_token": "<opaque>",
+  "token_type": "Bearer",
+  "expires_at": "<RFC3339 — token AND identity expiry>",
+  "user": { "id": "<uuid>", "email": "agent-<uuid>@dev.invalid", "username": "...", "role": "user", "created_at": "..." },
+  "storage_keys": {
+    "quasar.auth.token": "...",
+    "quasar.auth.expires_at": "...",
+    "quasar.auth.user": "{...}"
+  }
+}
+```
+
+Mints a **throwaway, auto-reaped** identity for automated UI validation (unattended test
+agents), so no shared long-lived credential exists and no real operator password is ever
+handed to tooling. Semantics:
+
+- **Auth** is the per-boot random secret (generated at startup, never persisted across
+  boots, written to the container log and to `/run/quasar/dev-agent-key`). Wrong or missing
+  key → `401` with no message or timing distinction (constant-time compare).
+- **The identity is real.** A real `users` row (random email `agent-<uuid>@dev.invalid`,
+  random username, random password that is **never returned** — the token is the only
+  credential) and a real bearer token minted through the normal issuance path.
+  `role=admin` mints a real admin via the same enforcement path as everything else
+  (`RequireAuth → RequireAdmin` is untouched); every admin mint is logged at `WARN` with
+  the request's source address. This endpoint is provisioning, not a bypass.
+- **TTL**: `ttl_seconds` default 1800 (30 min), hard cap 28800 (8 h), minimum 60. The token
+  TTL is clamped to the identity TTL — a token cannot outlive its user. `expires_at` in the
+  response is both.
+- **Reaping**: `users.ephemeral_expires_at` (nullable; non-null = throwaway) marks the row;
+  a reaper deletes expired ephemeral users at boot and on an interval, and the existing
+  user-delete cascade removes their sessions and device bindings. A reaped identity's token
+  stops working immediately. A crashed test run cannot leave an identity behind.
+- **Response shape** is compatible with `POST /v1/auth/login`, plus `storage_keys` — the
+  three web-SPA localStorage entries ready for injection by browser-automation tooling.
+
+---
+
 ## Account security — invites + device management (LP-SEC-01)
 
 > **Amendment — LP-SEC-01 (W1 security wave), additive, requires sign-off.** Adds the admin
