@@ -1203,6 +1203,11 @@ handed to tooling. Semantics:
   `role=admin` mints a real admin via the same enforcement path as everything else
   (`RequireAuth → RequireAdmin` is untouched); every admin mint is logged at `WARN` with
   the request's source address. This endpoint is provisioning, not a bypass.
+  **Durable side effects are the operator's to weigh:** because the minted admin is real,
+  admin writes it performs (e.g. flipping `instance_settings.registration_mode`, granting
+  entitlements) persist after the identity is reaped, with `updated_by`/`granted_by`
+  nulled rather than attributed. Point automated admin-surface tests at throwaway stacks,
+  not production instances.
 - **TTL**: `ttl_seconds` default 1800 (30 min), hard cap 28800 (8 h), minimum 60. The token
   TTL is clamped to the identity TTL — a token cannot outlive its user. `expires_at` in the
   response is both.
