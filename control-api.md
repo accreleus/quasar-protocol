@@ -1000,6 +1000,12 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `PATCH /v1/admin/launch-profiles/{id}` | **admin** | *(UI-P4)* edit a launch profile, including reordering its rungs (order **is** preference) |
 | `DELETE /v1/admin/launch-profiles/{id}` | **admin** | *(UI-P4)* delete a launch profile — **refuse-if-referenced (`409`)** by any app, the global policy, or any user preference |
 | `GET /v1/admin/profile-policy`, `PATCH /v1/admin/profile-policy` | **admin** | *(AS10-03; prose added UI-P4)* read/update the global default launch profile and whether users may override |
+| `GET /v1/admin/images` | **admin** | *(image management P1)* the app-image catalog with per-instance install + per-host presence state |
+| `POST /v1/admin/images/sync` | **admin** | *(image management P1; P3 adds digest resolution + policy application)* re-fetch the manifest and refresh the cached catalog |
+| `POST /v1/admin/images/{id}/install` | **admin** | *(image management P3)* adopt a catalog image + ensure-everywhere unless `lazy` — `409` already-installed / digest-unresolved |
+| `DELETE /v1/admin/images/{id}/install` | **admin** | *(image management P3)* uninstall — best-effort `image_remove` to every host that has it |
+| `POST` / `DELETE /v1/admin/images/{id}/pin` | **admin** | *(image management P3)* freeze/unfreeze the installed version against every update path — idempotent `204` |
+| `POST /v1/admin/images/{id}/update` | **admin** | *(image management P3)* explicit update-now — `200` applied or no-op, `409` if pinned |
 | `GET /v1/hosts`, `GET /v1/hosts/{id}` | **admin** | host/capacity oversight |
 | `POST /v1/hosts/{id}/drain`, `POST /v1/hosts/{id}/uncordon` | **admin** | *(P3-01)* host lifecycle — cordon a host out of service / return it |
 | `DELETE /v1/hosts/{id}` | **admin** | *(admin-delete)* forget an offline host — refuse-if-online-or-in-use |
@@ -1286,6 +1292,135 @@ Returns the cached catalog: each image's manifest metadata (`id`, `display_name`
 Re-fetches the manifest at `instance_settings.image_catalog_ref`, validates `manifest_version`,
 upserts the cached catalog, and returns it. **A fetch failure never affects launches** — the
 cached catalog keeps serving and the error is reported as `sync_error` in the envelope.
+*(P3, additive)* Sync also resolves each entry's digest (§Digest pinning below) and applies
+the instance's update policy (§Update-policy semantics below); `fetched_at` / `sync_error` are
+now backed by `instance_settings` (§Sync-state persistence below) rather than an in-process
+variable — the wire shape is unchanged.
+
+## App-image management P3 — install / uninstall / pin / update (amendment, additive)
+
+> **Amendment — additive, admin-gated route family per §Authorization's documented
+> exception; delegated sign-off 2026-08-08 overnight campaign, flagged for review.** Adds
+> five admin routes closing the P1 catalog surface's placeholder ("install/update/remove/
+> pin land in later phases") plus the update-policy application and digest pinning (#440)
+> described below. All five are `RequireAuth → RequireAdmin`, same as the P1 catalog
+> routes. No existing shape changes: `GET /v1/admin/images`'s `pinned` field (declared in
+> P1, always `false` until now) is real, and each catalog entry gains `lazy` and
+> `registry_digest`. Full design: `docs/design/plans/2026-08-08-image-management-p3-spec.md`.
+
+### `POST /v1/admin/images/{id}/install`
+```json
+// request — lazy optional, default false
+{ "lazy": false }
+// 201 — the now-installed catalog entry
+{ "id": "steam", "display_name": "Steam", "kind": "prebuilt", "version": "1.4.0",
+  "registry_ref": "ghcr.io/accretion-io/quasar-steam:1.4.0",
+  "registry_digest": "ghcr.io/accretion-io/quasar-steam@sha256:<64hex>",
+  "installed": true, "installed_version": "1.4.0", "pinned": false, "lazy": false,
+  "update_available": false, "hosts": [] }
+```
+Seeds `installed_images` with the catalog's **current** `(version, registry_ref)` — captured
+at adoption per the P2 amendment (`schema.md`), where the adopted `registry_ref` is the
+**resolved digest form** (`name@sha256:...`, see §Digest pinning below), never the floating
+tag. Unless `lazy:true`, the control plane immediately kicks ensure-everywhere
+(`agent-api.md` image-management amendment) so every connected host starts pulling. A lazy
+install seeds the adoption row and dispatches nothing — hosts pull on first launch
+placement instead.
+- **Errors:** `404 not_found` (no such catalog id); `409 already_installed` (an
+  `installed_images` row already exists for this id — use `POST .../update` to move it to a
+  newer version, not a re-install); `409 digest_unresolved` (the catalog's
+  `registry_digest` is empty because the last sync could not resolve it — re-sync and
+  retry).
+
+### `DELETE /v1/admin/images/{id}/install`
+```json
+// 204 No Content
+```
+Uninstalls: sends `image_remove` (`agent-api.md`) to every connected host that reports the
+image present (best-effort — the agent never force-removes an image backing a live
+session), then deletes the `installed_images` row. `host_images` rows are **not**
+FK-cascaded from `installed_images` (they FK `image_catalog`, not the adoption row); the
+control plane deletes that image's `host_images` rows itself after dispatching the
+removes. A late `image_state` report for an id no longer installed re-upserts
+`host_images` if the id is still in the catalog — harmless, reconciled at the host's next
+register.
+- **Errors:** `404 not_installed` — no `installed_images` row for this id (this includes an
+  id absent from the catalog entirely: either way there is nothing to uninstall).
+
+### `POST /v1/admin/images/{id}/pin`
+```json
+// 204 No Content
+```
+Freezes the installed `(version, registry_ref)` against every update path, including the
+`auto` policy and an explicit `.../update` call (both then answer `409 conflict`).
+**Idempotent** — pinning an already-pinned image is a `204` no-op.
+- **Errors:** `404 not_installed`.
+
+### `DELETE /v1/admin/images/{id}/pin`
+```json
+// 204 No Content
+```
+Unpins. **Idempotent** — unpinning an already-unpinned image is a `204` no-op. Does **not**
+itself trigger an update; the next `auto`-policy sync or an explicit `.../update` call does.
+- **Errors:** `404 not_installed`.
+
+### `POST /v1/admin/images/{id}/update`
+```json
+// 200 — applied distinguishes an actual re-adopt from a no-op; same 200 either way
+{ "applied": true, "image": { "id": "steam", "installed_version": "1.4.0", "...": "..." } }
+```
+The `notify` policy's action and `manual`'s escape hatch (§Update-policy semantics below):
+re-adopts the catalog's current `(version, registry_digest)` and re-ensures everywhere,
+identically to a fresh install's dispatch. `applied:false` (still `200`) when
+`installed_version` already equals the catalog `version` — a no-op, not an error, so a UI
+button click never has to branch on status code to tell "worked" from "was already
+current".
+- **Errors:** `404 not_installed`; `409 conflict` when the image is pinned (unpin first).
+
+### Update-policy semantics (`instance_settings.image_update_policy`)
+`POST /v1/admin/images/sync` applies the instance-wide policy after refreshing the catalog:
+- **`manual`** (default) — sync only refreshes the catalog; `update_available` is
+  recomputed per image; nothing installs or re-adopts on its own.
+- **`notify`** — identical effect to `manual`. The distinction is UI-only today (the badge
+  is surfaced more prominently); a notification channel is a documented future hook, not
+  part of this contract. `POST .../update` is how an admin acts on it.
+- **`auto`** — after the catalog refresh, every installed **and unpinned** image whose
+  catalog `version` now differs from `installed_version` is re-adopted and re-ensured, the
+  same as an explicit `.../update` on each. A **running session is never affected** — it
+  keeps whatever image its host already pulled; the new image applies from that app's
+  **next launch** (operator decision 2026-08-07). Pinned images are skipped regardless of
+  policy.
+
+Policy is read/written through the existing `GET` / `PATCH /v1/admin/settings`
+(`image_update_policy: "manual"|"notify"|"auto"`, LP-SEC-01 surface) — no new settings
+route.
+
+### Digest pinning (#440)
+
+At **sync**, the control plane resolves each manifest image's `registry_ref` **tag** to its
+content digest via the registry's HTTP API (GHCR: an anonymous, token-less pull token for
+public repos; `HEAD /v2/<name>/manifests/<tag>` with the Docker/OCI manifest `Accept`
+headers → `Docker-Content-Digest`). The catalog stores **both**: `registry_ref` (the
+human-readable tag, display only) and a new `registry_digest` (`name@sha256:<64hex>`, the
+form used for every dispatch). **Install and update adopt the digest form** —
+`installed_images`'s `registry_ref` column (P2, `schema.md`) holds `registry_digest` at the
+moment of adoption, not the mutable tag, closing the standing critical (#440) that adopting
+straight from the live catalog could otherwise silently split the fleet across builds
+sharing one version label.
+
+Resolution failure at sync **never fails the sync**: `registry_digest` is left empty and the
+per-image note is carried the same way `sync_error` already is (below); installing an
+unresolved image is refused (`409 digest_unresolved`) until a later sync resolves it. No CI
+change is required — `quasar-manifest.json` keeps publishing the human-readable tag; digest
+resolution is a control-plane-side, sync-time lookup, not a build-time one.
+
+### Sync-state persistence
+
+`GET /v1/admin/images`'s `fetched_at` / `sync_error` fields (P1) are now backed by
+`instance_settings.image_synced_at` / `image_sync_error` (`schema.md`, migration `0056`)
+instead of an in-process variable — the wire shape is **unchanged**, only the storage moved,
+so a control-plane restart no longer forgets the last sync's outcome. Closes the P1
+"in-memory sync-state" note (invariant #5 cleanup deferred from P1/P2).
 
 ---
 

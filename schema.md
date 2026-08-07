@@ -484,6 +484,23 @@
 > (`agent-api.md` image-management amendment) and read by launch placement. See
 > `docs/design/plans/2026-08-08-image-management-p2-spec.md` in the quasar repo.
 
+> **Amendment — image management P3 (install/pin/update + digest pinning), additive,
+> requires sign-off per §Authorization's documented exception (delegated sign-off
+> 2026-08-08 overnight campaign, flagged for review).** **Migration 0056:**
+> `installed_images` ADD `pinned BOOLEAN NOT NULL DEFAULT false` (freezes the row against
+> every update path — `auto` policy and explicit `.../update`, `control-api.md`);
+> `image_catalog` ADD `registry_digest TEXT NOT NULL DEFAULT ''` (the content-digest form,
+> `name@sha256:<64hex>`, resolved at sync from `registry_ref`'s tag — #440; empty when the
+> last sync could not resolve it, which also refuses install of that image); and
+> `instance_settings` ADD `image_sync_error TEXT NOT NULL DEFAULT ''` +
+> `image_synced_at TIMESTAMPTZ` (persists the `GET /v1/admin/images` `sync_error` /
+> `fetched_at` pair that P1 kept only in-process, so a control-plane restart no longer
+> forgets the last sync's outcome — invariant #5 cleanup deferred from P1/P2). It changes no
+> existing table, column, type, default, or constraint. `installed_images.registry_ref`
+> (P2, unchanged type) now holds the **digest form** at adoption time, not the mutable tag —
+> a semantic note on an existing column, not a DDL change. See
+> `docs/design/plans/2026-08-08-image-management-p3-spec.md` in the quasar repo.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.

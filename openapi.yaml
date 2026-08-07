@@ -66,7 +66,7 @@ tags:
   - name: setup
     description: First-run setup — claim the instance (create the first admin, token-gated) and read setup status. `POST /v1/setup/claim` self-disables (409) once any admin exists; `GET /v1/setup/status` is unauthenticated and returns only routing booleans.
   - name: images
-    description: App-image catalog + management (admin). The catalog mirrors the accretion-io/quasar-images manifest; installing an image also lands its runtime preset. (P1 surface below is read + sync only; install/update/remove land in later phases.)
+    description: App-image catalog + management (admin). The catalog mirrors the accretion-io/quasar-images manifest; installing an image also lands its runtime preset. P1 = read + sync; P3 adds install/uninstall/pin/update + digest pinning (#440).
 
 paths:
   # ─── auth ────────────────────────────────────────────────────────────────
@@ -1690,6 +1690,70 @@ paths:
               schema: { $ref: "#/components/schemas/ImageCatalogEnvelope" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/images/{id}/install:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [images]
+      summary: Install a catalog image (adopt + ensure-everywhere unless lazy).
+      description: >-
+        P3. Seeds installed_images with the catalog's current (version, registry_digest)
+        and, unless lazy:true, dispatches ensure-everywhere immediately. A lazy install
+        seeds the adoption row only; hosts pull on first launch placement.
+      x-required-role: admin
+      requestBody:
+        required: false
+        content: { application/json: { schema: { $ref: "#/components/schemas/ImageInstallRequest" } } }
+      responses:
+        "201": { description: Installed. , content: { application/json: { schema: { $ref: "#/components/schemas/CatalogImage" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [images]
+      summary: Uninstall (best-effort image_remove to every host that has it, then drop the adoption row).
+      x-required-role: admin
+      responses:
+        "204": { description: Uninstalled. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/images/{id}/pin:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [images]
+      summary: Pin the installed image against every update path (idempotent).
+      x-required-role: admin
+      responses:
+        "204": { description: Pinned. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [images]
+      summary: Unpin (idempotent). Does not itself trigger an update.
+      x-required-role: admin
+      responses:
+        "204": { description: Unpinned. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/images/{id}/update:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [images]
+      summary: Re-adopt the catalog's current version/digest and re-ensure everywhere (200 applied or no-op).
+      description: >-
+        The notify policy's action and manual's escape hatch. applied:false (still 200)
+        when installed_version already equals the catalog version. 409 conflict when the
+        image is pinned.
+      x-required-role: admin
+      responses:
+        "200": { description: Applied or no-op. , content: { application/json: { schema: { $ref: "#/components/schemas/ImageUpdateResult" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   # ─── admin: settings / invites ───────────────────────────────────────────
   /v1/admin/settings:
@@ -2756,8 +2820,8 @@ components:
       properties:
         manifest_version: { type: integer, description: "The manifest schema version the cached catalog was parsed from." }
         catalog_ref: { type: string, description: "The pinned quasar-images ref the catalog was fetched at (instance_settings.image_catalog_ref)." }
-        fetched_at: { type: [string, "null"], format: date-time, description: "When the cached catalog was last successfully refreshed." }
-        sync_error: { type: [string, "null"], description: "Non-null when the last sync failed; the cached catalog is still served." }
+        fetched_at: { type: [string, "null"], format: date-time, description: "When the cached catalog was last successfully refreshed. P3: backed by instance_settings.image_synced_at, so this survives a control-plane restart." }
+        sync_error: { type: [string, "null"], description: "Non-null when the last sync failed; the cached catalog is still served. P3: backed by instance_settings.image_sync_error, so this survives a control-plane restart." }
         images:
           type: array
           items: { $ref: "#/components/schemas/CatalogImage" }
@@ -2771,16 +2835,28 @@ components:
         kind: { type: string, enum: [prebuilt, template], description: "prebuilt = pull a registry ref; template = build locally (later phase)." }
         version: { type: string, description: "Upstream's version for this entry; an update is available when this exceeds installed_version." }
         registry_ref: { type: [string, "null"], description: "Pinned image reference for a prebuilt entry (never a floating tag)." }
+        registry_digest: { type: [string, "null"], description: "P3 (#440). Content-digest form (name@sha256:<64hex>) resolved from registry_ref's tag at sync; empty/null when the last sync could not resolve it — installing this image is then refused (409 digest_unresolved) until a later sync resolves it. Install/update adopt this form, never the mutable registry_ref tag." }
         artwork: { type: object, additionalProperties: true }
         library_provider: { type: [string, "null"], description: "Set when this image is a library provider's canonical image (e.g. steam)." }
         installed: { type: boolean }
         installed_version: { type: [string, "null"] }
-        pinned: { type: boolean, description: "A pinned image is never auto-updated under any policy." }
+        pinned: { type: boolean, description: "P3: real. A pinned image is never auto-updated under any policy (auto sync or explicit .../update, both 409 while pinned)." }
+        lazy: { type: boolean, description: "P3. True when installed without dispatching ensure-everywhere; hosts pull this image on first launch placement instead." }
         update_available: { type: boolean }
         hosts:
           type: array
           description: "Per-host presence (present from the phase that ships host_images; may be empty in the read-only P1 surface)."
           items: { $ref: "#/components/schemas/ImageHostState" }
+    ImageInstallRequest:
+      type: object
+      properties:
+        lazy: { type: boolean, default: false, description: "P3. When true, seeds the installed_images adoption row without dispatching ensure-everywhere; hosts pull on first launch placement instead." }
+    ImageUpdateResult:
+      type: object
+      required: [applied, image]
+      properties:
+        applied: { type: boolean, description: "P3. false (still 200) when installed_version already equalled the catalog version — a no-op, not an error." }
+        image: { $ref: "#/components/schemas/CatalogImage" }
     ImageHostState:
       type: object
       required: [host_id, state]
