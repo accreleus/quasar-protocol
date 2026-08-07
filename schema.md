@@ -511,7 +511,16 @@
 > that template); and `installed_images` ADD `local_tag TEXT NOT NULL DEFAULT ''` (the
 > CP-assigned build tag `quasar-local/<image_id>:<version>`, captured **at adoption** — the
 > template analogue of the P3 rule that `registry_ref` holds the immutable ref captured at
-> adoption). A template's `installed_images.registry_ref` stays empty and its `local_tag`
+> adoption). `installed_images` **also** ADD `context_repo TEXT NOT NULL DEFAULT ''`,
+> `context_sha TEXT NOT NULL DEFAULT ''`, `dockerfile TEXT NOT NULL DEFAULT ''`, and
+> `build_args JSONB NOT NULL DEFAULT '{}'::jsonb` — **every build-defining input frozen at
+> adoption** (review 2026-08-08: reading them live from `image_catalog` at dispatch was the
+> template twin of the #440 fleet-split bug — a later catalog sync could rebuild different bits
+> under the adopted version, or blank `context_sha` and make an adopted template
+> un-dispatchable). Dispatch reads these frozen `installed_images` columns, never the live
+> catalog; an admin `update` re-snapshots them transactionally with `version`/`local_tag`. The
+> catalog's own `context_sha` remains the sync-time resolution (gates install), but is never the
+> dispatch source once adopted. A template's `installed_images.registry_ref` stays empty and its `local_tag`
 > carries the build tag; a prebuilt's `local_tag` stays empty and its `registry_ref` carries the
 > ref — dispatch and launch placement match an app's image against whichever of the two is
 > populated. It changes no existing table, column, type, default, or constraint, and not the
