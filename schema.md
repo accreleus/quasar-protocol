@@ -528,6 +528,24 @@
 > `state` CHECK (reserved by the P1+P2 amendment above) and is reused as-is. See
 > `docs/design/plans/2026-08-08-image-management-p4-spec.md` in the quasar repo.
 
+> **Amendment — image management P5 (library-provider auto-ensure + runtime-preset
+> materialization), additive, requires sign-off per §Authorization's documented exception
+> (delegated sign-off 2026-08-08 overnight campaign, flagged for review).** **Migration 0058:**
+> `installed_images` ADD `runtime_preset_id UUID REFERENCES runtime_presets(id) ON DELETE SET
+> NULL` (the managed preset materialized from the image's manifest `runtime` block at install —
+> the missing link that makes an installed image launchable; nulled if the preset row is later
+> deleted, never blocking the delete); and `runtime_presets` ADD `managed_image_id TEXT
+> REFERENCES image_catalog(id) ON DELETE SET NULL` (marks a preset as image-managed vs.
+> admin-authored, so P5 only ever updates the presets it owns and **never clobbers a hand-made
+> admin preset** — NULL for admin presets). Both new FKs are **`ON DELETE SET NULL`** (FK
+> discipline). It changes no existing table, column, type, default, or constraint, and not the
+> session state machine. The manifest runtime→columns mapping is unchanged (MANIFEST.md: the
+> `no_new_privileges` knob rides `apps.runtime_spec`, not `runtime_presets` — #432). Enabling
+> `instance_settings.library_discovery_enabled` auto-installs every catalog image with a
+> non-null `library_provider` (idempotent, via the P3 install path) — a **control-plane
+> behaviour, no DDL** beyond the two columns above. See
+> `docs/design/plans/2026-08-08-image-management-p5-spec.md` in the quasar repo.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.

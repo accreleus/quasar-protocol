@@ -2848,6 +2848,7 @@ components:
         installed_version: { type: [string, "null"] }
         pinned: { type: boolean, description: "P3: real. A pinned image is never auto-updated under any policy (auto sync or explicit .../update, both 409 while pinned)." }
         lazy: { type: boolean, description: "P3. True when installed without dispatching ensure-everywhere; hosts pull this image on first launch placement instead." }
+        runtime_preset_id: { type: [string, "null"], format: uuid, description: "P5. The managed runtime_presets row materialized from this image's manifest runtime block at install; null when not installed or the image carries no runtime block. Makes the installed image launchable." }
         update_available: { type: boolean }
         hosts:
           type: array

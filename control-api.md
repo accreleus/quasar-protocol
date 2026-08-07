@@ -734,6 +734,17 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > party — the same trade the artwork work rejected for hotlinking, which is why it is an
 > operator's decision and never a default.
 >
+> **P5 side effect (image management):** flipping `library_discovery_enabled` `false→true`
+> **auto-installs** every catalog image with a non-null `library_provider` (the canonical Steam
+> image) that is not already installed — idempotent, via the P3 install path (adopt +
+> ensure-everywhere + runtime-preset materialization), so enabling discovery guarantees the
+> provider's image and preset are present rather than failing at a later launch. A provider image
+> that cannot resolve its digest (private registry) stays `digest_unresolved` and is surfaced in
+> `GET /v1/admin/images`, never fatal to the setting flip. Disabling discovery does **not**
+> uninstall (destructive; an admin uninstalls explicitly). See the image-management P5 spec.
+> `GET /v1/admin/images` per-image gains `runtime_preset_id` — the managed preset materialized
+> from the manifest `runtime` block at install (`schema.md` migration 0058), null until installed.
+>
 > **Amendment — admin-libraries (2026-08-01), additive, signed off.** The two env knobs above
 > gain **database-settable counterparts** so the admin UI's Steam library page can configure
 > them: `instance_settings.library_discovery_interval_minutes` (integer, 15–10080, default 360;
