@@ -474,7 +474,11 @@
 > ('absent','pulling','building','ready','failed'))` — `building` reserved for the template
 > phase, `error`, `bytes`, `version`, `updated_at`) and **`installed_images`** (the
 > per-instance adoption set: `image_id TEXT PK REFERENCES image_catalog(id) ON DELETE
-> CASCADE`, `version`, `lazy BOOLEAN NOT NULL DEFAULT false`, `installed_at`). It changes no
+> CASCADE`, `version`, `registry_ref` — the immutable ref captured **at adoption**, so an
+> ensure always sends a `(version, registry_ref)` pair that belong together even after a later
+> catalog sync moves `image_catalog.registry_ref` ahead (review 2026-08-08: resolving the ref
+> from the live catalog silently split the fleet across builds under one version label) —
+> `lazy BOOLEAN NOT NULL DEFAULT false`, `installed_at`). It changes no
 > existing table, column, type, default, or constraint, and not the session state machine.
 > `host_images` is written only from the agent's `image_state`/`register.images` reports
 > (`agent-api.md` image-management amendment) and read by launch placement. See
