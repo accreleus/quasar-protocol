@@ -3481,10 +3481,13 @@ components:
         id: { type: string, description: "Stable machine key, e.g. \"nvidia_egl_vendor_json\"." }
         status:
           type: string
-          enum: [pass, fail, skip]
           description: >-
-            "skip" means "not applicable to this host" (an NVIDIA check on an AMD box), never "we
-            could not tell". Consumers MUST pass through an unrecognized value rather than reject it.
+            Known values: "pass", "fail", "skip" — "skip" means "not applicable to this host" (an
+            NVIDIA check on an AMD box), never "we could not tell". DELIBERATELY NOT AN ENUM: the
+            check set (and its status vocabulary) is agent-owned and forward-compatible, so a closed
+            schema type would force every generated client to reject a value the contract requires
+            it to pass through. Consumers MUST render/store an unrecognized value rather than
+            reject it.
         summary: { type: string, description: "One sentence an operator can act on, in plain language." }
         remediation: { type: string, description: "Exact commands to fix it, distro-aware where cheaply knowable. Empty for pass/skip." }
     StorageVolume:
