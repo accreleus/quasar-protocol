@@ -279,6 +279,19 @@ sessions should not vanish, that's a fault the control plane logs).
 > never reaches the agent. This contract is therefore **unchanged** by P2-01; the note is
 > recorded only for traceability.
 
+`readiness` *(NEW, first-run-experience §S1, optional, additive)* is the agent's **advisory**
+host-readiness report: an array of `{ id, status, summary, remediation }`, where `id` is a stable
+machine key (e.g. `"nvidia_egl_vendor_json"`), `status` is `"pass" | "fail" | "skip"` (`skip`
+means "not applicable to this host", e.g. an NVIDIA check on an AMD box — never "we could not
+tell"), `summary` is one operator-actionable sentence, and `remediation` is an exact fix command
+(empty for `pass`/`skip`). **The check set is agent-owned** — a consumer must pass an
+unrecognized `status` through rather than reject it, so adding, renaming, or removing a check
+never needs a protocol amendment. Absent ⇒ the control plane keeps its last stored value
+(keep-if-absent, exactly like `effective_settings`); an explicit `[]` is a real overwrite
+("reported, nothing to say"), distinct from "never reported". **ADVISORY ONLY**: a failing check
+MUST NOT affect registration, admission, or scheduling — a host with every check failing still
+registers and still runs sessions. See `readiness.rs`'s probe set and `schema.md` `hosts.readiness`.
+
 ### `heartbeat` — liveness + live utilization
 ```json
 {
@@ -334,6 +347,23 @@ available.
 states; the agent enters the picture at `starting`.) The control plane writes the `sessions`
 row, stamps `started_at`/`ended_at`, and **releases the GPU reservation** when the agent reports
 `stopped`/`failed`. `error` is set (string) only with `failed`.
+
+> *(first-run-experience §S5, additive, 2026-08-09)* `session_state` may also carry two optional
+> fields, both present only on a terminal report that warrants them:
+> - **`reason_code`: string** — a machine-readable classification of a terminal failure. Today's
+>   only defined value is `"app_exited_early"` (the app container exited before it ever presented
+>   a frame — #463). **Never load-bearing for lifecycle**: state transitions key on `state` alone,
+>   never on `reason_code`.
+> - **`app_log_tail`: string** — the app container's own captured log tail, newline-joined,
+>   oldest first, bounded to roughly the last 100 lines. Captured continuously while the
+>   container ran, because app containers run `--rm` and the daemon has already discarded the
+>   lines by the time anyone looks otherwise — this is the only surviving copy of the decisive
+>   output (e.g. "Steam needs to be online to update").
+>
+> Both are omitted (not `null`) on every other report and on every pre-amendment agent — an older
+> control plane simply never sees the keys. See `schema.md` `sessions.failure_code` /
+> `sessions.app_log_tail` for the stored form (the wire spells the classification `reason_code`;
+> the column is `failure_code`).
 
 ### `ack` — reply to a downstream command
 ```json
@@ -587,6 +617,25 @@ capability but does not by itself mirror ordinary browser sessions to a physical
 > `local_only` topology has no WebRTC pipeline and ignores the flag. The agent reports the
 > microphone state in its `session.effective_media` trace payload (`mic`:
 > `"off" | "negotiated" | "active"`). Additive; no existing field or shape changes.
+
+> *(first-run-experience §S2, additive, 2026-08-09)* The `app` object may also carry an optional
+> **`network`: `"none" | "bridge" | "host"`** — the docker network mode for the app container.
+> This is a **per-app requirement, not a host setting**: app containers default to `--network
+> none` (correct for almost everything), but Steam's first boot must reach the internet to
+> download `steamui.so` or it clean-exits and the session dies as "media path interrupted"
+> (#463). The control plane resolves it server-side (`apps.runtime_spec.network`, else the app's
+> runtime preset's `network` column, `schema.md`) and sends the winner here — **the agent does no
+> merging**. Omitted/`null`/empty ⇒ the agent's existing host fallback chain
+> (`QUASAR_CONTAINER_NETWORK`, else `none`) — byte-identical behaviour for every older control
+> plane and every app that states no preference. The value set is **closed**; anything outside
+> `none`/`bridge`/`host` is a hard session-launch failure reported via `ack{ok:false}` naming the
+> offending value, never silently substituted or passed through — this string becomes a `docker
+> run --network` argument on the host, so an unvalidated value (e.g. `container:<id>`) would be a
+> launch-time capability grant. The control plane constrains it at three earlier layers (the
+> `runtime_presets.network` `CHECK`, the admin API's `400 validation_failed`, and P5 manifest
+> install validation) — this is the agent's **independent backstop**, because the wire is not a
+> trusted input regardless of how many earlier layers exist. Additive; no existing field or shape
+> changes.
 
 ### `session_start` — bring the pipeline up
 ```json

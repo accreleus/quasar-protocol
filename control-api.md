@@ -2086,6 +2086,7 @@ All five routes are **`RequireAuth → RequireAdmin`**, server-enforced.
       "args": ["-silent"], "env": { "PROTON_VERSION": "9.0" },
       "mounts": ["/data/steam-cache:/cache"],
       "managed_home": true, "home_container_path": "/home/quasar",
+      "network": "bridge",
       "used_by": [ { "id": "<uuid>", "name": "Weston Smoke" } ],
       "created_at": "...", "updated_at": "..." } ] }
 ```
@@ -2101,6 +2102,12 @@ absent falls through to the server default and is never written as a zero value*
 `mounts` must be arrays of strings and `env` an object of string values (`400` otherwise);
 `home_container_path` must be absolute. A duplicate `name` is `409 conflict`. Returns `201` with
 `{ "runtime_preset": … }`.
+
+**`network`** *(first-run-experience §S2, additive)* is one of the **closed** set
+`"" | "none" | "bridge" | "host"`; any other value is `400 validation_failed`. On create, absent
+falls through to the server default (`""`, inherit) like every other field. On patch, absent
+means unchanged and an explicit `""` is a real, meaningful write — it clears an app-owned
+override back to inherit, distinct from omitting the key.
 
 **`PATCH /v1/admin/runtime-presets/{id}`** — edit. **Absent means unchanged**, never "reset to
 default". The edit **takes effect on the next launch of every app using the preset, with no app
@@ -2140,6 +2147,7 @@ reach nobody.
 | `args` | appended, preset first. Argument order is meaningful; the app's follow the preset's. |
 | `image` | the app overrides when set; **blank or absent inherits the preset's**. |
 | `managed_home` / `home_container_path` | the preset provides the **default**; the app may override. `apps.managed_home` is `NOT NULL DEFAULT false` with no "unset", so an app can turn a managed home **on** when its preset has none but cannot turn a preset's **off** — a preset that provisions a per-user home is a storage guarantee for everything inheriting it. An app whose `home_container_path` is still the schema default has expressed no preference and takes the preset's path. |
+| `network` | *(first-run-experience §S2, additive)* same rule as `image`: the app's own `runtime_spec.network` overrides when set; blank/absent inherits the preset's. **When neither states one, the key is omitted entirely** from the flattened `app` object sent to the agent — not sent as `""` — so the agent's own host fallback chain (`QUASAR_CONTAINER_NETWORK`, else `none`) applies exactly as it does for an app with no preset at all (`agent-api.md` `session_assign.app.network`). |
 
 Any other key in the app's `runtime_spec` (`gpu`, and anything added later) passes through
 untouched. **An app with no preset dispatches a `runtime_spec` byte-identical to before this
@@ -2843,6 +2851,29 @@ ends `stopped` with `state_detail = "game exited"` — a normal end, not a failu
 other `state_detail` value it is free-text, human-readable and advisory (`schema.md`); clients
 must not branch on it for correctness.
 
+#### `failure_code` / `app_log_tail` — app-exit-before-frames detail (first-run-experience §S5)
+> *Additive amendment — two optional, read-only fields on the session resource (user and admin
+> session GET/list alike). Changes no existing shape, field or status code; a client that ignores
+> them behaves exactly as before.*
+
+Every session read shape gains two fields, **always serialized, both `null` unless a terminal
+failure warrants them**:
+- **`failure_code`** — a machine-readable classification of the failure. Today's only defined
+  value is `"app_exited_early"` (the app container exited before it ever presented a frame —
+  #463). It sits **beside** `error_message`, not in place of it: `error_message` remains free-text
+  operator prose that may be rewritten at any time, while `failure_code` is the stable key a
+  client branches on.
+- **`app_log_tail`** — the app container's own captured log tail (newline-joined, oldest first,
+  ~100 lines bound). App containers run `--rm`, so these lines are otherwise unrecoverable the
+  moment the daemon reaps the container; this is the only surviving copy of the decisive output.
+
+Sourced from the agent's `session_state.reason_code` / `session_state.app_log_tail`
+(`agent-api.md`) and stored as `sessions.failure_code` / `sessions.app_log_tail` (`schema.md` —
+note the wire/column name difference on the first field). Read-only: there is no request field
+and no endpoint that sets either. **The UI renders `error_message` as prose and `app_log_tail`
+preformatted** — the two fields have different rendering needs and must not be conflated in a
+client. Neither field is a session-state authority: `state` remains the only progress signal.
+
 ### `GET /v1/sessions/{id}/events` — session lifecycle push (SSE, 2026-08-02)
 > *Additive amendment — one new read-only endpoint, no existing shape changes. Signed off
 > alongside the game-exit lifecycle work; exists to replace client lifecycle POLLING with
@@ -2958,6 +2989,19 @@ bearer is `403`, before any host lookup, per §Authorization) and both return th
 > path from the capacity report (`agent-api.md` `gpus[].render_node`, `null` until reported);
 > the admin UI uses these to offer a render-node picker (`software` + one entry per reported
 > GPU) instead of a free-text field. Also adds `POST /v1/admin/hosts/{id}/restart` (below).
+
+> **Amendment — first-run-experience §S1 (host readiness), additive.** The host body
+> (`GET /v1/hosts`, `GET /v1/hosts/{id}`, and the host list) gains two fields, **both always
+> serialized**: `readiness` (array of `{ id, status, summary, remediation }`, or `null` — `null`
+> means no amendment-aware agent has reported yet, distinct from `[]` meaning "reported, nothing
+> to say") and `readiness_reported_at` (RFC3339 timestamp, or `null` — when the stored
+> `readiness` value last changed, so the admin UI can show a report as stale rather than silently
+> presenting old evidence as current). Sourced from the agent's `capacity.readiness`
+> (`agent-api.md`), stored opaquely (`schema.md` `hosts.readiness` / `readiness_reported_at`).
+> **ADVISORY WORDING ONLY** — the admin Hosts detail page and the setup wizard render this as
+> guidance; it never gates registration, admission, or scheduling, and no endpoint anywhere
+> refuses a request because a check failed. Canonical schema: `openapi.yaml` `Host` /
+> `ReadinessCheck`.
 
 ### `POST /v1/hosts/{id}/drain` — cordon a host
 Marks an `online` host `draining`: the scheduler places **no new sessions** on it, while its

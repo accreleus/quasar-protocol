@@ -3293,7 +3293,7 @@ components:
       # health_state/health_reason are additive (present only when running/unsustainable);
       # app_launch_state is additive (present only when the app image reports one);
       # every other key is always serialized (nullable ones present-but-null).
-      required: [id, user_id, app_id, host_id, state, state_detail, error_message, profile_id, stream_profile_id, stream, codec_decision, negotiated_codec, created_at, started_at, ended_at]
+      required: [id, user_id, app_id, host_id, state, state_detail, error_message, failure_code, app_log_tail, profile_id, stream_profile_id, stream, codec_decision, negotiated_codec, created_at, started_at, ended_at]
       properties:
         id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
@@ -3302,6 +3302,20 @@ components:
         state: { $ref: "#/components/schemas/SessionState" }
         state_detail: { type: [string, "null"] }
         error_message: { type: [string, "null"] }
+        failure_code:
+          type: [string, "null"]
+          description: >-
+            First-run-experience §S5. Machine-readable classification of a terminal failure -
+            "app_exited_early" today. Sits beside error_message (free-text prose that may be
+            rewritten freely); the UI branches on THIS. Always serialized; null unless a failure
+            warranted it.
+        app_log_tail:
+          type: [string, "null"]
+          description: >-
+            First-run-experience §S5. The app container's own captured log tail (newline-joined,
+            oldest first, ~100 lines bound) - the only surviving copy, since app containers run
+            --rm. Always serialized; null unless a failure warranted capturing it. Rendered
+            preformatted, distinct from error_message's prose rendering.
         profile_id:
           type: [string, "null"]
           description: >-
@@ -3422,7 +3436,7 @@ components:
     Host:
       type: object
       # crud/handler.go hostResp — every key is always serialized (nullable ones present-but-null).
-      required: [id, node_name, status, agent_version, cpu_cores, mem_mb, cpu_model, last_registered_at, last_heartbeat_at, storage, capacity_detection, capacity_reason]
+      required: [id, node_name, status, agent_version, cpu_cores, mem_mb, cpu_model, last_registered_at, last_heartbeat_at, storage, capacity_detection, capacity_reason, readiness, readiness_reported_at]
       properties:
         id: { type: string, format: uuid }
         node_name: { type: string }
@@ -3446,6 +3460,33 @@ components:
         capacity_reason:
           type: [string, "null"]
           description: "Operator-facing reason when capacity detection is unavailable or failed."
+        readiness:
+          # first-run-experience §S1, additive: agent-reported advisory readiness checks
+          # (capacity.readiness). null = no amendment-aware agent has reported yet, distinct from
+          # [] = reported, nothing to say. ADVISORY ONLY - never gates registration, admission or
+          # scheduling.
+          type: [array, "null"]
+          items: { $ref: "#/components/schemas/ReadinessCheck" }
+        readiness_reported_at:
+          type: [string, "null"]
+          format: date-time
+          description: "When the stored readiness value last changed; null until reported."
+    ReadinessCheck:
+      type: object
+      description: >-
+        One host-readiness check (first-run-experience §S1). The check set is agent-owned - a
+        consumer must pass an unrecognized status through rather than reject it.
+      required: [id, status, summary, remediation]
+      properties:
+        id: { type: string, description: "Stable machine key, e.g. \"nvidia_egl_vendor_json\"." }
+        status:
+          type: string
+          enum: [pass, fail, skip]
+          description: >-
+            "skip" means "not applicable to this host" (an NVIDIA check on an AMD box), never "we
+            could not tell". Consumers MUST pass through an unrecognized value rather than reject it.
+        summary: { type: string, description: "One sentence an operator can act on, in plain language." }
+        remediation: { type: string, description: "Exact commands to fix it, distro-aware where cheaply knowable. Empty for pass/skip." }
     StorageVolume:
       type: object
       required: [label, path, total_mb, available_mb]
@@ -3870,7 +3911,7 @@ components:
         name: { type: string }
     RuntimePreset:
       type: object
-      required: [id, name, description, image, args, env, mounts, managed_home, home_container_path, used_by, created_at, updated_at]
+      required: [id, name, description, image, args, env, mounts, managed_home, home_container_path, network, used_by, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         name: { type: string, description: "Unique. A collision on create/patch is 409 conflict." }
@@ -3899,6 +3940,14 @@ components:
         home_container_path:
           type: string
           description: "Container-side mount point default; an app with its own non-default path keeps it."
+        network:
+          type: string
+          enum: ["", "none", "bridge", "host"]
+          description: >-
+            First-run-experience §S2. Docker network mode for app containers launched from an app
+            inheriting this preset. "" (default) = inherit the agent's host default
+            (QUASAR_CONTAINER_NETWORK, else none). An app's own runtime_spec.network overrides
+            this at launch.
         used_by:
           type: array
           items: { $ref: "#/components/schemas/PresetUser" }
@@ -3936,6 +3985,10 @@ components:
         mounts: { type: array, items: { type: string } }
         managed_home: { type: boolean }
         home_container_path: { type: string, description: "Must be absolute (400 otherwise)." }
+        network:
+          type: string
+          enum: ["", "none", "bridge", "host"]
+          description: "Closed set (400 validation_failed otherwise). Absent = unchanged on patch, default on create; explicit \"\" clears an override back to inherit."
 
     # ─── hosts: GPU availability ────────────────────────────────────────────────
     GPUAvailability:
