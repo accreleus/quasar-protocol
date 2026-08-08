@@ -619,7 +619,7 @@ capability but does not by itself mirror ordinary browser sessions to a physical
 > `"off" | "negotiated" | "active"`). Additive; no existing field or shape changes.
 
 > *(first-run-experience §S2, additive, 2026-08-09)* The `app` object may also carry an optional
-> **`network`: `"none" | "bridge" | "host"`** — the docker network mode for the app container.
+> **`network`: `"none" | "bridge"`** — the docker network mode for the app container.
 > This is a **per-app requirement, not a host setting**: app containers default to `--network
 > none` (correct for almost everything), but Steam's first boot must reach the internet to
 > download `steamui.so` or it clean-exits and the session dies as "media path interrupted"
@@ -627,15 +627,29 @@ capability but does not by itself mirror ordinary browser sessions to a physical
 > runtime preset's `network` column, `schema.md`) and sends the winner here — **the agent does no
 > merging**. Omitted/`null`/empty ⇒ the agent's existing host fallback chain
 > (`QUASAR_CONTAINER_NETWORK`, else `none`) — byte-identical behaviour for every older control
-> plane and every app that states no preference. The value set is **closed**; anything outside
-> `none`/`bridge`/`host` is a hard session-launch failure reported via `ack{ok:false}` naming the
-> offending value, never silently substituted or passed through — this string becomes a `docker
-> run --network` argument on the host, so an unvalidated value (e.g. `container:<id>`) would be a
-> launch-time capability grant. The control plane constrains it at three earlier layers (the
-> `runtime_presets.network` `CHECK`, the admin API's `400 validation_failed`, and P5 manifest
-> install validation) — this is the agent's **independent backstop**, because the wire is not a
-> trusted input regardless of how many earlier layers exist. Additive; no existing field or shape
-> changes.
+> plane and every app that states no preference.
+>
+> Accepted values: **`none` | `bridge`**. Anything else fails the session via `ack{ok:false}` with
+> a message naming the offending value; the agent never passes an unrecognised string to the
+> container runtime.
+>
+> **`host` is not accepted over the wire**, and this is deliberate rather than an oversight.
+> `--network host` does not widen the container's reach — it removes the network namespace, so the
+> app shares the host's stack: every service on host loopback (the control plane, Postgres, the
+> docker proxy, any admin-only port an operator assumed a tenant workload could not reach) becomes
+> reachable, and the container can bind host ports itself. This field is portable — the control
+> plane resolves it from an app's `runtime_spec` or a runtime preset materialized from a catalog
+> image manifest authored on another machine — so honouring `host` here would let a manifest
+> dissolve the isolation boundary on every host that installs it.
+>
+> The agent **does** accept `host` from its own `QUASAR_CONTAINER_NETWORK` environment knob, which
+> is set by the operator of that specific machine and travels nowhere. The asymmetry is the point:
+> host networking stays a host-administration decision and never becomes an app property. An agent
+> that receives `"host"` in `AppSpec.network` must reject the session even when its own knob is set
+> to `host`. The control plane constrains the value at earlier layers too (the `runtime_presets.network`
+> `CHECK`, the admin API's `400 validation_failed`, and P5 manifest install validation) — this is
+> the agent's **independent backstop**, because the wire is not a trusted input regardless of how
+> many earlier layers exist. Additive; no existing field or shape changes.
 
 ### `session_start` — bring the pipeline up
 ```json

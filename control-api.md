@@ -2104,10 +2104,17 @@ absent falls through to the server default and is never written as a zero value*
 `{ "runtime_preset": … }`.
 
 **`network`** *(first-run-experience §S2, additive)* is one of the **closed** set
-`"" | "none" | "bridge" | "host"`; any other value is `400 validation_failed`. On create, absent
-falls through to the server default (`""`, inherit) like every other field. On patch, absent
-means unchanged and an explicit `""` is a real, meaningful write — it clears an app-owned
-override back to inherit, distinct from omitting the key.
+`"" | "none" | "bridge"`; any other value is `400 validation_failed`. `"host"` is refused the same
+way, with the `400` naming `QUASAR_CONTAINER_NETWORK` and why: `--network host` removes the
+container's network namespace rather than widening it, exposing the host's own loopback (control
+plane, Postgres, the docker proxy, any admin-only port) to the app — and because a preset is
+portable (it can be materialized from a catalog image manifest authored on another machine),
+accepting `host` here would let a manifest dissolve the isolation boundary on every host that
+installs it. Host networking stays reachable only through the agent's own host-local
+`QUASAR_CONTAINER_NETWORK` operator knob, never through this API. On create, absent falls through
+to the server default (`""`, inherit) like every other field. On patch, absent means unchanged and
+an explicit `""` is a real, meaningful write — it clears an app-owned override back to inherit,
+distinct from omitting the key.
 
 **`PATCH /v1/admin/runtime-presets/{id}`** — edit. **Absent means unchanged**, never "reset to
 default". The edit **takes effect on the next launch of every app using the preset, with no app
@@ -2147,7 +2154,7 @@ reach nobody.
 | `args` | appended, preset first. Argument order is meaningful; the app's follow the preset's. |
 | `image` | the app overrides when set; **blank or absent inherits the preset's**. |
 | `managed_home` / `home_container_path` | the preset provides the **default**; the app may override. `apps.managed_home` is `NOT NULL DEFAULT false` with no "unset", so an app can turn a managed home **on** when its preset has none but cannot turn a preset's **off** — a preset that provisions a per-user home is a storage guarantee for everything inheriting it. An app whose `home_container_path` is still the schema default has expressed no preference and takes the preset's path. |
-| `network` | *(first-run-experience §S2, additive)* same rule as `image`: the app's own `runtime_spec.network` overrides when set; blank/absent inherits the preset's. **When neither states one, the key is omitted entirely** from the flattened `app` object sent to the agent — not sent as `""` — so the agent's own host fallback chain (`QUASAR_CONTAINER_NETWORK`, else `none`) applies exactly as it does for an app with no preset at all (`agent-api.md` `session_assign.app.network`). |
+| `network` | *(first-run-experience §S2, additive)* same rule as `image`: the app's own `runtime_spec.network` overrides when set; blank/absent inherits the preset's. **When neither states one, the key is omitted entirely** from the flattened `app` object sent to the agent — not sent as `""` — so the agent's own host fallback chain (`QUASAR_CONTAINER_NETWORK`, else `none`) applies exactly as it does for an app with no preset at all (`agent-api.md` `session_assign.app.network`). (none|bridge only — see POST above) |
 
 Any other key in the app's `runtime_spec` (`gpu`, and anything added later) passes through
 untouched. **An app with no preset dispatches a `runtime_spec` byte-identical to before this

@@ -3945,12 +3945,19 @@ components:
           description: "Container-side mount point default; an app with its own non-default path keeps it."
         network:
           type: string
-          enum: ["", "none", "bridge", "host"]
+          enum: ["", "none", "bridge"]
           description: >-
             First-run-experience §S2. Docker network mode for app containers launched from an app
             inheriting this preset. "" (default) = inherit the agent's host default
             (QUASAR_CONTAINER_NETWORK, else none). An app's own runtime_spec.network overrides
-            this at launch.
+            this at launch, within the same none/bridge range. "host" is NOT available here:
+            --network host removes the container's network namespace rather than widening it,
+            exposing the host's own loopback (control plane, Postgres, the docker proxy, any
+            admin-only port) to the app - and because a preset is portable (it can be materialized
+            from a catalog image manifest authored on another machine), accepting "host" here
+            would let a manifest dissolve the isolation boundary on every host that installs it.
+            Host networking stays reachable only through the agent's own host-local
+            QUASAR_CONTAINER_NETWORK operator knob, never through this API.
         used_by:
           type: array
           items: { $ref: "#/components/schemas/PresetUser" }
@@ -3990,8 +3997,13 @@ components:
         home_container_path: { type: string, description: "Must be absolute (400 otherwise)." }
         network:
           type: string
-          enum: ["", "none", "bridge", "host"]
-          description: "Closed set (400 validation_failed otherwise). Absent = unchanged on patch, default on create; explicit \"\" clears an override back to inherit."
+          enum: ["", "none", "bridge"]
+          description: >-
+            Closed set (400 validation_failed otherwise). Absent = unchanged on patch, default on
+            create; explicit "" clears an override back to inherit. "host" is refused with a 400
+            that names QUASAR_CONTAINER_NETWORK and why: host networking is a per-host operator
+            decision made via that agent knob, never a portable preset/manifest property (a
+            manifest-carried "host" would dissolve host isolation on every host that installs it).
 
     # ─── hosts: GPU availability ────────────────────────────────────────────────
     GPUAvailability:
