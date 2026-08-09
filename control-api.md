@@ -1756,11 +1756,15 @@ cleartext upload would expose the key *and* the bearer token to any peer on the 
 
 The **direct peer is resolved first**, and `r.TLS` is deliberately *not* a short-circuit:
 
-- **peer is listed in `QUASAR_TRUSTED_PROXIES`** → that proxy's protocol assertion decides,
-  *regardless* of whether the proxy→backend hop is TLS. A proxy that accepts public HTTP and
-  re-encrypts to Quasar produces an encrypted last hop while the key crossed the client-facing
-  network in the clear; our own TLS only ever proves the hop that was never in doubt. No
-  assertion means no evidence, and the upload is refused.
+- **peer is listed in `QUASAR_TRUSTED_PROXIES`** → **both** the proxy's protocol assertion **and**
+  `r.TLS` are required. They answer different questions and neither substitutes for the other:
+  the assertion covers the client→proxy hop, which the control plane cannot observe, and `r.TLS`
+  covers the proxy→backend hop, which it can. A proxy that accepts public HTTP and re-encrypts
+  produces an encrypted last hop while the key crossed the client-facing network in the clear; a
+  proxy that terminates HTTPS correctly but forwards over plain HTTP puts the key and the bearer
+  token on the backend segment. A private key needs **every** hop encrypted, so a listed proxy
+  must also connect to the HTTPS listener. No assertion means no evidence, and the upload is
+  refused.
 - **otherwise** the peer *is* the client as far as we are entitled to believe, and the control
   plane's own transport is the whole story.
 
@@ -1773,6 +1777,14 @@ whatever position it occupies and however many hops are in front. Operators are 
 required to configure the proxy to **strip or overwrite** inbound forwarding headers
 (`docs/configuration.md`); this rule makes a violation of that requirement fail closed rather
 than silently. Anything else is `403`, decided **before the body is read**.
+
+**SAN-mismatch guidance is source-specific.** When the served certificate does not cover the
+requested host, the remedy depends entirely on where that certificate came from, and `advice`
+branches on `certificate.info.source` accordingly: `QUASAR_TLS_HOSTS` regenerates nothing for a
+**mounted** certificate, and deleting the pem files in `QUASAR_TLS_DIR` does nothing for an
+**uploaded** one (the stored copy is reloaded from the database at the next restart). A single
+remedy would send operators of two of the three supported topologies down steps that cannot work
+— the exact failure this panel exists to eliminate.
 
 **Restart precedence.** Mounted `QUASAR_TLS_CERT` / `QUASAR_TLS_KEY` files **outrank** an
 uploaded certificate: when they are set, the stored certificate is not loaded at boot and a log

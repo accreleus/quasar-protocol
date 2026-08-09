@@ -2089,10 +2089,12 @@ paths:
             only endpoint that accepts a private key, and the same router is served by both the
             plaintext and the TLS listener (QUASAR_HTTP_REDIRECT=off is supported). The DIRECT
             PEER is resolved first and r.TLS is NOT a short-circuit: when the peer is listed in
-            QUASAR_TRUSTED_PROXIES its protocol assertion decides regardless of whether the
-            proxy->backend hop is TLS (a proxy that accepts public HTTP and re-encrypts to us
-            produces an encrypted last hop while the key crossed the client-facing network in
-            clear); otherwise the peer is the client and our own transport decides. A forwarded
+            QUASAR_TRUSTED_PROXIES, BOTH its protocol assertion AND r.TLS are required, because
+            they cover different hops and neither substitutes for the other - the assertion
+            covers client->proxy (which we cannot observe) and r.TLS covers proxy->backend
+            (which we can), and a private key needs every hop encrypted. So a listed proxy must
+            also connect to the HTTPS listener. Otherwise the peer is the client and our own
+            transport decides. A forwarded
             header on its own is NEVER sufficient - §S6-0's rule that forwarded headers may
             soften advice but never authorise applies here too - and the assertion counts as
             https only when EVERY protocol value on the request says https, which fails closed
@@ -3930,11 +3932,16 @@ components:
             advice:
               type: string
               description: >-
-                The remedy, when there is one, in operator language. Names the exact
-                QUASAR_TLS_HOSTS value to set AND the fact that the self-signed certificate is
-                NEVER regenerated when that variable changes (delete the pem files and recreate
-                the container, or upload instead) - the single most expensive unstated fact in
-                this area.
+                The remedy, when there is one, in operator language. SOURCE-SPECIFIC: the fix for
+                a SAN mismatch depends entirely on where the certificate came from, so this
+                branches on info.source. For self_signed it names the QUASAR_TLS_HOSTS value AND
+                the fact that the certificate is NEVER regenerated when that variable changes
+                (delete the pem files and recreate the container) - the single most expensive
+                unstated fact in this area. For provided it says QUASAR_TLS_HOSTS does not apply
+                and the mounted file must be re-issued. For uploaded it says deleting the pem
+                files will not help because the stored copy is reloaded at every restart, and to
+                upload a replacement. A single remedy would send two of the three supported
+                topologies down steps that cannot work.
         origins:
           type: object
           required: [configured, source, allowed, request_origin_allowed, same_origin_exemption]
