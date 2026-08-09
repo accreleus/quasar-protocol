@@ -1720,31 +1720,64 @@ not told to bounce the stack.
    the key match, with "the key does not match", which sends an operator hunting the wrong file;
 3. `tls.X509KeyPair` — **this is what proves the key matches the certificate.** Nothing else in
    the endpoint establishes that;
-4. the leaf must be **usable as a server certificate**: not a CA certificate, and not restricted
-   by Extended Key Usage to something other than server authentication (an empty EKU means
-   unrestricted and is accepted). Same class as (5) — an upload hot-swaps the live listener, so
+4. the leaf must be **usable as a server certificate**: not a CA certificate, not restricted by
+   Extended Key Usage to something other than server authentication, and — when the Key Usage
+   extension is present — permitting `digitalSignature`, which every modern TLS handshake
+   requires of a server. An **absent** extension means unrestricted and is accepted in both
+   cases. Same class as (5) — an upload hot-swaps the live listener, so
    a certificate no browser would accept must not be installable;
-5. the leaf must be currently valid (an expired certificate breaks every browser the instant it
-   is installed) and must carry SANs (the legacy Common Name has been dead in browsers for
-   years).
+5. **every certificate in the chain** must be currently valid — not just the leaf. A valid leaf
+   bundled with an expired intermediate installs cleanly and then breaks every client that builds
+   a path through it, which looks nothing like a certificate problem from the operator's side;
+   the error names which entry is at fault. The leaf must also carry SANs (the legacy Common Name
+   has been dead in browsers for years).
+
+**These criteria apply to uploads only.** A cert/key pair already mounted on disk is loaded with
+`crypto/tls`' own, looser rules, so an existing deployment whose pem files carry OpenSSL bag
+attributes or comments keeps booting after an upgrade — `access-check` reports the discrepancy
+instead of the process refusing to start.
 
 `certificate_pem` must contain **nothing but CERTIFICATE blocks and whitespace**: bytes outside a
 PEM block are rejected rather than silently skipped, and what is **persisted** is a bundle
 re-encoded from the validated chain rather than the request string — so nothing that is not a
 certificate can reach the public certificate table.
 
+The body must be **exactly one JSON object**: a trailing second value is refused rather than
+silently ignored, because on this route the unexamined tail sits in the same request as a private
+key.
+
 Each failure is `400 validation_failed` with the specific sentence. **The request body is never
 echoed in an error** — it contains a private key.
 
-**Secure transport is required, and this is the only route where that is true.** It is the only
-endpoint that accepts a private key, and the same router is served by both the plaintext and the
-TLS listener (`QUASAR_HTTP_REDIRECT=off` is a supported configuration), so a cleartext upload
-would expose the key *and* the bearer token to any peer on the path. A request qualifies when it
-arrived on the control plane's own TLS listener, or when its **direct peer** is listed in
-`QUASAR_TRUSTED_PROXIES` and that peer asserts `https`. **A forwarded header alone is never
-sufficient** — §S6-0's rule that forwarded headers may soften advice but never authorise applies
-to this gate too, and the direct peer is the only part of a forwarded chain a client cannot
-spoof. Anything else is `403`, decided **before the body is read**.
+**Secure transport is required on EVERY hop, and this is the only route where that is true.** It
+is the only endpoint that accepts a private key, and the same router is served by both the
+plaintext and the TLS listener (`QUASAR_HTTP_REDIRECT=off` is a supported configuration), so a
+cleartext upload would expose the key *and* the bearer token to any peer on the path.
+
+The **direct peer is resolved first**, and `r.TLS` is deliberately *not* a short-circuit:
+
+- **peer is listed in `QUASAR_TRUSTED_PROXIES`** → that proxy's protocol assertion decides,
+  *regardless* of whether the proxy→backend hop is TLS. A proxy that accepts public HTTP and
+  re-encrypts to Quasar produces an encrypted last hop while the key crossed the client-facing
+  network in the clear; our own TLS only ever proves the hop that was never in doubt. No
+  assertion means no evidence, and the upload is refused.
+- **otherwise** the peer *is* the client as far as we are entitled to believe, and the control
+  plane's own transport is the whole story.
+
+**A forwarded header alone is never sufficient** — §S6-0's rule that forwarded headers may soften
+advice but never authorise applies to this gate too. The assertion is accepted as `https` only
+when **every** protocol value on the request says `https`. That is deliberately *not* a
+leftmost-or-rightmost choice: an attacker can inject a value but can never remove the trusted
+proxy's own, so "all values are https" implies the trusted proxy's own assertion is `https`
+whatever position it occupies and however many hops are in front. Operators are additionally
+required to configure the proxy to **strip or overwrite** inbound forwarding headers
+(`docs/configuration.md`); this rule makes a violation of that requirement fail closed rather
+than silently. Anything else is `403`, decided **before the body is read**.
+
+**Restart precedence.** Mounted `QUASAR_TLS_CERT` / `QUASAR_TLS_KEY` files **outrank** an
+uploaded certificate: when they are set, the stored certificate is not loaded at boot and a log
+line says so. That keeps `source: "provided"` honest, and — since no route deletes a stored
+certificate — mounting the files *is* the operator's reset path, which is only true if it wins.
 
 **Atomicity.** The sealed key and the public certificate row are written in **one transaction**,
 key first. Two rows that came from different uploads are not a usable pair and the loader would

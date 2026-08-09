@@ -2020,14 +2020,23 @@ paths:
              sends an operator hunting the wrong file;
           3. tls.X509KeyPair - THIS is what proves the key matches the certificate. Nothing
              else in the endpoint establishes that;
-          4. the leaf must be USABLE AS A SERVER CERTIFICATE: not a CA certificate, and not
-             restricted by Extended Key Usage to something other than server authentication.
-             An empty EKU means unrestricted and is accepted. This is the same class as (5):
+          4. the leaf must be USABLE AS A SERVER CERTIFICATE: not a CA certificate, not
+             restricted by Extended Key Usage to something other than server authentication, and
+             - when the Key Usage extension is present - permitting digitalSignature, which every
+             modern TLS handshake requires of a server. An ABSENT extension means unrestricted
+             and is accepted in both cases. This is the same class as (5):
              an upload hot-swaps the live listener, so a certificate no browser would accept
              must not be installable;
-          5. the leaf must be currently valid (an expired certificate would break every browser
-             the moment it was installed) and must carry SANs (browsers have not honoured the
-             legacy Common Name for years).
+          5. EVERY certificate in the chain must be currently valid - not just the leaf. A
+             valid leaf bundled with an expired intermediate installs cleanly and then breaks
+             every client that builds a path through it, which looks nothing like a certificate
+             problem from the operator's side; the error names which entry is at fault. The leaf
+             must also carry SANs (browsers have not honoured the legacy Common Name for years).
+        These criteria apply to UPLOADS ONLY. A cert/key pair already mounted on disk is loaded
+        with crypto/tls' own (looser) rules, so an existing deployment whose pem files carry
+        OpenSSL bag attributes or comments keeps booting after an upgrade; access-check reports
+        the discrepancy instead.
+
         certificate_pem must contain NOTHING BUT CERTIFICATE BLOCKS AND WHITESPACE - bytes
         outside a PEM block are rejected rather than skipped, and what is PERSISTED is a bundle
         re-encoded from the validated chain rather than the request string, so nothing that is
@@ -2075,16 +2084,20 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
           description: >-
-            Either the caller is not an admin, OR the request did not arrive over a secure
-            transport. THE SECOND CASE IS SPECIFIC TO THIS ROUTE: it is the only endpoint that
-            accepts a private key, and the same router is served by both the plaintext and the
-            TLS listener (QUASAR_HTTP_REDIRECT=off is supported), so a cleartext request would
-            expose the key AND the bearer token to any peer on the path. A request qualifies as
-            secure when it arrived on the control plane's own TLS listener, or when its DIRECT
-            peer is listed in QUASAR_TRUSTED_PROXIES and that peer asserts https. A forwarded
+            Either the caller is not an admin, OR the request did not arrive over a transport
+            that was encrypted on EVERY hop. THE SECOND CASE IS SPECIFIC TO THIS ROUTE: it is the
+            only endpoint that accepts a private key, and the same router is served by both the
+            plaintext and the TLS listener (QUASAR_HTTP_REDIRECT=off is supported). The DIRECT
+            PEER is resolved first and r.TLS is NOT a short-circuit: when the peer is listed in
+            QUASAR_TRUSTED_PROXIES its protocol assertion decides regardless of whether the
+            proxy->backend hop is TLS (a proxy that accepts public HTTP and re-encrypts to us
+            produces an encrypted last hop while the key crossed the client-facing network in
+            clear); otherwise the peer is the client and our own transport decides. A forwarded
             header on its own is NEVER sufficient - §S6-0's rule that forwarded headers may
-            soften advice but never authorise applies to this gate too. The check runs before
-            the body is read, so the refusal never depends on parsing a request containing a key.
+            soften advice but never authorise applies here too - and the assertion counts as
+            https only when EVERY protocol value on the request says https, which fails closed
+            under a proxy that appends rather than overwrites. The check runs before the body is
+            read, so the refusal never depends on parsing a request containing a key.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
         "409":
           description: "No master key (QUASAR_SECRET_KEY) is configured, so the private key cannot be stored safely. The upload is refused rather than degraded to a plaintext file on disk."
