@@ -1754,29 +1754,47 @@ is the only endpoint that accepts a private key, and the same router is served b
 plaintext and the TLS listener (`QUASAR_HTTP_REDIRECT=off` is a supported configuration), so a
 cleartext upload would expose the key *and* the bearer token to any peer on the path.
 
-The **direct peer is resolved first**, and `r.TLS` is deliberately *not* a short-circuit:
+**The topology is DECLARED, not detected** (`QUASAR_BEHIND_PROXY`). No amount of header
+inspection can establish whether the browser's hop was encrypted: an undeclared reverse proxy
+that accepts public HTTP, re-encrypts to the HTTPS listener and strips inbound forwarding headers
+is byte-for-byte identical to a genuine direct client. So the operator states the topology once,
+and each mode enforces the rule that is sound for it:
 
-- **peer is listed in `QUASAR_TRUSTED_PROXIES`** → **both** the proxy's protocol assertion **and**
-  `r.TLS` are required. They answer different questions and neither substitutes for the other:
-  the assertion covers the client→proxy hop, which the control plane cannot observe, and `r.TLS`
-  covers the proxy→backend hop, which it can. A proxy that accepts public HTTP and re-encrypts
-  produces an encrypted last hop while the key crossed the client-facing network in the clear; a
-  proxy that terminates HTTPS correctly but forwards over plain HTTP puts the key and the bearer
-  token on the backend segment. A private key needs **every** hop encrypted, so a listed proxy
-  must also connect to the HTTPS listener. No assertion means no evidence, and the upload is
-  refused.
-- **otherwise** the peer *is* the client as far as we are entitled to believe, and the control
-  plane's own transport is the whole story.
+- **proxy mode** — all three: the direct peer is listed in `QUASAR_TRUSTED_PROXIES`, `r.TLS` is
+  non-nil, and **every** forwarded protocol value says `https`. An unlisted peer is refused
+  **outright**, never demoted to "treat as a direct client". The assertion covers browser→proxy
+  and `r.TLS` covers proxy→backend; a private key needs **both**, so a listed proxy must also
+  connect to the HTTPS listener.
+- **direct mode** (default) — `r.TLS` is non-nil **and the request carries no forwarding headers
+  at all**. A direct client never sends one, so their presence means an undeclared intermediary.
 
-**A forwarded header alone is never sufficient** — §S6-0's rule that forwarded headers may soften
-advice but never authorise applies to this gate too. The assertion is accepted as `https` only
-when **every** protocol value on the request says `https`. That is deliberately *not* a
-leftmost-or-rightmost choice: an attacker can inject a value but can never remove the trusted
-proxy's own, so "all values are https" implies the trusted proxy's own assertion is `https`
-whatever position it occupies and however many hops are in front. Operators are additionally
-required to configure the proxy to **strip or overwrite** inbound forwarding headers
-(`docs/configuration.md`); this rule makes a violation of that requirement fail closed rather
-than silently. Anything else is `403`, decided **before the body is read**.
+Requiring *every* forwarded value to be `https` is deliberately **not** a leftmost-or-rightmost
+choice: an attacker can inject a value but can never remove the trusted proxy's own, so "all
+https" implies the proxy's own assertion is `https` at any position. Operators must additionally
+configure the proxy to **strip or overwrite** inbound forwarding headers
+(`docs/configuration.md`); this rule makes a violation fail closed rather than silently. Starting
+with proxy mode on and no valid trusted-proxy entry is a **startup failure**, not a permissive
+fallback. Anything else is `403`, decided **before the body is read**, with a message describing
+the mode the operator actually declared.
+
+**The honest limit, stated rather than implied away:** direct mode assumes network controls
+prevent a reverse proxy from reaching this listener. A silent MITM proxy that strips headers still
+defeats it, and the server cannot detect that — it is a property of the deployment, not of the
+request. This gate is a strong guard against ordinary misconfiguration, not a guarantee against an
+attacker who already controls the network path.
+
+**Advice is ordered by what actually blocks the operator, validity first:** already-expired, then
+near-expiry, then SAN mismatch, then self-signed. An expired certificate cannot be rescued by
+trusting it or by correcting its names, so leading with "download and trust this" would be advice
+that cannot work — and it is reachable, because the on-disk compatibility path deliberately keeps
+serving an expired pair rather than refusing to boot.
+
+**A stored upload that failed to activate is reported, never swallowed.** When an uploaded
+certificate exists but could not be installed — most often because `QUASAR_SECRET_KEY` is missing
+or has changed, leaving the sealed key unreadable — `certificate.stored_certificate_problem` says
+so and states that the certificate shown is a **fallback**. Otherwise the panel would present the
+fallback as the whole truth while the operator's configured certificate silently stopped being
+served.
 
 **SAN-mismatch guidance is source-specific.** When the served certificate does not cover the
 requested host, the remedy depends entirely on where that certificate came from, and `advice`
