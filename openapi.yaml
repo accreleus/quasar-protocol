@@ -2020,9 +2020,18 @@ paths:
              sends an operator hunting the wrong file;
           3. tls.X509KeyPair - THIS is what proves the key matches the certificate. Nothing
              else in the endpoint establishes that;
-          4. the leaf must be currently valid (an expired certificate would break every browser
+          4. the leaf must be USABLE AS A SERVER CERTIFICATE: not a CA certificate, and not
+             restricted by Extended Key Usage to something other than server authentication.
+             An empty EKU means unrestricted and is accepted. This is the same class as (5):
+             an upload hot-swaps the live listener, so a certificate no browser would accept
+             must not be installable;
+          5. the leaf must be currently valid (an expired certificate would break every browser
              the moment it was installed) and must carry SANs (browsers have not honoured the
              legacy Common Name for years).
+        certificate_pem must contain NOTHING BUT CERTIFICATE BLOCKS AND WHITESPACE - bytes
+        outside a PEM block are rejected rather than skipped, and what is PERSISTED is a bundle
+        re-encoded from the validated chain rather than the request string, so nothing that is
+        not a certificate can reach the public certificate table.
         Each failure is 400 validation_failed with the specific sentence. The request body is
         NEVER echoed in an error - it contains a private key.
 
@@ -2064,7 +2073,19 @@ paths:
           content: { application/json: { schema: { type: object, required: [certificate], properties: { certificate: { $ref: "#/components/schemas/TLSCertificateInfo" } } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "403":
+          description: >-
+            Either the caller is not an admin, OR the request did not arrive over a secure
+            transport. THE SECOND CASE IS SPECIFIC TO THIS ROUTE: it is the only endpoint that
+            accepts a private key, and the same router is served by both the plaintext and the
+            TLS listener (QUASAR_HTTP_REDIRECT=off is supported), so a cleartext request would
+            expose the key AND the bearer token to any peer on the path. A request qualifies as
+            secure when it arrived on the control plane's own TLS listener, or when its DIRECT
+            peer is listed in QUASAR_TRUSTED_PROXIES and that peer asserts https. A forwarded
+            header on its own is NEVER sufficient - §S6-0's rule that forwarded headers may
+            soften advice but never authorise applies to this gate too. The check runs before
+            the body is read, so the refusal never depends on parsing a request containing a key.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
         "409":
           description: "No master key (QUASAR_SECRET_KEY) is configured, so the private key cannot be stored safely. The upload is refused rather than degraded to a plaintext file on disk."
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }

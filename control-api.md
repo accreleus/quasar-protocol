@@ -1720,12 +1720,37 @@ not told to bounce the stack.
    the key match, with "the key does not match", which sends an operator hunting the wrong file;
 3. `tls.X509KeyPair` — **this is what proves the key matches the certificate.** Nothing else in
    the endpoint establishes that;
-4. the leaf must be currently valid (an expired certificate breaks every browser the instant it
+4. the leaf must be **usable as a server certificate**: not a CA certificate, and not restricted
+   by Extended Key Usage to something other than server authentication (an empty EKU means
+   unrestricted and is accepted). Same class as (5) — an upload hot-swaps the live listener, so
+   a certificate no browser would accept must not be installable;
+5. the leaf must be currently valid (an expired certificate breaks every browser the instant it
    is installed) and must carry SANs (the legacy Common Name has been dead in browsers for
    years).
 
+`certificate_pem` must contain **nothing but CERTIFICATE blocks and whitespace**: bytes outside a
+PEM block are rejected rather than silently skipped, and what is **persisted** is a bundle
+re-encoded from the validated chain rather than the request string — so nothing that is not a
+certificate can reach the public certificate table.
+
 Each failure is `400 validation_failed` with the specific sentence. **The request body is never
 echoed in an error** — it contains a private key.
+
+**Secure transport is required, and this is the only route where that is true.** It is the only
+endpoint that accepts a private key, and the same router is served by both the plaintext and the
+TLS listener (`QUASAR_HTTP_REDIRECT=off` is a supported configuration), so a cleartext upload
+would expose the key *and* the bearer token to any peer on the path. A request qualifies when it
+arrived on the control plane's own TLS listener, or when its **direct peer** is listed in
+`QUASAR_TRUSTED_PROXIES` and that peer asserts `https`. **A forwarded header alone is never
+sufficient** — §S6-0's rule that forwarded headers may soften advice but never authorise applies
+to this gate too, and the direct peer is the only part of a forwarded chain a client cannot
+spoof. Anything else is `403`, decided **before the body is read**.
+
+**Atomicity.** The sealed key and the public certificate row are written in **one transaction**,
+key first. Two rows that came from different uploads are not a usable pair and the loader would
+serve neither, so a partial write — or two uploads interleaving — must be impossible rather than
+unlikely. The persist-then-activate sequence is additionally serialised within a process, so the
+last upload to commit is also the last to be installed.
 
 **Custody.** The private key is **sealed into `instance_secrets`** (AES-256-GCM under
 `QUASAR_SECRET_KEY`) — **not** written as a plaintext pem beside the self-signed pair. Same
