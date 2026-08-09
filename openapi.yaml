@@ -65,6 +65,13 @@ tags:
     description: Development-only surface — registered ONLY when QUASAR_DEV_AGENT_AUTH=1, never in production (the control plane refuses to boot with the flag set and QUASAR_ENV=production). Paths carry x-dev-only true; the route-coverage drift test skips them (their registration semantics are asserted by dedicated tests instead).
   - name: setup
     description: First-run setup — claim the instance (create the first admin, token-gated) and read setup status. `POST /v1/setup/claim` self-disables (409) once any admin exists; `GET /v1/setup/status` is unauthenticated and returns only routing booleans.
+  - name: access
+    description: >-
+      Remote access and TLS (first-run wizard v2 §S6). Serving the leaf certificate for
+      download is UNAUTHENTICATED by design — a client that does not yet trust the
+      certificate frequently cannot log in to fetch it — and discloses only the public half
+      every TLS handshake already transmits. The admin diagnostics and certificate-upload
+      routes carry the `admin` tag and the normal server-enforced gate.
   - name: images
     description: App-image catalog + management (admin). The catalog mirrors the accretion-io/quasar-images manifest; installing an image also lands its runtime preset. P1 = read + sync; P3 adds install/uninstall/pin/update + digest pinning (#440).
 
@@ -1811,6 +1818,22 @@ paths:
                   description: >-
                     P3 (image management). Absent = unchanged (pointer decode). Applied by
                     POST /v1/admin/images/sync — see the App-image management P3 section.
+                allowed_origins:
+                  type: array
+                  items: { type: string }
+                  description: >-
+                    First-run wizard v2 §S6e (migration 0064). The signaling origin allow-list.
+                    ABSENT = UNCHANGED; an explicitly-sent [] CLEARS the list. Those are
+                    different requests and the server distinguishes them (pointer decode), so a
+                    PATCH that only changes the registration mode can never wipe the allow-list.
+                    Each entry must be scheme + host only (http/https, no path, query,
+                    credentials or trailing slash); the server stores the NORMALIZED form, so
+                    what is saved is exactly what /v1/signal compares against. "*" IS REJECTED
+                    OUTRIGHT with 400 validation_failed - a wildcard would discard the layer
+                    entirely. A bad entry is 400 naming its position, and nothing is written.
+                    Setting this does NOT lift an environment override: when
+                    QUASAR_ALLOWED_ORIGINS is SET it wins, and GET /v1/admin/access-check
+                    reports which source is in force.
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SettingsEnvelope" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
@@ -1881,6 +1904,173 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  # ─── remote access: TLS certificate + access self-check ──────────────────
+  # First-run wizard v2 §S6 (2026-08-09; Opus + operator sign-off granted for
+  # exactly these three routes plus the allowed_origins settings field).
+  #
+  # THE PROBLEM THESE SOLVE. An operator reaches the instance by a name the
+  # certificate does not cover -> the browser refuses or warns -> the page is
+  # not a secure context -> the MICROPHONE is unavailable, with a message that
+  # correctly says "needs HTTPS" but cannot say why theirs is not trusted. And
+  # separately: the signaling origin allow-list returns a 403 that is
+  # structurally invisible to browser JS, so a Host-rewriting reverse proxy
+  # surfaces to the user as "signaling connection failed" with no cause.
+  #
+  # THREE SUPPORTED TLS TOPOLOGIES, NONE MANDATORY (§S6-0). (A) self-signed on
+  # Quasar's own listener - download and trust it, verifying the fingerprint.
+  # (B) the operator's own certificate on Quasar's listener - upload it.
+  # (C) an external reverse proxy (e.g. Caddy + Let's Encrypt) terminating TLS -
+  # Quasar keeps its self-signed certificate internally and that is CORRECT.
+  # A, B and C all finish setup. CERTIFICATE UPLOAD IS NEVER MANDATORY and a
+  # client must never present it as a required step.
+  /v1/tls/certificate.pem:
+    get:
+      tags: [access]
+      summary: Download the leaf certificate this listener currently serves (PEM).
+      description: |
+        §S6a. Returns the PUBLIC half of the certificate in force, so an operator can add it
+        to their OS trust store and reach the instance over a trusted HTTPS origin.
+
+        DELIBERATELY UNAUTHENTICATED, and that is correct rather than lax: a client that does
+        not yet trust the certificate frequently cannot complete a login in order to fetch it,
+        so requiring a bearer token would make this route useless in exactly the situation it
+        exists for. It discloses SANs (internal hostnames, LAN IPs) to anyone who can reach the
+        port - so does the TLS handshake itself. Equivalent exposure, not new exposure.
+
+        NEVER THE PRIVATE KEY. The server builds this response by re-encoding PEM from the
+        PARSED LEAF'S DER with a compile-time "CERTIFICATE" block type; it does not read the
+        key path, and no key bytes are in scope on this path. An explicit test asserts no
+        PRIVATE KEY block can appear in the response.
+
+        THE HONEST CAVEAT: downloading a certificate over a connection you do not yet trust is
+        trust-on-first-use, and a MITM can serve their own. The mitigation is the fingerprint,
+        and it only works OUT OF BAND - the control plane logs the SHA-256 fingerprint at
+        startup, and it is also returned here as X-Quasar-Certificate-Fingerprint. A client
+        MUST tell the operator to compare the two before trusting. Without that instruction the
+        download button is security theatre; with it, it is a real verification step.
+
+        Under topology C the certificate returned here is Quasar's INTERNAL one and is not what
+        the operator's browser validates. GET /v1/admin/access-check says so.
+      security: []
+      responses:
+        "200":
+          description: >-
+            The leaf certificate, PEM. Sent as an attachment with Cache-Control: no-store (the
+            certificate can be replaced at any moment by an upload, and a cached stale one is
+            precisely what would make an operator trust the wrong fingerprint).
+          headers:
+            X-Quasar-Certificate-Fingerprint:
+              schema: { type: string }
+              description: "SHA-256 over the DER, uppercase colon-separated hex - the same form the startup log and a browser's certificate viewer show, so the comparison is literal."
+          content:
+            application/x-pem-file: { schema: { type: string } }
+        "503":
+          description: "TLS is disabled on this control plane (QUASAR_TLS=off), so it serves no certificate."
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  /v1/admin/access-check:
+    get:
+      tags: [admin]
+      summary: Diagnose reachability for the request that called it - certificate, origin, secure context.
+      description: |
+        §S6b. Turns three invisible failures into three sentences, for THIS request: the Host
+        and Origin seen, whether that host is covered by the served certificate's SANs, the
+        fingerprint and days-to-expiry, whether the origin would pass the /v1/signal allow-list,
+        and whether that allow-list is configured at all.
+
+        TOPOLOGY DETECTION (§S6-0). When the request arrives with X-Forwarded-Proto or RFC 7239
+        Forwarded, a proxy is in front of this control plane, so its certificate is an internal
+        detail the browser never validates: `certificate.in_use` is FALSE with a reason saying
+        the setup is supported and complete, and the answer focuses entirely on origins.
+        Telling an operator to fix something already correct is the failure mode this endpoint
+        exists to prevent.
+
+        FORWARDED HEADERS SOFTEN ADVICE AND NOTHING ELSE. They are trivially spoofable by any
+        client; the worst a hostile one achieves is making an admin-gated diagnostics page tell
+        THEM that their own certificate is not in use. No access decision, on this route or any
+        other, reads them.
+
+        Admin-gated by the existing RequireAuth -> RequireAdmin middleware. It reflects the Host
+        and Origin headers, so both are LENGTH-CAPPED (256 chars) and are only ever rendered as
+        JSON string values - a client must never put them through dangerouslySetInnerHTML. It
+        discloses configuration an admin can already read.
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/AccessCheck" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/tls/certificate:
+    post:
+      tags: [admin]
+      summary: Install an operator-supplied certificate + private key (applies without a restart).
+      description: |
+        §S6d. Accepts a PEM certificate (plus any intermediates) and its private key, and makes
+        it the served certificate IMMEDIATELY - the listener's certificate comes from a
+        tls.Config.GetCertificate callback, so the operator is not told to bounce the stack.
+
+        THIS IS NEVER A REQUIRED STEP. Topologies A and C are complete deployments that never
+        call it. It serves operators who already hold a certificate.
+
+        VALIDATION, in this order, all BEFORE anything is stored:
+          1. every PEM block must be a CERTIFICATE - a private key pasted into certificate_pem
+             is refused by name rather than silently skipped;
+          2. chain order: leaf FIRST, then intermediates. A reversed bundle is rejected with a
+             message that SAYS SO. This check runs before step 3 deliberately, because a
+             reversed chain also fails the key match - with "the key does not match", which
+             sends an operator hunting the wrong file;
+          3. tls.X509KeyPair - THIS is what proves the key matches the certificate. Nothing
+             else in the endpoint establishes that;
+          4. the leaf must be currently valid (an expired certificate would break every browser
+             the moment it was installed) and must carry SANs (browsers have not honoured the
+             legacy Common Name for years).
+        Each failure is 400 validation_failed with the specific sentence. The request body is
+        NEVER echoed in an error - it contains a private key.
+
+        CUSTODY. The private key is sealed into the encrypted secret store (instance_secrets,
+        AES-256-GCM under QUASAR_SECRET_KEY) - NOT written as a plaintext pem beside the
+        self-signed pair. Same model as every other credential: a database dump yields
+        ciphertext. With no master key configured the upload is REFUSED with 409 rather than
+        silently degrading to a plaintext file. The PUBLIC chain is stored separately in
+        instance_tls_certificate.
+
+        WRITE-ONLY FOREVER. No endpoint on this contract returns the private key. Reads expose
+        configured / fingerprint / expiry / SANs only, and the key is not reachable through
+        /v1/admin/secrets either (its registry entry is hidden there precisely so a bare PUT
+        cannot install a key paired with nothing, bypassing check 3). The upload is
+        audit-logged by PUBLIC METADATA only - fingerprint, expiry, names.
+
+        EXPIRY IS THE TRAP TO NAME. A Let's Encrypt certificate expires in 90 days, so a
+        one-shot upload becomes a silent outage next quarter. AccessCheck reports
+        days_until_expiry, and a client should point at the bundled Caddy overlay as the
+        AUTOMATED answer. Upload is not a substitute for ACME.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [certificate_pem, private_key_pem]
+              properties:
+                certificate_pem:
+                  type: string
+                  description: "The leaf certificate FIRST, then any intermediates (a Let's Encrypt fullchain.pem as-is). Never the private key."
+                private_key_pem:
+                  type: string
+                  description: "The matching private key, PEM. Sealed under QUASAR_SECRET_KEY on receipt and never returned by any endpoint."
+      responses:
+        "200":
+          description: "Installed and now being served."
+          content: { application/json: { schema: { type: object, required: [certificate], properties: { certificate: { $ref: "#/components/schemas/TLSCertificateInfo" } } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: "No master key (QUASAR_SECRET_KEY) is configured, so the private key cannot be stored safely. The upload is refused rather than degraded to a plaintext file on disk."
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "503":
+          description: "TLS is disabled on this control plane, so a certificate cannot be installed."
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
 
   /v1/admin/invites:
     get:
@@ -3603,8 +3793,143 @@ components:
                 there is deliberately no second "publish" toggle: its false branch would select a
                 path that was never built. Read PER PASS and per request rather than cached at boot,
                 so flipping it in the admin UI takes effect without a restart.
+            allowed_origins:
+              type: array
+              items: { type: string }
+              description: >-
+                First-run wizard v2 §S6e (migration 0064). The admin-editable signaling origin
+                allow-list, normalized (scheme + lowercased host). THIS IS THE DATABASE COLUMN,
+                NOT NECESSARILY WHAT /v1/signal ENFORCES: QUASAR_ALLOWED_ORIGINS, when SET,
+                overrides it outright - including when set to the empty string, which is how a
+                hardened deployment pins the list off. That override rule is what makes the
+                migration a behavioural no-op on upgrade for every existing deployment.
+                GET /v1/admin/access-check reports the RESOLVED list plus which source won, so a
+                UI can grey out a control the environment has pinned - the same shape
+                library_discovery_interval_minutes uses. AN EMPTY LIST IS NOT "DENY ALL":
+                /v1/signal still admits a same-origin request and a request with no Origin
+                header at all, so a fresh instance with nothing configured works. Optional in
+                the envelope so pre-amendment servers stay conformant.
             updated_by: { type: [string, "null"], format: uuid }
             updated_at: { type: string, format: date-time }
+
+    # ─── remote access (first-run wizard v2 §S6) ───────────────────────────
+    TLSCertificateInfo:
+      type: object
+      description: >-
+        The PUBLIC metadata of a certificate. Every field here is already disclosed by any TLS
+        handshake with this listener. THERE IS DELIBERATELY NO FIELD THAT COULD HOLD KEY
+        MATERIAL, and adding one would be the bug this shape exists to prevent.
+      required: [source, fingerprint_sha256, not_before, not_after, days_until_expiry, dns_names, ip_addresses, chain_length, self_signed]
+      properties:
+        source:
+          type: string
+          enum: [self_signed, provided, uploaded]
+          description: >-
+            self_signed = the batteries-included pair generated into QUASAR_TLS_DIR on first
+            boot; provided = files mounted at QUASAR_TLS_CERT/QUASAR_TLS_KEY; uploaded =
+            installed through POST /v1/admin/tls/certificate. An upload replaces a `provided`
+            pair in memory but never rewrites those files - the operator's own file management
+            stays authoritative on restart.
+        fingerprint_sha256:
+          type: string
+          description: "SHA-256 over the DER, uppercase colon-separated hex. The value to compare OUT OF BAND against the control-plane startup log before trusting a self-signed certificate."
+        subject: { type: string }
+        issuer: { type: string }
+        not_before: { type: string, format: date-time }
+        not_after: { type: string, format: date-time }
+        days_until_expiry:
+          type: integer
+          description: >-
+            Recomputed on every read, never served frozen at install time. This is the number
+            that catches the 90-day Let's Encrypt trap, and a stale one would be worse than none.
+            Can be negative for an already-expired certificate loaded from disk (upload refuses one).
+        dns_names: { type: array, items: { type: string } }
+        ip_addresses: { type: array, items: { type: string } }
+        chain_length: { type: integer, description: "Leaf plus any intermediates supplied with it." }
+        self_signed: { type: boolean, description: "The leaf issued itself - true for the batteries-included pair, and the reason a browser warns." }
+        uploaded_at: { type: string, format: date-time, description: "Present only for source=uploaded." }
+        uploaded_by: { type: [string, "null"], format: uuid, description: "Present only for source=uploaded." }
+    AccessCheck:
+      type: object
+      required: [request, certificate, origins]
+      properties:
+        request:
+          type: object
+          required: [host, origin, scheme, tls_terminated_upstream, secure_context]
+          properties:
+            host: { type: string, description: "The Host header seen, LENGTH-CAPPED at 256 characters (a truncated value is suffixed). Reflected input - render as text, never as HTML." }
+            origin: { type: string, description: "The Origin header seen, or \"\" when the client sent none. Same cap and same rule as host." }
+            scheme:
+              type: string
+              enum: [http, https]
+              description: "What THIS control plane observed on the wire - https when the request arrived on the TLS listener. Observed, never taken from a header."
+            forwarded_proto:
+              type: string
+              description: "The protocol an upstream proxy CLAIMS the browser used (X-Forwarded-Proto, or the proto parameter of RFC 7239 Forwarded). A CLAIM, not a fact - it may soften advice and authorises nothing. Absent when no proxy header was present."
+            tls_terminated_upstream:
+              type: boolean
+              description: "§S6-0 topology C: a proxy is in front of this control plane. When true the certificate section reports in_use=false and a client MUST NOT present the internal certificate as a problem."
+            secure_context:
+              type: boolean
+              description: >-
+                Whether the browser will treat the page as a secure context - the precondition
+                for getUserMedia (the microphone, §S7) and Keyboard Lock. True for https to this
+                listener, https to an upstream proxy, or a loopback host on any scheme. This is
+                the link between the certificate story and the microphone story, and why they
+                belong on one panel.
+        certificate:
+          type: object
+          required: [in_use]
+          properties:
+            in_use:
+              type: boolean
+              description: "False under topology C, and false when QUASAR_TLS=off. Both are supported, complete configurations."
+            not_in_use_reason: { type: string, description: "Operator-facing prose stating that the setup is supported and what to look at instead. Present only when in_use is false." }
+            info: { $ref: "#/components/schemas/TLSCertificateInfo" }
+            host_covered:
+              type: [boolean, "null"]
+              description: >-
+                Whether the request's Host is covered by the leaf's SANs. Present only when
+                in_use is true. A leaf with no SANs covers NOTHING - the legacy Common Name
+                fallback is dead in every current browser, so reporting CN coverage would tell
+                an operator their setup is fine while their browser refuses it.
+            advice:
+              type: string
+              description: >-
+                The remedy, when there is one, in operator language. Names the exact
+                QUASAR_TLS_HOSTS value to set AND the fact that the self-signed certificate is
+                NEVER regenerated when that variable changes (delete the pem files and recreate
+                the container, or upload instead) - the single most expensive unstated fact in
+                this area.
+        origins:
+          type: object
+          required: [configured, source, allowed, request_origin_allowed, same_origin_exemption]
+          properties:
+            configured: { type: boolean, description: "Whether any allow-list entry is in force. FALSE IS A NORMAL, WORKING STATE - see same_origin_exemption." }
+            source:
+              type: string
+              enum: [environment, database]
+              description: "Which source won. environment means QUASAR_ALLOWED_ORIGINS is SET and the admin-editable column is not consulted; a UI should grey out its editor and say so."
+            allowed: { type: array, items: { type: string }, description: "The RESOLVED list /v1/signal actually enforces." }
+            request_origin_allowed:
+              type: [boolean, "null"]
+              description: "Whether THIS request's Origin would pass. Null when the request carried no Origin header at all (a non-browser client, which /v1/signal admits)."
+            same_origin_exemption:
+              type: boolean
+              description: >-
+                True when the origin passes ONLY because it matches Host, not because it is
+                listed. This is the case that silently breaks behind a Host-rewriting reverse
+                proxy, and it is why "always seed the IP as an allowed origin" would be a no-op
+                that looks load-bearing - a same-origin request already passes with NO
+                configuration.
+            advice: { type: string }
+            suggested_entry:
+              type: string
+              description: >-
+                The current origin, normalized and ready to add, when it would otherwise be
+                refused - detection plus the fix, not detection alone. Empty when there is
+                nothing to suggest, and deliberately empty when the list is pinned by the
+                environment, because adding it in the UI would do nothing.
 
     Invite:
       type: object

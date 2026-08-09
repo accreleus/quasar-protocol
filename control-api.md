@@ -1041,7 +1041,10 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `PATCH /v1/admin/settings` | **admin** | *(LP-SEC-01)* update instance settings — how invites are enabled/disabled from the UI. *(Phase 4: also the discovery master switch. Every field is an **optional pointer**, so a `PATCH` that omits one leaves it alone — a plain bool would decode an absent `library_discovery_enabled` to `false` and silently switch discovery off every time an admin changed the registration mode)* |
 | `GET /v1/admin/secrets` | **admin** | *(secrets facility)* list the declared secrets + configured/readable/origin + a **masked** hint — never a value |
 | `PUT /v1/admin/secrets/{name}` | **admin** | *(secrets facility)* set/replace a secret's value; write-only on the wire, response is the status shape |
-| `DELETE /v1/admin/secrets/{name}` | **admin** | *(secrets facility)* clear a stored secret; any declared env-var fallback takes effect again |
+| `DELETE /v1/admin/secrets/{name}` | **admin** | *(secrets facility)* clear a stored secret; any declared env-var fallback takes effect again. **A `hidden` declared secret answers `404` here, identically to an undeclared name** — `tls.private_key` is owned by `POST /v1/admin/tls/certificate`, which proves the key matches its certificate before storing either; a bare `PUT` would bypass that and leave a key paired with nothing |
+| `GET /v1/admin/access-check` | **admin** | *(wizard v2 §S6b)* diagnose **this request's** reachability — cert SAN coverage, fingerprint, days-to-expiry, secure-context state, and whether the origin would pass `/v1/signal`. Reflected `Host`/`Origin` are **length-capped**; `X-Forwarded-Proto`/`Forwarded` are read to detect an upstream-terminating proxy and **may only soften advice, never authorise** |
+| `POST /v1/admin/tls/certificate` | **admin** | *(wizard v2 §S6d)* install an operator-supplied certificate + key; applies **without a restart** via `GetCertificate`. `tls.X509KeyPair` is the proof the pair matches; a wrongly-ordered chain is rejected with a message that says so. The key is **sealed** into `instance_secrets` and returned by nothing; `409` when no `QUASAR_SECRET_KEY` is configured, rather than degrading to a plaintext file. Audited as `instance.tls.certificate.uploaded` (public metadata only) |
+| `GET /v1/tls/certificate.pem` | **none — public** | *(wizard v2 §S6a)* **the one deliberate exception in this table.** A client that does not yet trust the certificate frequently cannot log in *in order to* fetch it, so auth would make the route useless exactly when it is needed. It serves the **public** half every TLS handshake already transmits, and it is structurally incapable of emitting the key (the response is re-encoded from the parsed leaf's DER) |
 | `POST /v1/admin/invites` | **admin** | *(LP-SEC-01)* mint an invite; plaintext code + magic link returned once |
 | `GET /v1/admin/invites` | **admin** | *(LP-SEC-01)* list minted invites (never plaintext) |
 | `DELETE /v1/admin/invites/{id}` | **admin** | *(LP-SEC-01)* revoke an invite |
@@ -1628,6 +1631,154 @@ device id belongs to another user (no existence leak).
 - **Re-register defense:** a revoked `device_key` that logs in again gets a *fresh* device row +
   fresh token; it does not silently reclaim the revoked token. Access is regained only by a full
   authenticated login (owner-scope + credentials).
+
+---
+
+## Remote access, TLS certificate, and signaling origins (first-run wizard v2 §S6, 2026-08-09)
+
+> **Amendment — additive; Opus + operator sign-off granted 2026-08-09 for exactly this
+> surface.** Adds `GET /v1/tls/certificate.pem` (public), `GET /v1/admin/access-check`,
+> `POST /v1/admin/tls/certificate`, and an `allowed_origins` field on the existing
+> `GET`/`PATCH /v1/admin/settings`. **No existing shape changes.**
+
+### The failure chain this closes
+
+An operator reaches the instance by a name the certificate does not cover → the browser
+refuses or warns → the page is **not a secure context** → the **microphone is unavailable**,
+with a message that correctly says "needs HTTPS" but cannot say *why theirs is not trusted*.
+Separately, the signaling origin allow-list returns a `403` that is **structurally invisible
+to browser JS**, so a `Host`-rewriting reverse proxy reaches the user as "signaling
+connection failed" with no cause. Nothing in the product explained either.
+
+### Three supported TLS topologies — none of them mandatory
+
+| topology | TLS terminated by | operator does | the panel must **not** say |
+|---|---|---|---|
+| **A** self-signed (default, LAN) | Quasar's own listener | download the cert, trust it, **verify the fingerprint** | — |
+| **B** own certificate | Quasar's own listener | upload cert + key | — |
+| **C** external reverse proxy (e.g. their own Caddy + Let's Encrypt) | the proxy | set allowed origins; Quasar keeps its self-signed cert internally and **that is correct** | must **not** report the cert as a problem — its SANs are irrelevant when the browser never sees it |
+
+**Normative:** A, B and C all complete setup. **Certificate upload is never mandatory and a
+client MUST NOT present it as a required step.**
+
+**Topology detection.** When a request arrives carrying `X-Forwarded-Proto` or RFC 7239
+`Forwarded`, a proxy is in front of the control plane, so its certificate is an internal
+detail: `certificate.in_use` is `false` with a reason saying the setup is supported and
+complete. **Forwarded headers may only SOFTEN advice — they authorise nothing.** They are
+trivially spoofable; the worst a hostile client achieves is making an admin-gated diagnostics
+page tell *them* that their own certificate is not in use.
+
+### `GET /v1/tls/certificate.pem` — public
+
+Returns the **leaf certificate currently being served**, PEM, as an attachment with
+`Cache-Control: no-store` and an `X-Quasar-Certificate-Fingerprint` header.
+
+**Unauthenticated, and that is correct rather than lax:** a client that does not yet trust the
+certificate frequently cannot complete a login *in order to* fetch it. It discloses SANs
+(internal hostnames, LAN IPs) to anyone who can reach the port — **so does the TLS handshake**.
+Equivalent exposure, not new exposure.
+
+**Never the private key.** The server re-encodes PEM from the **parsed leaf's DER** with a
+compile-time `CERTIFICATE` block type: it does not read the key path and no key bytes exist in
+scope on this path. This is covered by an explicit test asserting no `PRIVATE KEY` block can
+appear in the response — **not by a comment**.
+
+**The honest caveat.** Downloading a certificate over the connection you do not yet trust is
+trust-on-first-use; a MITM can serve their own. The mitigation is the fingerprint, and **it
+only works out of band** — the control plane logs the SHA-256 at startup. A client **MUST**
+tell the operator to compare the two. Without that instruction the download button is security
+theatre; with it, it is a real verification step.
+
+### `GET /v1/admin/access-check` — admin
+
+Reports, **for the request that called it**: the `Host` and `Origin` seen, whether that host is
+covered by the served certificate's SANs, the fingerprint and days-to-expiry, whether the
+origin would pass the `/v1/signal` allow-list, and whether that allow-list is configured at
+all. Shape: `AccessCheck` in `openapi.yaml`.
+
+Admin-gated by the existing `RequireAuth → RequireAdmin`. It reflects `Host` and `Origin`, so
+both are **length-capped at 256 characters** and are only ever rendered as JSON string values —
+a client **MUST NOT** put them through `dangerouslySetInnerHTML`. It discloses configuration an
+admin can already read.
+
+`secure_context` is the field that links this panel to the microphone: it is the precondition
+for `getUserMedia`, and it is true for HTTPS to this listener, HTTPS to an upstream proxy, or a
+loopback host on any scheme.
+
+### `POST /v1/admin/tls/certificate` — admin
+
+Accepts `{certificate_pem, private_key_pem}` and **applies it without a restart** — the
+listener's certificate comes from a `tls.Config.GetCertificate` callback, so the operator is
+not told to bounce the stack.
+
+**Validation, in this order, all before anything is stored:**
+
+1. every PEM block in `certificate_pem` must be a `CERTIFICATE` — a private key pasted into
+   that field is refused **by name**, never silently skipped;
+2. **chain order**: leaf first, then intermediates. A reversed bundle is rejected with a
+   message that says so. This runs **before** step 3 deliberately: a reversed chain also fails
+   the key match, with "the key does not match", which sends an operator hunting the wrong file;
+3. `tls.X509KeyPair` — **this is what proves the key matches the certificate.** Nothing else in
+   the endpoint establishes that;
+4. the leaf must be currently valid (an expired certificate breaks every browser the instant it
+   is installed) and must carry SANs (the legacy Common Name has been dead in browsers for
+   years).
+
+Each failure is `400 validation_failed` with the specific sentence. **The request body is never
+echoed in an error** — it contains a private key.
+
+**Custody.** The private key is **sealed into `instance_secrets`** (AES-256-GCM under
+`QUASAR_SECRET_KEY`) — **not** written as a plaintext pem beside the self-signed pair. Same
+model as every other credential: a database dump yields ciphertext. With no master key
+configured the upload is **refused with `409`** rather than silently degrading to a plaintext
+file. The public chain is stored separately in `instance_tls_certificate`.
+
+**Write-only forever.** No endpoint returns the private key. Reads expose
+configured / fingerprint / expiry / SANs only. It is **not reachable through
+`/v1/admin/secrets`** either: its registry entry is hidden there precisely so a bare `PUT`
+cannot install a key paired with nothing, bypassing check 3. The upload is **audit-logged by
+public metadata only** — fingerprint, expiry, names — as `instance.tls.certificate.uploaded`.
+
+**Expiry is the trap to name.** A Let's Encrypt certificate expires in 90 days, so a one-shot
+upload becomes a silent outage next quarter. `days_until_expiry` is reported on every read, and
+a client should point at the bundled Caddy overlay as the **automated** answer. Upload serves
+operators who already hold a certificate; it is not a substitute for ACME.
+
+### Allowed origins — on `/v1/admin/settings`, not a route of its own
+
+The allow-list is an **instance-wide singleton setting**, exactly like `registration_mode`,
+`mic_capture_enabled` and `storage_provider`. It rides the existing settings envelope and PATCH
+body as `allowed_origins` rather than earning its own endpoint: a separate route would fork the
+admin settings surface, duplicate its auth and audit wiring, and force a client to make two
+calls to render one form. Nothing about the value's semantics differs from its neighbours.
+
+- **Absent = unchanged; an explicitly-sent `[]` clears the list.** Those are different requests
+  and the server distinguishes them.
+- Entries are validated as **scheme + host only** (http/https, no path, query, credentials or
+  trailing slash), and the **normalized** form is stored — so what is saved is exactly what
+  `/v1/signal` compares against.
+- **`*` is rejected outright** (`400`). A wildcard is indistinguishable from having no
+  allow-list at all, and would discard the defense-in-depth layer entirely.
+- **`QUASAR_ALLOWED_ORIGINS` remains an OVERRIDE.** When the variable is **set** — including to
+  the empty string, which is how a hardened deployment pins the list off — it wins and the
+  column is not consulted. This is what makes the change a behavioural **no-op on upgrade** for
+  every existing deployment. `access-check` reports which source won so a UI can grey out an
+  editor the environment has pinned.
+- **An empty list is not "deny all".** `/v1/signal` still admits a same-origin request and a
+  request carrying no `Origin` header at all.
+
+**Why "always seed the IP as an allowed origin" is deliberately NOT implemented.** The
+same-origin check already ends with `Origin.Host == Host`, so browsing to `https://<ip>:8443`
+passes with **no configuration**. Seeding it would be a no-op that looks load-bearing. The case
+that genuinely breaks is a reverse proxy that rewrites `Host`: the browser sends the public
+origin, the proxy presents an internal `Host`, the exemption misses, and the operator meets the
+invisible 403. `same_origin_exemption` on `AccessCheck` is what makes that visible *before* it
+bites.
+
+**Why admin-editability is safe.** `/v1/signal` authenticates with a single-use `token` **query
+parameter**, not a cookie. A malicious page cannot obtain that token, so it cannot open a
+signaling socket whatever origin it claims. The allow-list is defense-in-depth, **not the
+primary CSRF control**.
 
 ---
 
