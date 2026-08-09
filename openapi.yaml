@@ -70,8 +70,8 @@ tags:
       Remote access and TLS (first-run wizard v2 §S6). Serving the leaf certificate for
       download is UNAUTHENTICATED by design — a client that does not yet trust the
       certificate frequently cannot log in to fetch it — and discloses only the public half
-      every TLS handshake already transmits. The admin diagnostics and certificate-upload
-      routes carry the `admin` tag and the normal server-enforced gate.
+      every TLS handshake already transmits. The admin diagnostics route carries the `admin`
+      tag and the normal server-enforced gate.
   - name: images
     description: App-image catalog + management (admin). The catalog mirrors the accretion-io/quasar-images manifest; installing an image also lands its runtime preset. P1 = read + sync; P3 adds install/uninstall/pin/update + digest pinning (#440).
 
@@ -1919,11 +1919,16 @@ paths:
   #
   # THREE SUPPORTED TLS TOPOLOGIES, NONE MANDATORY (§S6-0). (A) self-signed on
   # Quasar's own listener - download and trust it, verifying the fingerprint.
-  # (B) the operator's own certificate on Quasar's listener - upload it.
+  # (B) the operator's own certificate on Quasar's listener - mount it at
+  # QUASAR_TLS_CERT/QUASAR_TLS_KEY.
   # (C) an external reverse proxy (e.g. Caddy + Let's Encrypt) terminating TLS -
   # Quasar keeps its self-signed certificate internally and that is CORRECT.
-  # A, B and C all finish setup. CERTIFICATE UPLOAD IS NEVER MANDATORY and a
-  # client must never present it as a required step.
+  # A, B and C all finish setup, and a client must never present any of them as
+  # a required step. (An admin UPLOAD route for topology B was specified as §S6d
+  # and is deliberately NOT on this contract yet: it is the only surface that
+  # would accept a private key, and it needs a listener-level design decision
+  # rather than a transport gate on the shared router. Until it exists, topology
+  # B is served by mounting the files.)
   /v1/tls/certificate.pem:
     get:
       tags: [access]
@@ -1999,118 +2004,6 @@ paths:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/AccessCheck" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
-  /v1/admin/tls/certificate:
-    post:
-      tags: [admin]
-      summary: Install an operator-supplied certificate + private key (applies without a restart).
-      description: |
-        §S6d. Accepts a PEM certificate (plus any intermediates) and its private key, and makes
-        it the served certificate IMMEDIATELY - the listener's certificate comes from a
-        tls.Config.GetCertificate callback, so the operator is not told to bounce the stack.
-
-        THIS IS NEVER A REQUIRED STEP. Topologies A and C are complete deployments that never
-        call it. It serves operators who already hold a certificate.
-
-        VALIDATION, in this order, all BEFORE anything is stored:
-          1. every PEM block must be a CERTIFICATE - a private key pasted into certificate_pem
-             is refused by name rather than silently skipped;
-          2. chain order: leaf FIRST, then intermediates. A reversed bundle is rejected with a
-             message that SAYS SO. This check runs before step 3 deliberately, because a
-             reversed chain also fails the key match - with "the key does not match", which
-             sends an operator hunting the wrong file;
-          3. tls.X509KeyPair - THIS is what proves the key matches the certificate. Nothing
-             else in the endpoint establishes that;
-          4. the leaf must be USABLE AS A SERVER CERTIFICATE: not a CA certificate, not
-             restricted by Extended Key Usage to something other than server authentication, and
-             - when the Key Usage extension is present - permitting digitalSignature, which every
-             modern TLS handshake requires of a server. An ABSENT extension means unrestricted
-             and is accepted in both cases. This is the same class as (5):
-             an upload hot-swaps the live listener, so a certificate no browser would accept
-             must not be installable;
-          5. EVERY certificate in the chain must be currently valid - not just the leaf. A
-             valid leaf bundled with an expired intermediate installs cleanly and then breaks
-             every client that builds a path through it, which looks nothing like a certificate
-             problem from the operator's side; the error names which entry is at fault. The leaf
-             must also carry SANs (browsers have not honoured the legacy Common Name for years).
-        These criteria apply to UPLOADS ONLY. A cert/key pair already mounted on disk is loaded
-        with crypto/tls' own (looser) rules, so an existing deployment whose pem files carry
-        OpenSSL bag attributes or comments keeps booting after an upgrade; access-check reports
-        the discrepancy instead.
-
-        certificate_pem must contain NOTHING BUT CERTIFICATE BLOCKS AND WHITESPACE - bytes
-        outside a PEM block are rejected rather than skipped, and what is PERSISTED is a bundle
-        re-encoded from the validated chain rather than the request string, so nothing that is
-        not a certificate can reach the public certificate table.
-        Each failure is 400 validation_failed with the specific sentence. The request body is
-        NEVER echoed in an error - it contains a private key.
-
-        CUSTODY. The private key is sealed into the encrypted secret store (instance_secrets,
-        AES-256-GCM under QUASAR_SECRET_KEY) - NOT written as a plaintext pem beside the
-        self-signed pair. Same model as every other credential: a database dump yields
-        ciphertext. With no master key configured the upload is REFUSED with 409 rather than
-        silently degrading to a plaintext file. The PUBLIC chain is stored separately in
-        instance_tls_certificate.
-
-        WRITE-ONLY FOREVER. No endpoint on this contract returns the private key. Reads expose
-        configured / fingerprint / expiry / SANs only, and the key is not reachable through
-        /v1/admin/secrets either (its registry entry is hidden there precisely so a bare PUT
-        cannot install a key paired with nothing, bypassing check 3). The upload is
-        audit-logged by PUBLIC METADATA only - fingerprint, expiry, names.
-
-        EXPIRY IS THE TRAP TO NAME. A Let's Encrypt certificate expires in 90 days, so a
-        one-shot upload becomes a silent outage next quarter. AccessCheck reports
-        days_until_expiry, and a client should point at the bundled Caddy overlay as the
-        AUTOMATED answer. Upload is not a substitute for ACME.
-      x-required-role: admin
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [certificate_pem, private_key_pem]
-              properties:
-                certificate_pem:
-                  type: string
-                  description: "The leaf certificate FIRST, then any intermediates (a Let's Encrypt fullchain.pem as-is). Never the private key."
-                private_key_pem:
-                  type: string
-                  description: "The matching private key, PEM. Sealed under QUASAR_SECRET_KEY on receipt and never returned by any endpoint."
-      responses:
-        "200":
-          description: "Installed and now being served."
-          content: { application/json: { schema: { type: object, required: [certificate], properties: { certificate: { $ref: "#/components/schemas/TLSCertificateInfo" } } } } }
-        "400": { $ref: "#/components/responses/ValidationFailed" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403":
-          description: >-
-            Either the caller is not an admin, OR the request did not arrive over a transport
-            that was encrypted on EVERY hop. THE SECOND CASE IS SPECIFIC TO THIS ROUTE: it is the
-            only endpoint that accepts a private key, and the same router is served by both the
-            plaintext and the TLS listener (QUASAR_HTTP_REDIRECT=off is supported). The DIRECT
-            TOPOLOGY IS DECLARED (QUASAR_BEHIND_PROXY), NOT DETECTED - no header inspection can
-            distinguish an undeclared re-encrypting proxy from a direct client. In PROXY MODE all
-            three are required: the direct peer is listed in QUASAR_TRUSTED_PROXIES (an unlisted
-            peer is refused outright), r.TLS is non-nil, and every forwarded value says https -
-            the assertion covers browser->proxy and r.TLS covers proxy->backend, and a private key
-            needs both. In DIRECT MODE (default) r.TLS must be non-nil AND the request must carry
-            no forwarding headers at all, since a direct client never sends one. Proxy mode with
-            no valid trusted-proxy entry is a STARTUP FAILURE, not a permissive fallback. The
-            honest limit: direct mode assumes network controls keep a proxy off this listener; a
-            silent header-stripping MITM still defeats it and the server cannot detect that. A forwarded
-            header on its own is NEVER sufficient - §S6-0's rule that forwarded headers may
-            soften advice but never authorise applies here too - and the assertion counts as
-            https only when EVERY protocol value on the request says https, which fails closed
-            under a proxy that appends rather than overwrites. The check runs before the body is
-            read, so the refusal never depends on parsing a request containing a key.
-          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
-        "409":
-          description: "No master key (QUASAR_SECRET_KEY) is configured, so the private key cannot be stored safely. The upload is refused rather than degraded to a plaintext file on disk."
-          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
-        "503":
-          description: "TLS is disabled on this control plane, so a certificate cannot be installed."
-          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
-
   /v1/admin/invites:
     get:
       tags: [admin]
@@ -3862,13 +3755,12 @@ components:
       properties:
         source:
           type: string
-          enum: [self_signed, provided, uploaded]
+          enum: [self_signed, provided]
           description: >-
             self_signed = the batteries-included pair generated into QUASAR_TLS_DIR on first
-            boot; provided = files mounted at QUASAR_TLS_CERT/QUASAR_TLS_KEY; uploaded =
-            installed through POST /v1/admin/tls/certificate. An upload replaces a `provided`
-            pair in memory but never rewrites those files - the operator's own file management
-            stays authoritative on restart.
+            boot; provided = files mounted at QUASAR_TLS_CERT/QUASAR_TLS_KEY. (A third value,
+            `uploaded`, is reserved for the §S6d upload route and is not emitted by any server
+            that does not serve it.)
         fingerprint_sha256:
           type: string
           description: "SHA-256 over the DER, uppercase colon-separated hex. The value to compare OUT OF BAND against the control-plane startup log before trusting a self-signed certificate."
@@ -3886,8 +3778,6 @@ components:
         ip_addresses: { type: array, items: { type: string } }
         chain_length: { type: integer, description: "Leaf plus any intermediates supplied with it." }
         self_signed: { type: boolean, description: "The leaf issued itself - true for the batteries-included pair, and the reason a browser warns." }
-        uploaded_at: { type: string, format: date-time, description: "Present only for source=uploaded." }
-        uploaded_by: { type: [string, "null"], format: uuid, description: "Present only for source=uploaded." }
     AccessCheck:
       type: object
       required: [request, certificate, origins]
@@ -3937,32 +3827,22 @@ components:
                 in_use is true. A leaf with no SANs covers NOTHING - the legacy Common Name
                 fallback is dead in every current browser, so reporting CN coverage would tell
                 an operator their setup is fine while their browser refuses it.
-            stored_certificate_problem:
-              type: string
-              description: >-
-                Set when an operator-uploaded certificate IS stored but could not be activated, so
-                what is being served is a FALLBACK and not what the operator configured - most
-                often because QUASAR_SECRET_KEY is missing or changed, leaving the sealed private
-                key unreadable. Absent in every healthy state. Without it a failed unseal is
-                invisible and the panel would present the fallback as the whole truth.
             advice:
               type: string
               description: >-
                 The remedy, when there is one, in operator language. ORDERED BY WHAT BLOCKS THE
                 OPERATOR, VALIDITY FIRST: already-expired, then near-expiry, then SAN mismatch,
-                then self-signed - an expired certificate cannot be rescued by trusting it or by
-                correcting its names, and it is reachable because the on-disk compatibility path
-                deliberately keeps serving an expired pair rather than refusing to boot. Also
-                SOURCE-SPECIFIC: the fix for
+                then self-signed, with NOT-YET-VALID ahead of all of them - a post-dated or
+                expired certificate cannot be rescued by trusting it or by correcting its names,
+                and both are reachable because the on-disk compatibility path deliberately keeps
+                serving such a pair rather than refusing to boot. Also SOURCE-SPECIFIC: the fix for
                 a SAN mismatch depends entirely on where the certificate came from, so this
                 branches on info.source. For self_signed it names the QUASAR_TLS_HOSTS value AND
                 the fact that the certificate is NEVER regenerated when that variable changes
                 (delete the pem files and recreate the container) - the single most expensive
                 unstated fact in this area. For provided it says QUASAR_TLS_HOSTS does not apply
-                and the mounted file must be re-issued. For uploaded it says deleting the pem
-                files will not help because the stored copy is reloaded at every restart, and to
-                upload a replacement. A single remedy would send two of the three supported
-                topologies down steps that cannot work.
+                and the mounted file must be re-issued. A single remedy would send operators of
+                the other supported topologies down steps that cannot work.
         origins:
           type: object
           required: [configured, source, allowed, request_origin_allowed, same_origin_exemption]

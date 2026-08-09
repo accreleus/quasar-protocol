@@ -1041,9 +1041,8 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `PATCH /v1/admin/settings` | **admin** | *(LP-SEC-01)* update instance settings — how invites are enabled/disabled from the UI. *(Phase 4: also the discovery master switch. Every field is an **optional pointer**, so a `PATCH` that omits one leaves it alone — a plain bool would decode an absent `library_discovery_enabled` to `false` and silently switch discovery off every time an admin changed the registration mode)* |
 | `GET /v1/admin/secrets` | **admin** | *(secrets facility)* list the declared secrets + configured/readable/origin + a **masked** hint — never a value |
 | `PUT /v1/admin/secrets/{name}` | **admin** | *(secrets facility)* set/replace a secret's value; write-only on the wire, response is the status shape |
-| `DELETE /v1/admin/secrets/{name}` | **admin** | *(secrets facility)* clear a stored secret; any declared env-var fallback takes effect again. **A `hidden` declared secret answers `404` here, identically to an undeclared name** — `tls.private_key` is owned by `POST /v1/admin/tls/certificate`, which proves the key matches its certificate before storing either; a bare `PUT` would bypass that and leave a key paired with nothing |
+| `DELETE /v1/admin/secrets/{name}` | **admin** | *(secrets facility)* clear a stored secret; any declared env-var fallback takes effect again |
 | `GET /v1/admin/access-check` | **admin** | *(wizard v2 §S6b)* diagnose **this request's** reachability — cert SAN coverage, fingerprint, days-to-expiry, secure-context state, and whether the origin would pass `/v1/signal`. Reflected `Host`/`Origin` are **length-capped**; `X-Forwarded-Proto`/`Forwarded` are read to detect an upstream-terminating proxy and **may only soften advice, never authorise** |
-| `POST /v1/admin/tls/certificate` | **admin** | *(wizard v2 §S6d)* install an operator-supplied certificate + key; applies **without a restart** via `GetCertificate`. `tls.X509KeyPair` is the proof the pair matches; a wrongly-ordered chain is rejected with a message that says so. The key is **sealed** into `instance_secrets` and returned by nothing; `409` when no `QUASAR_SECRET_KEY` is configured, rather than degrading to a plaintext file. Audited as `instance.tls.certificate.uploaded` (public metadata only) |
 | `GET /v1/tls/certificate.pem` | **none — public** | *(wizard v2 §S6a)* **the one deliberate exception in this table.** A client that does not yet trust the certificate frequently cannot log in *in order to* fetch it, so auth would make the route useless exactly when it is needed. It serves the **public** half every TLS handshake already transmits, and it is structurally incapable of emitting the key (the response is re-encoded from the parsed leaf's DER) |
 | `POST /v1/admin/invites` | **admin** | *(LP-SEC-01)* mint an invite; plaintext code + magic link returned once |
 | `GET /v1/admin/invites` | **admin** | *(LP-SEC-01)* list minted invites (never plaintext) |
@@ -1637,9 +1636,10 @@ device id belongs to another user (no existence leak).
 ## Remote access, TLS certificate, and signaling origins (first-run wizard v2 §S6, 2026-08-09)
 
 > **Amendment — additive; Opus + operator sign-off granted 2026-08-09 for exactly this
-> surface.** Adds `GET /v1/tls/certificate.pem` (public), `GET /v1/admin/access-check`,
-> `POST /v1/admin/tls/certificate`, and an `allowed_origins` field on the existing
-> `GET`/`PATCH /v1/admin/settings`. **No existing shape changes.**
+> surface.** Adds `GET /v1/tls/certificate.pem` (public), `GET /v1/admin/access-check`, and an
+> `allowed_origins` field on the existing `GET`/`PATCH /v1/admin/settings`. **No existing shape
+> changes.** The fourth route in the original amendment,
+> `POST /v1/admin/tls/certificate`, was withdrawn before shipping — see below.
 
 ### The failure chain this closes
 
@@ -1655,11 +1655,11 @@ connection failed" with no cause. Nothing in the product explained either.
 | topology | TLS terminated by | operator does | the panel must **not** say |
 |---|---|---|---|
 | **A** self-signed (default, LAN) | Quasar's own listener | download the cert, trust it, **verify the fingerprint** | — |
-| **B** own certificate | Quasar's own listener | upload cert + key | — |
+| **B** own certificate | Quasar's own listener | mount cert + key at `QUASAR_TLS_CERT`/`QUASAR_TLS_KEY` | — |
 | **C** external reverse proxy (e.g. their own Caddy + Let's Encrypt) | the proxy | set allowed origins; Quasar keeps its self-signed cert internally and **that is correct** | must **not** report the cert as a problem — its SANs are irrelevant when the browser never sees it |
 
-**Normative:** A, B and C all complete setup. **Certificate upload is never mandatory and a
-client MUST NOT present it as a required step.**
+**Normative:** A, B and C all complete setup, and a client MUST NOT present any of them as a
+required step.
 
 **Topology detection.** When a request arrives carrying `X-Forwarded-Proto` or RFC 7239
 `Forwarded`, a proxy is in front of the control plane, so its certificate is an internal
@@ -1701,136 +1701,27 @@ both are **length-capped at 256 characters** and are only ever rendered as JSON 
 a client **MUST NOT** put them through `dangerouslySetInnerHTML`. It discloses configuration an
 admin can already read.
 
-`secure_context` is the field that links this panel to the microphone: it is the precondition
-for `getUserMedia`, and it is true for HTTPS to this listener, HTTPS to an upstream proxy, or a
-loopback host on any scheme.
+`secure_context` is the field that links this panel to the microphone: it is the precondition for
+`getUserMedia`. **A forwarded protocol, when present, is authoritative for the browser-facing hop
+and overrides this control plane's own transport** — a proxy speaking HTTPS to us while serving
+the browser in the clear is not a secure context, however encrypted our own hop was. The loopback
+exception is taken from the browser's `Origin`, never from a `Host` a proxy may have rewritten to
+a loopback backend authority.
 
-### `POST /v1/admin/tls/certificate` — admin
+### `POST /v1/admin/tls/certificate` — **specified, deliberately not shipped**
 
-Accepts `{certificate_pem, private_key_pem}` and **applies it without a restart** — the
-listener's certificate comes from a `tls.Config.GetCertificate` callback, so the operator is
-not told to bounce the stack.
+§S6d specified an admin upload for the operator's own certificate. **It is not on this
+contract**, and no server implements it. It is the only surface that would accept a private
+key, and protecting that key requires knowing whether the browser's hop was encrypted — a
+property that cannot be reconstructed from request headers on a router shared with the
+plaintext listener. Five review rounds produced five distinct holes in successive attempts,
+each fix correct and each followed by a new gap in the same inference. The route returns when
+there is a listener-level answer (a dedicated management listener, mTLS, or similar), not a
+sixth iteration of the gate. Implementation and full review history live on
+`feat/tls-certificate-upload`.
 
-**Validation, in this order, all before anything is stored:**
-
-1. every PEM block in `certificate_pem` must be a `CERTIFICATE` — a private key pasted into
-   that field is refused **by name**, never silently skipped;
-2. **chain order**: leaf first, then intermediates. A reversed bundle is rejected with a
-   message that says so. This runs **before** step 3 deliberately: a reversed chain also fails
-   the key match, with "the key does not match", which sends an operator hunting the wrong file;
-3. `tls.X509KeyPair` — **this is what proves the key matches the certificate.** Nothing else in
-   the endpoint establishes that;
-4. the leaf must be **usable as a server certificate**: not a CA certificate, not restricted by
-   Extended Key Usage to something other than server authentication, and — when the Key Usage
-   extension is present — permitting `digitalSignature`, which every modern TLS handshake
-   requires of a server. An **absent** extension means unrestricted and is accepted in both
-   cases. Same class as (5) — an upload hot-swaps the live listener, so
-   a certificate no browser would accept must not be installable;
-5. **every certificate in the chain** must be currently valid — not just the leaf. A valid leaf
-   bundled with an expired intermediate installs cleanly and then breaks every client that builds
-   a path through it, which looks nothing like a certificate problem from the operator's side;
-   the error names which entry is at fault. The leaf must also carry SANs (the legacy Common Name
-   has been dead in browsers for years).
-
-**These criteria apply to uploads only.** A cert/key pair already mounted on disk is loaded with
-`crypto/tls`' own, looser rules, so an existing deployment whose pem files carry OpenSSL bag
-attributes or comments keeps booting after an upgrade — `access-check` reports the discrepancy
-instead of the process refusing to start.
-
-`certificate_pem` must contain **nothing but CERTIFICATE blocks and whitespace**: bytes outside a
-PEM block are rejected rather than silently skipped, and what is **persisted** is a bundle
-re-encoded from the validated chain rather than the request string — so nothing that is not a
-certificate can reach the public certificate table.
-
-The body must be **exactly one JSON object**: a trailing second value is refused rather than
-silently ignored, because on this route the unexamined tail sits in the same request as a private
-key.
-
-Each failure is `400 validation_failed` with the specific sentence. **The request body is never
-echoed in an error** — it contains a private key.
-
-**Secure transport is required on EVERY hop, and this is the only route where that is true.** It
-is the only endpoint that accepts a private key, and the same router is served by both the
-plaintext and the TLS listener (`QUASAR_HTTP_REDIRECT=off` is a supported configuration), so a
-cleartext upload would expose the key *and* the bearer token to any peer on the path.
-
-**The topology is DECLARED, not detected** (`QUASAR_BEHIND_PROXY`). No amount of header
-inspection can establish whether the browser's hop was encrypted: an undeclared reverse proxy
-that accepts public HTTP, re-encrypts to the HTTPS listener and strips inbound forwarding headers
-is byte-for-byte identical to a genuine direct client. So the operator states the topology once,
-and each mode enforces the rule that is sound for it:
-
-- **proxy mode** — all three: the direct peer is listed in `QUASAR_TRUSTED_PROXIES`, `r.TLS` is
-  non-nil, and **every** forwarded protocol value says `https`. An unlisted peer is refused
-  **outright**, never demoted to "treat as a direct client". The assertion covers browser→proxy
-  and `r.TLS` covers proxy→backend; a private key needs **both**, so a listed proxy must also
-  connect to the HTTPS listener.
-- **direct mode** (default) — `r.TLS` is non-nil **and the request carries no forwarding headers
-  at all**. A direct client never sends one, so their presence means an undeclared intermediary.
-
-Requiring *every* forwarded value to be `https` is deliberately **not** a leftmost-or-rightmost
-choice: an attacker can inject a value but can never remove the trusted proxy's own, so "all
-https" implies the proxy's own assertion is `https` at any position. Operators must additionally
-configure the proxy to **strip or overwrite** inbound forwarding headers
-(`docs/configuration.md`); this rule makes a violation fail closed rather than silently. Starting
-with proxy mode on and no valid trusted-proxy entry is a **startup failure**, not a permissive
-fallback. Anything else is `403`, decided **before the body is read**, with a message describing
-the mode the operator actually declared.
-
-**The honest limit, stated rather than implied away:** direct mode assumes network controls
-prevent a reverse proxy from reaching this listener. A silent MITM proxy that strips headers still
-defeats it, and the server cannot detect that — it is a property of the deployment, not of the
-request. This gate is a strong guard against ordinary misconfiguration, not a guarantee against an
-attacker who already controls the network path.
-
-**Advice is ordered by what actually blocks the operator, validity first:** already-expired, then
-near-expiry, then SAN mismatch, then self-signed. An expired certificate cannot be rescued by
-trusting it or by correcting its names, so leading with "download and trust this" would be advice
-that cannot work — and it is reachable, because the on-disk compatibility path deliberately keeps
-serving an expired pair rather than refusing to boot.
-
-**A stored upload that failed to activate is reported, never swallowed.** When an uploaded
-certificate exists but could not be installed — most often because `QUASAR_SECRET_KEY` is missing
-or has changed, leaving the sealed key unreadable — `certificate.stored_certificate_problem` says
-so and states that the certificate shown is a **fallback**. Otherwise the panel would present the
-fallback as the whole truth while the operator's configured certificate silently stopped being
-served.
-
-**SAN-mismatch guidance is source-specific.** When the served certificate does not cover the
-requested host, the remedy depends entirely on where that certificate came from, and `advice`
-branches on `certificate.info.source` accordingly: `QUASAR_TLS_HOSTS` regenerates nothing for a
-**mounted** certificate, and deleting the pem files in `QUASAR_TLS_DIR` does nothing for an
-**uploaded** one (the stored copy is reloaded from the database at the next restart). A single
-remedy would send operators of two of the three supported topologies down steps that cannot work
-— the exact failure this panel exists to eliminate.
-
-**Restart precedence.** Mounted `QUASAR_TLS_CERT` / `QUASAR_TLS_KEY` files **outrank** an
-uploaded certificate: when they are set, the stored certificate is not loaded at boot and a log
-line says so. That keeps `source: "provided"` honest, and — since no route deletes a stored
-certificate — mounting the files *is* the operator's reset path, which is only true if it wins.
-
-**Atomicity.** The sealed key and the public certificate row are written in **one transaction**,
-key first. Two rows that came from different uploads are not a usable pair and the loader would
-serve neither, so a partial write — or two uploads interleaving — must be impossible rather than
-unlikely. The persist-then-activate sequence is additionally serialised within a process, so the
-last upload to commit is also the last to be installed.
-
-**Custody.** The private key is **sealed into `instance_secrets`** (AES-256-GCM under
-`QUASAR_SECRET_KEY`) — **not** written as a plaintext pem beside the self-signed pair. Same
-model as every other credential: a database dump yields ciphertext. With no master key
-configured the upload is **refused with `409`** rather than silently degrading to a plaintext
-file. The public chain is stored separately in `instance_tls_certificate`.
-
-**Write-only forever.** No endpoint returns the private key. Reads expose
-configured / fingerprint / expiry / SANs only. It is **not reachable through
-`/v1/admin/secrets`** either: its registry entry is hidden there precisely so a bare `PUT`
-cannot install a key paired with nothing, bypassing check 3. The upload is **audit-logged by
-public metadata only** — fingerprint, expiry, names — as `instance.tls.certificate.uploaded`.
-
-**Expiry is the trap to name.** A Let's Encrypt certificate expires in 90 days, so a one-shot
-upload becomes a silent outage next quarter. `days_until_expiry` is reported on every read, and
-a client should point at the bundled Caddy overlay as the **automated** answer. Upload serves
-operators who already hold a certificate; it is not a substitute for ACME.
+**Topology B is meanwhile served by mounting the certificate** at `QUASAR_TLS_CERT` /
+`QUASAR_TLS_KEY`, which is unchanged and fully supported.
 
 ### Allowed origins — on `/v1/admin/settings`, not a route of its own
 
