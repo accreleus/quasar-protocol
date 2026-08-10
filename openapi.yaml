@@ -3639,6 +3639,15 @@ components:
         effective:
           type: [object, "null"]
           additionalProperties: { type: string }
+        # wizard-v2 S5 amendment (additive, admin-gated): the host's LAST-REPORTED wire
+        # codec set (schema.md hosts.codecs, written from agent-api.md capacity.codecs).
+        # Read-only, GET only - PATCH never returns or accepts it. null when the host has
+        # never reported the field (a pre-multi-codec agent), which the launch resolver
+        # treats as h264-only; it is deliberately NOT normalised to ["h264"] here, because
+        # "never reported" and "reported h264 only" need different operator advice.
+        codecs:
+          type: [array, "null"]
+          items: { $ref: "#/components/schemas/Codec" }
         pending_restart: { type: boolean }
         restart_triggered: { type: boolean }
     HostRestartRequest:

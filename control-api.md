@@ -4788,6 +4788,7 @@ Returns the resolved (effective) knob values and the sparse override map for one
     "encoder": "va",
     "render_node": "/dev/dri/renderD128"
   },
+  "codecs": ["h264", "h265"],
   "pending_restart": false
 }
 ```
@@ -4803,6 +4804,19 @@ Returns the resolved (effective) knob values and the sparse override map for one
   agent's env differs from the catalog default the display view assumes.
 - **`overrides`** — the sparse map of only the knobs that differ from their catalog defaults.
   Empty object when no overrides are set.
+- **`codecs`** *(NEW, wizard-v2 §S5, additive)* — the **wire** codec set this host last reported
+  it can actually produce (`schema.md` `hosts.codecs`, written from the agent's
+  `agent-api.md` `capacity.codecs`): an array subset of `["h264","h265","av1"]`, in the order
+  the agent reported it (no ordering meaning — codec *preference* is a launch-profile property,
+  not a host one). **Read-only and `GET`-only**: `PATCH` neither accepts nor returns it, because
+  it is an agent observation, not an override. `null` when the host has never reported the
+  field — a pre-multi-codec agent. `null` is **not** the same statement as `["h264"]` even
+  though the launch resolver treats both as H.264-capable-only: "never reported" means the
+  control plane does not know, and an operator surface must say so rather than assert an
+  H.264-only host. This is why the field is not normalised server-side.
+  It lives on this endpoint rather than on the `GET /v1/hosts` host body deliberately: this is
+  already the admin-only host-detail surface, so the disclosure stays as narrow as the fact
+  needs (the host body is read by non-admin/library surfaces that have no use for it).
 - **`pending_restart`** — `true` when a restart-class knob was changed (or the `restart`
   command was sent) and the agent has not yet reconnected reporting the new encoder/device.
   Cleared when the agent's next `register` + `config_update` cycle completes.
