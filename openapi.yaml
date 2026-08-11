@@ -2468,6 +2468,120 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  # ─── admin: background jobs (jobs framework, 2026-08-12) ─────────────────
+  # ADDITIVE AMENDMENT. Five admin routes over the `jobs` / `job_runs` tables
+  # (migration 0066), gated by the SAME server-enforced RequireAuth ->
+  # RequireAdmin chain as every other /v1/admin/* route — composed at
+  # registration, never as an inline role check in the handler.
+  #
+  # The framework's one durable idea: every property an operator wants of a
+  # background job (last run, duration, result, next run, is it running, may it
+  # run at 3pm) is a property of A RECORD OF A RUN, and no such record existed
+  # before. So a `pending` row IS the next run; there is no next_run_at column
+  # to drift out of sync with the thing it describes.
+  /v1/admin/jobs:
+    get:
+      tags: [admin]
+      summary: List every registered background job with its schedule and run state.
+      description: >-
+        The Jobs viewer's one call. Cursor-paginated {items, next_cursor} over job id, the
+        same envelope the admin session list uses. Includes UNMANAGED jobs — background work
+        that exists in code but has not been adopted by the framework — because a page whose
+        purpose is "what background work exists" that hides half of it reproduces the exact
+        problem it was built to fix. An unmanaged row carries null for every run-derived field
+        plus a human `unmanaged_note` naming the file that hard-codes it.
+      x-required-role: admin
+      parameters:
+        - { name: cursor, in: query, required: false, schema: { type: string }, description: "Opaque forward cursor (the previous page's next_cursor; it is a job id)." }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 500, default: 50 }, description: "Page size. An unparseable or out-of-range value falls back to the default rather than erroring." }
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/JobsResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/jobs/{job_id}:
+    parameters: [ { $ref: "#/components/parameters/PathJobId" } ]
+    get:
+      tags: [admin]
+      summary: Read one background job.
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: Edit the admin-owned half of a job's schedule.
+      description: >-
+        The `jobs` row is split by OWNERSHIP: identity (name, description, plane, scope,
+        managed) is code-owned and reconciled at every boot, and the schedule fields below
+        are ADMIN-OWNED and never overwritten by that reconcile. An all-optional body, the
+        repo's PATCH convention, so "absent" is distinguishable from "zero" — but an UNKNOWN
+        key is rejected with 400 rather than silently ignored, because a typo'd field name
+        accepted with a 200 is the "did my edit take effect" confusion this surface exists to
+        end. `window_start` and `window_end` move together: both set, or both null to clear.
+        400 validation_failed = malformed body, unknown key, or a value of the wrong JSON
+        type; 422 validation_failed = a well-formed value the schedule refuses (interval below
+        60s, interval_secs on a non-interval job, window_start == window_end, a window_days
+        value outside 0..6, an unknown IANA zone, history_limit outside 1..500).
+        409 job_unmanaged = the job is not adopted and has no schedule to edit.
+        409 schedule_locked = an environment variable is authoritative over this job's
+        interval; the edit is refused rather than silently accepted and overruled.
+        Every accepted PATCH writes an admin_activity row (`job.update`, `{"keys": [...]}`).
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/JobPatchRequest" } } }
+      responses:
+        "200": { description: Updated; the job in its post-edit shape. , content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "job_unmanaged (not adopted) or schedule_locked (an env var is authoritative)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { description: "validation_failed — a well-formed value the schedule model refuses." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /v1/admin/jobs/{job_id}/run:
+    parameters: [ { $ref: "#/components/parameters/PathJobId" } ]
+    post:
+      tags: [admin]
+      summary: Trigger a job now (queue a manual run).
+      description: >-
+        "The framework requests; the job decides." A manual run IGNORES THE WINDOW — an
+        operator pressing Run now has said what they want about timing — and NEVER ignores the
+        job's own safety gates: a runner that refuses (a host with live sessions, say) reports
+        `deferred`, which is an outcome and not an error. A run is queued, not executed
+        inline: the response is 202 with the pending run's id, and `eta_note` is a plain
+        string the UI renders verbatim ("the host claims due jobs about every 60 s" for an
+        agent-plane job) so Run now does not read as broken for a minute. If a pending run
+        already exists it is PULLED FORWARD rather than duplicated — at most one open run per
+        (job, target) is a database invariant. Audited as `job.run`.
+      x-required-role: admin
+      requestBody:
+        required: false
+        content: { application/json: { schema: { $ref: "#/components/schemas/JobRunNowRequest" } } }
+      responses:
+        "202": { description: Run queued. , content: { application/json: { schema: { $ref: "#/components/schemas/JobRunNowAccepted" } } } }
+        "400": { description: "validation_failed — malformed body, or host_id missing for a host-scoped job / supplied for an instance-scoped one." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "job_already_running, job_disabled (a disabled job never runs, not even manually), or job_unmanaged." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /v1/admin/jobs/{job_id}/runs:
+    parameters: [ { $ref: "#/components/parameters/PathJobId" } ]
+    get:
+      tags: [admin]
+      summary: Read one job's bounded run history (newest first).
+      x-required-role: admin
+      parameters:
+        - { name: host_id, in: query, required: false, schema: { type: string, format: uuid }, description: "Narrow to one target host's history. Meaningful for a host-scoped job; an instance-scoped job's runs carry no host." }
+        - { name: cursor, in: query, required: false, schema: { type: string }, description: "Opaque forward cursor (the previous page's next_cursor)." }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 500, default: 50 }, description: "Page size; an unparseable or out-of-range value falls back to the default." }
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/JobRunsResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   # ─── agent-internal ──────────────────────────────────────────────────────
   /v1/agent/storage/gc-pending:
     get:
@@ -2564,6 +2678,66 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
         "500": { description: Could not record or reconcile the report. , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
 
+  # ─── agent-internal: background jobs (jobs framework, 2026-08-12) ────────
+  # THE SAME PULL SHAPE AS THE #175 GC AND PHASE-4 LIBRARY ENDPOINTS ABOVE, AND FOR
+  # THE THIRD TIME FOR THE SAME REASON: a claim is a DATABASE ROW, so an agent
+  # reconnect has nothing to correlate and `agent-api.md` stays BYTE-IDENTICAL — a
+  # new additive HTTP surface, not a WebSocket-message change. An implementer who
+  # concludes a new AgentMsg variant is needed here is escalating, not patching.
+  #
+  # THE AGENT ASKS; IT IS NEVER TOLD. Nothing pushes a job at a host: the host polls
+  # when it is ready, claims what is due FOR ITSELF, and reports what its own runner
+  # decided. A runner's gate refusing is an ordinary `deferred` report, not an error.
+  #
+  # Auth is the per-node node_secret (Authorization: Bearer <node_secret> plus
+  # X-Quasar-Node), not a user bearer token — the same scheme as gc-pending /
+  # scan-pending, verified constant-time against hosts.node_secret_hash, with the
+  # resolved host_id scoping every query.
+  /v1/agent/jobs/pending:
+    get:
+      tags: [agent]
+      summary: "Node-agent internal: claim this host's due agent-plane job runs. (Not operator-facing.)"
+      description: >-
+        THE CLAIM IS THE RESPONSE. Returning a run and marking it `running` is one statement
+        (FOR UPDATE ... SKIP LOCKED), so two polls arriving together take DISJOINT sets rather
+        than both executing the same warm-up. Capped at 5 runs per poll: a host coming back
+        after an outage with a dozen jobs due must not start all of them at once, and the rest
+        are still pending because the work is a durable row. A claim that is then never
+        reported is not lost work — the dispatcher's reaper aborts it after deadline_secs and
+        materializes a fresh pending row. An empty list is the steady state, and is also what
+        this returns when the jobs master switch is off: the switch is re-read HERE as well as
+        in the dispatcher, because the dispatcher is what stops rows being CREATED and this is
+        what stops an already-materialized row being HANDED OUT.
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/AgentJobsPendingResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { description: Could not claim pending jobs. , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /v1/agent/jobs/report:
+    post:
+      tags: [agent]
+      summary: "Node-agent internal: close a claimed job run with its outcome. (Not operator-facing.)"
+      description: >-
+        IDEMPOTENT BY CONTRACT: a report for a run that is already terminal is a 200 no-op, so
+        an agent retrying after a network blip is safe — the alternative, a 409 the agent
+        cannot act on, would turn a run that actually succeeded into a permanent error in an
+        operator's face. `state` is the closed set {succeeded, failed, deferred, skipped};
+        `aborted` is deliberately ABSENT, because it is the reaper's verdict on a host that
+        said nothing and a host claiming it would be describing a decision it does not get to
+        make. Ownership is checked BEFORE anything is written and a failure is a 401, never a
+        404: an unknown run id, a run belonging to another host, and a bad node secret are one
+        indistinguishable answer, so these routes never become an oracle for run ids. A
+        `deferred` report is a normal outcome (the runner's own gate refused) and the
+        dispatcher schedules the retry on the persisted backoff ladder.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AgentJobReportRequest" } } }
+      responses:
+        "200": { description: Report recorded (or a no-op for an already-terminal run). , content: { application/json: { schema: { $ref: "#/components/schemas/AgentJobReportAccepted" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: Could not record the report (the run moved under the caller, or the summary blew the 4096-byte ceiling). , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "500": { description: Could not record the job report. , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+
   # ─── signaling (WebSocket) ───────────────────────────────────────────────
   /v1/signal:
     get:
@@ -2623,6 +2797,17 @@ components:
         the only one of the two that survives an admin editing the row directly later. Bounded below
         2^32 in addition to the pattern.
       schema: { type: string, pattern: "^[1-9][0-9]{0,9}$" }
+    PathJobId:
+      name: job_id
+      in: path
+      required: true
+      description: >-
+        Jobs framework (2026-08-12): a job's id. NOT a uuid — it is the code-owned dotted
+        identifier from the registry ("artwork.sweep", "template.warmup"), which is also the
+        `jobs` primary key, so the id in a URL is the same string an operator reads in a log
+        line. That is deliberate: a job's identity is authored in code and reconciled at boot,
+        never minted by a database default.
+      schema: { type: string }
 
   responses:
     Unauthorized:
@@ -5814,3 +5999,301 @@ components:
             nothing - rather than a silent zero; that fifth reason is route-specific ("your scope
             matched nothing") and is only reached once none of the four instance-level ones applies.
             CLIENTS MUST NOT PARSE THIS STRING; only its presence is contractual.
+
+    # ─── background jobs (jobs framework, 2026-08-12; migration 0066) ────────────
+    JobPlane:
+      type: string
+      description: >-
+        WHERE the job's work executes. 'control' runs in the control-plane process; 'agent' is
+        claimed over the /v1/agent/jobs/* pull channel and executed by a node agent. It is not
+        a hint - it decides which of the two dispatch paths ever sees the run.
+      enum: [control, agent]
+    JobScope:
+      type: string
+      description: >-
+        WHAT a run is about. 'instance' = one run for the whole deployment (its job_runs rows
+        carry no host_id). 'host' = one INDEPENDENT run per host, which is why a host-scoped
+        job reports `targets[]` instead of top-level run state: "last run" is not a single
+        fact about the job, it is a fact about the job ON A HOST.
+      enum: [instance, host]
+    JobScheduleKind:
+      type: string
+      description: >-
+        'interval' fires every interval_secs measured from the END of the previous run
+        (timer-reset-after-pass, so overlap is impossible by construction rather than
+        unlikely). 'event' never fires on a clock - a run row is created by an explicit
+        trigger - which is how event-driven work is represented WITHOUT pretending it is
+        periodic, while still showing last-run and result. 'manual' only ever runs from an
+        admin trigger.
+      enum: [interval, event, manual]
+    JobRunState:
+      type: string
+      description: >-
+        The run lifecycle: pending -> running -> one terminal state. 'deferred' means the job's
+        OWN gate refused (a host with live sessions, say) - an outcome, not an error, and the
+        dispatcher schedules the retry on a persisted backoff ladder. 'skipped' means there was
+        nothing to do. 'aborted' is the claim-timeout reaper's verdict on a run nobody reported;
+        it is the one state an agent may never report about itself.
+      enum: [pending, running, succeeded, failed, deferred, skipped, aborted]
+    JobRunTrigger:
+      type: string
+      description: "What created the run row: the schedule, an admin's Run now, or an explicit event."
+      enum: [schedule, manual, event]
+    JobSchedule:
+      type: object
+      description: >-
+        The ADMIN-OWNED half of a job (the code-owned half is its identity), resolved exactly
+        as the dispatcher resolves it - one implementation of "which source won", so the viewer
+        and the scheduler cannot disagree about when a job will next run.
+      required: [kind, interval_secs, window_start, window_end, window_days, timezone, locked, locked_by]
+      properties:
+        kind: { $ref: "#/components/schemas/JobScheduleKind" }
+        interval_secs:
+          type: [integer, "null"]
+          description: >-
+            Null for a non-interval schedule. Floor of 60 (a CHECK in the migration and a guard
+            in the handler): a job that wants to run more often than once a minute is not a
+            background job. When `locked` is true this is the ENVIRONMENT's value, not the
+            stored one.
+        window_start:
+          type: [string, "null"]
+          description: "HH:MM:SS in `timezone`, or null for 'any time'. Paired with window_end by a CHECK - both set or both null."
+        window_end:
+          type: [string, "null"]
+          description: >-
+            HH:MM:SS in `timezone`, or null. A window that WRAPS MIDNIGHT (22:00 -> 04:00) is
+            legal and normal. The window governs STARTING a run and never stopping one: a run
+            in flight when the window closes is not killed, because killing a half-finished
+            dedupe pass or a half-built template is worse than overrunning by minutes.
+        window_days:
+          type: array
+          items: { type: integer, minimum: 0, maximum: 6 }
+          description: >-
+            0 = Sunday .. 6 = Saturday (Go's time.Weekday). EMPTY MEANS EVERY DAY, and empty is
+            what an unconstrained job reports - never null. A day constrains the instant the
+            window OPENS, so a wrapping window on {5} runs Friday 22:00 -> Saturday 04:00.
+        timezone:
+          type: string
+          description: >-
+            IANA zone name; windows are evaluated in it. Intervals are NOT: an interval is a
+            duration in absolute time and has no opinion about the clock on the wall, so a DST
+            transition can shift when a windowed run lands but can never lengthen an interval.
+        locked:
+          type: boolean
+          description: >-
+            True when an environment variable is authoritative over this job's interval. The
+            env override stays the winner (the pre-existing documented behaviour of knobs like
+            QUASAR_LIBRARY_SCAN_INTERVAL); the API says so rather than silently accepting an
+            edit the environment will overrule - a PATCH of interval_secs on a locked job is
+            409 schedule_locked.
+        locked_by:
+          type: [string, "null"]
+          description: "The environment variable that is in force, e.g. \"QUASAR_LIBRARY_SCAN_INTERVAL\". Null when not locked."
+    JobRun:
+      type: object
+      description: "One record of one run - the shape that appears as `last_run` and as an item of the run-history page."
+      required: [id, host_id, state, trigger, started_at, finished_at, duration_ms, summary, error]
+      properties:
+        id: { type: string, format: uuid }
+        host_id: { type: [string, "null"], format: uuid, description: "Null for an instance-scoped job's run; the target host for a host-scoped one." }
+        state: { $ref: "#/components/schemas/JobRunState" }
+        trigger: { $ref: "#/components/schemas/JobRunTrigger" }
+        started_at: { type: [string, "null"], format: date-time, description: "Null while the run is still pending (it has not started)." }
+        finished_at: { type: [string, "null"], format: date-time }
+        duration_ms: { type: [integer, "null"], format: int64, description: "Null until the run is finished; derived from started_at/finished_at rather than stored." }
+        summary:
+          type: object
+          additionalProperties: true
+          description: >-
+            The runner's own per-job result blob - what it actually did, in its own vocabulary
+            ({"apps_considered": 412, "artwork_resolved": 3}). OPAQUE TO THE FRAMEWORK, which
+            never interprets it, and `{}` rather than null when a run reported nothing. Bounded
+            at 4096 bytes by a CHECK; a summary that blows the bound fails the REPORT, never the
+            run.
+        error: { type: [string, "null"], description: "The failure text for a failed run; null otherwise." }
+    JobTarget:
+      type: object
+      description: >-
+        One host's independent run state for a MANAGED host-scoped job. Computed by the same
+        code path as the instance-scoped top-level fields, so the two shapes cannot drift apart.
+      required: [host_id, node_name, running, next_run_at, last_run]
+      properties:
+        host_id: { type: string, format: uuid }
+        node_name: { type: string, description: "hosts.node_name - display only. An unresolved name renders as \"\" rather than failing the list: a stale host row must not break the whole page." }
+        running: { type: boolean }
+        next_run_at: { type: [string, "null"], format: date-time, description: "The open PENDING run's scheduled_for. Null when nothing is queued for this host." }
+        last_run: { $ref: "#/components/schemas/JobRunOrNull" }
+    JobRunOrNull:
+      oneOf:
+        - { $ref: "#/components/schemas/JobRun" }
+        - { type: "null" }
+      description: "The most recent TERMINAL run, or null when the job has never finished one on this target."
+    Job:
+      type: object
+      description: >-
+        One registered background job. The row is split by OWNERSHIP: identity (name,
+        description, plane, scope, managed) is code-owned and reconciled at every boot, and the
+        schedule is admin-owned and never overwritten by that reconcile - a boot that clobbered
+        an operator's 02:00-06:00 window because a developer edited a literal would make the
+        whole surface untrustworthy.
+        THREE SHAPES, DISCRIMINATED BY `managed` AND `scope`. A managed instance-scoped job
+        carries top-level running / next_run_at / last_run / consecutive_failures. A managed
+        host-scoped job carries `targets` INSTEAD, one entry per host. An unmanaged job of
+        either scope carries NEITHER, plus `unmanaged_note`.
+        A run-derived field is OMITTED rather than sent as null when it does not apply or is
+        not known (Go omitempty on a nil pointer); a client must read absent as null.
+      required: [id, name, description, plane, scope, managed, enabled, schedule, history_limit]
+      properties:
+        id: { type: string, description: "The code-owned dotted identifier, e.g. \"artwork.sweep\". Also the URL path segment and the id in every log line." }
+        name: { type: string, description: "Operator-facing display name, code-owned." }
+        description: { type: string, description: "What this job does, code-owned. For an UNMANAGED job it is also the text of unmanaged_note." }
+        plane: { $ref: "#/components/schemas/JobPlane" }
+        scope: { $ref: "#/components/schemas/JobScope" }
+        managed:
+          type: boolean
+          description: >-
+            False = "listed but not adopted": background work that exists in code and runs on a
+            hard-coded timer, shown here so an operator can SEE it, with no schedule, no run
+            history and no Run-now. The list of unmanaged rows is therefore also the adoption
+            backlog. Omitting them would reproduce the exact problem the Jobs page was built to
+            fix - a page of six rows next to twelve invisible goroutines.
+        enabled:
+          type: boolean
+          description: "The operator's kill switch, and it MEANS it: a disabled job never runs, not even from Run now (409 job_disabled)."
+        schedule: { $ref: "#/components/schemas/JobSchedule" }
+        running: { type: boolean, description: "MANAGED scope=instance only: an open run is currently in flight. Absent for a host-scoped or unmanaged job." }
+        next_run_at: { type: [string, "null"], format: date-time, description: "MANAGED scope=instance only: the open PENDING run's scheduled_for. A pending row IS the next run - there is no denormalized next-run column to drift out of sync." }
+        last_run: { $ref: "#/components/schemas/JobRunOrNull" }
+        consecutive_failures:
+          type: integer
+          description: >-
+            MANAGED scope=instance only: terminal `failed` runs since the last non-failed
+            terminal outcome. DERIVED from history rather than stored, so it cannot drift from
+            the rows it describes.
+        targets:
+          type: array
+          items: { $ref: "#/components/schemas/JobTarget" }
+          description: "MANAGED scope=host only: per-host run state, one entry per known host. Absent for an instance-scoped or unmanaged job."
+        history_limit: { type: integer, minimum: 1, maximum: 500, description: "How many run rows this job retains (1..500)." }
+        unmanaged_note:
+          type: string
+          description: >-
+            UNMANAGED jobs only: a human sentence naming the file that hard-codes this work and
+            saying no history is recorded. Authored in ONE place (the registry Definition's
+            description) rather than duplicated as a second field.
+    JobsResponse:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Job" }
+        next_cursor: { type: [string, "null"] }
+    JobRunsResponse:
+      type: object
+      description: "GET /v1/admin/jobs/{job_id}/runs - bounded history, newest first."
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/JobRun" }
+        next_cursor: { type: [string, "null"] }
+    JobPatchRequest:
+      type: object
+      description: >-
+        Every field optional; an absent field is left alone. AN UNKNOWN KEY IS A 400, not a
+        silent ignore. `window_start` and `window_end` must be supplied together - both as
+        strings to set a window, both as null to clear it - because a half-set window is a
+        schedule nobody can reason about.
+      additionalProperties: false
+      properties:
+        enabled: { type: boolean }
+        interval_secs:
+          type: integer
+          minimum: 60
+          description: "Only for an interval job (422 otherwise), never below 60, and refused with 409 schedule_locked while an env override is in force."
+        window_start: { type: [string, "null"], description: "\"HH:MM\" or \"HH:MM:SS\", or null to clear (with window_end). 24:00 is rejected rather than normalized - a bound that means two things is the seed of a missed run nobody can explain." }
+        window_end: { type: [string, "null"], description: "As window_start. Equal start and end is 422: an empty window would never open (a wrapping 22:00 -> 04:00 window, by contrast, is legal)." }
+        window_days:
+          type: array
+          items: { type: integer, minimum: 0, maximum: 6 }
+          description: "0 = Sunday .. 6 = Saturday; [] means every day."
+        timezone: { type: string, description: "IANA zone name. An unknown zone is 422, never silently coerced to UTC - an operator who typed \"Europe/Londn\" and got UTC would see their window fire at the wrong time with nothing saying why." }
+        history_limit: { type: integer, minimum: 1, maximum: 500 }
+    JobRunNowRequest:
+      type: object
+      description: "An EMPTY BODY IS VALID and is what an instance-scoped job's Run now sends."
+      properties:
+        host_id:
+          type: [string, "null"]
+          format: uuid
+          description: >-
+            REQUIRED for a host-scoped job (400 without it) and NOT ALLOWED for an
+            instance-scoped one (400 with it) - "which host" is not an optional detail when a
+            run is per-host, and there is no defaulting to "some host".
+    JobRunNowAccepted:
+      type: object
+      description: "202 body. The run is QUEUED, not executed inline - the response describes a pending row."
+      required: [run_id, state, scheduled_for, eta_note]
+      properties:
+        run_id: { type: string, format: uuid }
+        state: { $ref: "#/components/schemas/JobRunState" }
+        scheduled_for: { type: string, format: date-time, description: "Now, for a manual run - a manual trigger bypasses the window. It never bypasses the job's own gates." }
+        eta_note:
+          type: string
+          description: >-
+            A plain human string the UI renders VERBATIM, e.g. "queued; the host claims due jobs
+            about every 60 s" for an agent-plane job. It exists so Run now does not read as
+            broken for the minute before the host polls. CLIENTS MUST NOT PARSE IT.
+    AgentJobPendingRun:
+      type: object
+      description: "One run claimed by the calling host. Returning it and marking it `running` is ONE statement, which is what makes concurrent polls take disjoint sets."
+      required: [run_id, job_id, params, deadline_secs]
+      properties:
+        run_id: { type: string, format: uuid }
+        job_id: { type: string, description: "The registry job id, e.g. \"template.warmup\"." }
+        params:
+          type: object
+          additionalProperties: true
+          description: >-
+            The opaque per-job JSON the control plane stored when it materialized the run (for
+            an event trigger, whatever the event carried). The framework NEVER interprets it;
+            the agent hands it to the runner. `{}` rather than null when there is none. Bounded
+            at 4096 bytes by a CHECK.
+        deadline_secs:
+          type: integer
+          description: >-
+            After this long with no report the dispatcher ABORTS the run and re-materializes it.
+            Sent so the agent can bound its own execution rather than discover the abort by
+            racing it.
+    AgentJobsPendingResponse:
+      type: object
+      required: [runs]
+      properties:
+        runs:
+          type: array
+          items: { $ref: "#/components/schemas/AgentJobPendingRun" }
+          description: "Capped at 5 per poll; [] is the steady state and also the answer when the jobs master switch is off."
+    AgentJobReportRequest:
+      type: object
+      required: [run_id, state]
+      properties:
+        run_id: { type: string, format: uuid, description: "The claimed run being closed. Unknown, or owned by another host: 401, indistinguishable from a bad secret." }
+        state:
+          type: string
+          enum: [succeeded, failed, deferred, skipped]
+          description: >-
+            The closed set a HOST may report. `aborted` is absent on purpose - it is the
+            reaper's verdict on a host that said nothing, and a host claiming it would be
+            describing a decision it does not get to make. Sending it is 400 validation_failed,
+            exactly like any other unrecognised value.
+        summary:
+          type: object
+          additionalProperties: true
+          description: "The runner's own result blob, stored verbatim. Absent is treated as {}. Bounded at 4096 bytes; blowing the bound fails the report, never the run."
+        error: { type: [string, "null"], description: "Failure text for a failed run." }
+    AgentJobReportAccepted:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean, enum: [true] }

@@ -1066,6 +1066,11 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `POST /v1/admin/hosts/{id}/encoder-certification/cells/{sid}/finalize` | **admin** | *(SPT-06)* derive the verdict from real agent metrics, upsert + teardown |
 | `POST /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}/complete` | **admin** | *(SPT-06)* close the run (release the per-host lock) |
 | `GET /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}` | **admin** | *(SPT-05)* poll a run's status/progress |
+| `GET /v1/admin/jobs` | **admin** | *(jobs framework)* every registered background job with its resolved schedule and run state — **including `managed: false` rows**, work that exists in code but is not adopted, so the page cannot hide what it exists to show |
+| `GET /v1/admin/jobs/{job_id}` | **admin** | *(jobs framework)* one job. `{job_id}` is the code-owned dotted id (`artwork.sweep`), **not a uuid** |
+| `PATCH /v1/admin/jobs/{job_id}` | **admin** | *(jobs framework)* edit the **admin-owned** half of the schedule (`enabled`, interval, window, timezone, history limit) — code-owned identity is never writable here. **`409 job_unmanaged`** for an unadopted job, **`409 schedule_locked`** when an env override is authoritative, `422 validation_failed` for a value the schedule model refuses, `400 validation_failed` for an **unknown key**. Audited as `job.update` |
+| `POST /v1/admin/jobs/{job_id}/run` | **admin** | *(jobs framework)* queue a manual run (`202`) — **bypasses the window, never the job's own gates**. `409 job_already_running` / `409 job_disabled` / `409 job_unmanaged`. `host_id` required for a host-scoped job, refused for an instance-scoped one. Audited as `job.run` |
+| `GET /v1/admin/jobs/{job_id}/runs` | **admin** | *(jobs framework)* that job's bounded run history, newest first; optional `host_id` narrows to one target |
 | everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account. *(UI-P5: `POST /v1/sessions` additionally refuses a `profile_id` outside the app's allow-list with `409 profile_not_launchable_for_app` — a per-app configuration rule, not a role check, which is why it is `409` and not the `403` this table's admin rows produce. It is refused for **every** non-admin caller, including one supplying an explicit `stream` override, which carries no role gate here.* ***Phase 2:** `POST /v1/sessions` additionally refuses an app the caller holds no entitlement for with `403 forbidden`. That one **is** `403` and not `409`, because unlike the allow-list it is a statement about the **caller** rather than about the request — and unlike this table's admin rows it is refused for **every** role, admin included)* |
 
 ### First-admin bootstrap (decision)
@@ -5159,6 +5164,213 @@ closing a gap a review found between this contract and the code:
   src>` — the "never hotlinked" goal this whole feature exists for (§Cached locally, never
   hotlinked) applies here too, which is why an off-box `http(s)` value remains an admin's own
   choice to make, not one the server can silently launder into a local copy.
+
+---
+
+## Background jobs (jobs framework, 2026-08-12)
+
+> *Additive amendment. Seven new routes (five admin, two agent-internal) over two new tables,
+> `jobs` and `job_runs` (`schema.md`, migration `0066`). **Nothing existing changes**: no shape,
+> status code, or endpoint above is touched, and `agent-api.md` is **byte-identical** — the agent
+> side is an HTTP pull channel, the third in this contract to be chosen over a new WebSocket
+> message and for the same reason (§The agent pull channel).*
+
+Before this, background work in Quasar was eighteen independent goroutines and threads on
+hand-rolled tickers with **no record anywhere of a job having run** — "when did the artwork
+grabber last run" was unanswerable without reading container logs. The framework's single
+structural idea is that every property an operator wants of a background job (last run,
+duration, result, next run, is it running, may it run at 3pm) is a property of **a record of a
+run**, so a run is a durable row and a `pending` row **is** the next run. There is deliberately
+no `next_run_at` column: a denormalized next-run timestamp is exactly the derived state that
+drifts out of sync with the thing it describes.
+
+**Ownership is split, and the split is load-bearing.** A job's *identity* (`name`,
+`description`, `plane`, `scope`, `managed`) is **code-owned** and reconciled at every boot; its
+*schedule* (`enabled`, kind, `interval_secs`, the window fields, `timezone`, `history_limit`) is
+**admin-owned** and is never overwritten by that reconcile. A boot that clobbered an operator's
+`02:00–06:00` window because a developer edited a literal would make the whole surface
+untrustworthy.
+
+### Schedule and window semantics
+
+- **`interval` is measured from the END of the previous run**, not from its start and not as a
+  wall-clock cadence — the timer-reset-after-pass idiom the artwork sweeper and library janitor
+  already used, which makes overlap structurally impossible rather than merely unlikely.
+  Minimum 60 s (a `CHECK` **and** a handler guard).
+- **`event`** never fires on a clock; a run row is created by an explicit trigger. This
+  represents event-driven work **without pretending it is periodic**, while still showing
+  last-run and result. **`manual`** only ever runs from an admin trigger.
+- **The window snap is FORWARD-ONLY.** When the interval next fires, if that instant falls
+  outside the permitted window, the pending run's `scheduled_for` is snapped **forward** to the
+  next window open. So `interval_secs=86400` + `02:00–06:00` means "once a day, in the small
+  hours", and `interval_secs=3600` + `02:00–06:00` means "hourly, but only four of them land".
+- **`window_days` constrains the day the window OPENS** (0 = Sunday … 6 = Saturday; empty =
+  every day). A wrapping window on `{5}` therefore runs Friday 22:00 → Saturday 04:00.
+- **A wrapping window is legal** (`22:00 → 04:00`). `window_start == window_end` is rejected on
+  the write path (`422`): an empty window would never open. A hand-edited row where they are
+  equal is interpreted as **24 hours** — of the two failure modes, running the job beats
+  silently wedging it forever.
+- **The window governs STARTING a run, never stopping one.** A run in flight when the window
+  closes is not killed; killing a half-finished dedupe pass or a half-built template is worse
+  than overrunning by minutes. A job that must yield is expected to be interruptible **by its
+  own design**, through its own abort primitive.
+- **Windows are evaluated in `timezone` (IANA); intervals are not.** An interval is a duration
+  in absolute time and has no opinion about the clock on the wall, so a DST transition can shift
+  *when* a windowed run lands but can never lengthen or shorten an interval. An unknown zone is
+  `422`, never silently coerced to UTC.
+- **Env overrides stay authoritative.** Where an environment variable already documents itself
+  as an *override, not a default* (`QUASAR_ARTWORK_SWEEP_INTERVAL`,
+  `QUASAR_LIBRARY_SCAN_INTERVAL`), that does not change: the resolved schedule reports
+  `locked: true` + `locked_by: "<VAR>"`, and a `PATCH` of the interval is refused with
+  `409 schedule_locked` rather than silently accepted and overruled. This is the same treatment
+  `GET /v1/admin/library/status` already gives with `interval_overridden_by_env`, and it exists
+  to prevent the "which source is in force" confusion.
+
+**Single-flight is a database invariant, not a convention.** At most one open (`pending` or
+`running`) run per `(job, target)`, enforced by a partial unique index (`schema.md`
+`job_runs_open_per_target`). "Two dispatchers double-fired" and "Run now while it is already
+queued" are therefore impossible at the storage layer.
+
+### `GET /v1/admin/jobs` (admin)
+
+`?cursor=&limit=` (default 50, 1–500; an unparseable value falls back to the default).
+`{ "items": [...], "next_cursor": "<opaque|null>" }`, the same envelope as the admin session
+list. Three item shapes, discriminated by `managed` and `scope`:
+
+- **managed, `scope: "instance"`** — top-level `running`, `next_run_at`, `last_run`,
+  `consecutive_failures`.
+- **managed, `scope: "host"`** — `targets[]` **instead**, one entry per host with that host's own
+  `running` / `next_run_at` / `last_run`. "Last run" is not a single fact about a host-scoped
+  job; it is a fact about the job **on a host**.
+- **unmanaged** — neither, plus `unmanaged_note`.
+
+```json
+{ "id": "artwork.sweep", "name": "Artwork grabber",
+  "description": "Resolves cover and hero art for apps that have no artwork record.",
+  "plane": "control", "scope": "instance", "managed": true, "enabled": true,
+  "schedule": { "kind": "interval", "interval_secs": 900, "window_start": null,
+                "window_end": null, "window_days": [], "timezone": "UTC",
+                "locked": true, "locked_by": "QUASAR_ARTWORK_SWEEP_INTERVAL" },
+  "running": false, "next_run_at": "2026-08-12T14:15:03Z",
+  "last_run": { "id": "8b0d…", "host_id": null, "state": "succeeded", "trigger": "schedule",
+                "started_at": "2026-08-12T14:00:03Z", "finished_at": "2026-08-12T14:00:04Z",
+                "duration_ms": 1188,
+                "summary": {"apps_considered": 412, "artwork_resolved": 3}, "error": null },
+  "consecutive_failures": 0, "history_limit": 50 }
+```
+
+A **run-derived field is omitted rather than sent as null** when it does not apply or is not
+known; a client must read absent as null. `summary` is the runner's own opaque blob (`{}`, never
+null, when a run reported nothing) — the framework never interprets it. `consecutive_failures`
+is **derived from history**, not stored, so it cannot drift from the rows it describes.
+
+**Unmanaged jobs are listed on purpose.** An unmanaged row is background work that exists in
+code on a hard-coded timer, with no schedule, no history and no Run-now, shown so an operator can
+*see* it; `unmanaged_note` names the file that hard-codes it. Omitting them would reproduce the
+exact problem the page exists to fix — six visible rows next to twelve invisible goroutines — and
+the list of unmanaged rows doubles as the adoption backlog.
+
+### `GET /v1/admin/jobs/{job_id}` (admin)
+
+The same item shape, alone. `404 not_found` for an unknown id. Note that `{job_id}` is **not a
+UUID**: it is the code-owned dotted identifier (`artwork.sweep`), which is also the `jobs`
+primary key and the id in every log line.
+
+### `PATCH /v1/admin/jobs/{job_id}` (admin)
+
+All-optional body — `enabled`, `interval_secs`, `window_start`, `window_end`, `window_days`,
+`timezone`, `history_limit` — so "absent" is distinguishable from "zero". `window_start` and
+`window_end` move **together**: both strings to set a window, both `null` to clear it. Returns
+the updated job. Every accepted `PATCH` writes an `admin_activity` row (`job.update`, details
+`{"keys": [...]}`).
+
+| condition | status | code |
+|---|---|---|
+| malformed JSON, an **unknown key**, or a value of the wrong JSON type | `400` | `validation_failed` |
+| `interval_secs` < 60, `interval_secs` on a non-interval job, `window_start == window_end`, a `window_days` value outside 0–6, an unknown IANA zone, `history_limit` outside 1–500 | `422` | `validation_failed` |
+| the job is `managed: false` | `409` | `job_unmanaged` |
+| an env override is authoritative over the interval | `409` | `schedule_locked` |
+| no such job | `404` | `not_found` |
+
+**An unknown key is rejected rather than ignored**, deliberately: a typo'd field name accepted
+with a `200` is precisely the "did my edit take effect" confusion this framework exists to end.
+
+### `POST /v1/admin/jobs/{job_id}/run` (admin)
+
+Body `{ "host_id": "…" }` — **required** for a host-scoped job, **not allowed** for an
+instance-scoped one (either mistake is `400 validation_failed`); an empty body is valid for the
+instance case. `202 Accepted`:
+
+```json
+{ "run_id": "…", "state": "pending", "scheduled_for": "…",
+  "eta_note": "queued; the host claims due jobs about every 60 s" }
+```
+
+The run is **queued, not executed inline**. `eta_note` is a human string the UI renders
+**verbatim** so Run now does not read as broken for the minute before an agent-plane host polls;
+**clients must not parse it**. If a `pending` run already exists it is **pulled forward**, not
+duplicated.
+
+**A manual run bypasses the window and never bypasses the job's own safety gates** — the
+framework requests, the job decides; a runner that refuses reports `deferred`, which is an
+outcome, not an error. Errors: `409 job_already_running`; `409 job_disabled` (**a disabled job
+never runs, not even manually** — disabling is the operator's kill switch and must mean it);
+`409 job_unmanaged`; `404 not_found`. Audited as `job.run`.
+
+### `GET /v1/admin/jobs/{job_id}/runs` (admin)
+
+`?host_id=&cursor=&limit=` — bounded history, newest first, `{items, next_cursor}`, each item the
+`last_run` shape above. `404` for an unknown job.
+
+### The agent pull channel
+
+Two node-secret routes (`Authorization: Bearer <node_secret>` + `X-Quasar-Node`, verified
+constant-time against `hosts.node_secret_hash`), identical in scheme to `/v1/agent/storage/*` and
+`/v1/agent/library/*`. **This is the third time this contract has weighed a new `AgentMsg` and
+chosen a pull channel instead**, and the property that decides it is the same one: a claim is a
+**database row**, so an agent reconnect has nothing to correlate and `agent-api.md` stays
+byte-identical. An implementer who concludes a new WebSocket message is needed here is
+escalating, not patching.
+
+**The agent asks; it is never told.** Nothing pushes a job at a host: the host polls when it is
+ready, claims what is due **for itself**, and reports what its own runner decided.
+
+**`GET /v1/agent/jobs/pending`** — claims this host's due agent-plane runs with
+`FOR UPDATE … SKIP LOCKED` (so two polls take **disjoint** sets), stamps `claimed_at` +
+`state='running'`, and returns:
+
+```json
+{ "runs": [ { "run_id": "1f4a…", "job_id": "template.warmup",
+              "params": {"image_id": "steam"}, "deadline_secs": 3600 } ] }
+```
+
+Capped at **5 runs per poll**: a host returning from an outage with a dozen jobs due must not
+start all of them at once, and the rest are still `pending` because the work is a durable row.
+`params` is the opaque per-job blob the control plane stored when it materialized the run
+(`{}`, never null); the framework never interprets it. `deadline_secs` is sent so the agent can
+bound its own execution rather than discover the abort by racing it — a claim nobody reports is
+reaped to `aborted` and re-materialized. An empty list is the steady state, **and is also the
+answer when the jobs master switch is off**: the switch is re-read here as well as in the
+dispatcher, because the dispatcher is what stops rows being *created* and this is what stops an
+already-materialized row being *handed out*.
+
+**`POST /v1/agent/jobs/report`** — `{ "run_id", "state", "summary", "error" }`, `200 {"ok": true}`.
+
+- `state ∈ {succeeded, failed, deferred, skipped}`. **`aborted` is not reportable**: it is the
+  reaper's verdict on a host that said nothing, and a host claiming it would be describing a
+  decision it does not get to make. Sending it — or any other value — is `400 validation_failed`.
+- **The 401-no-oracle rule.** A bad secret, an unknown `run_id`, and a run belonging to **another
+  host** are one indistinguishable `401`. Ownership is checked **before anything is written**, and
+  the failure is `401` rather than `404` so these routes never become an oracle for run ids. The
+  real reason is logged, never returned.
+- **The idempotent-report rule.** A report for a run that is **already terminal** is a **no-op
+  `200`**, so an agent retrying after a network blip is safe. A `409` the agent cannot act on
+  would turn a run that actually succeeded into a permanent error in an operator's face.
+- A `deferred` report is a normal outcome (the runner's own gate refused) and the dispatcher
+  materializes the retry on a **persisted** backoff ladder — persisted, so a back-off decision
+  survives an agent reconnect and a control-plane restart. `409` covers a run that moved under
+  the caller or a `summary` that blew the 4096-byte ceiling: **a summary that is too large fails
+  the report, never the run.**
 
 ---
 

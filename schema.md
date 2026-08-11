@@ -1821,6 +1821,100 @@ resurrection bug: this row makes the reconciler skip the appid, **and** the reco
 modifies an existing tile (`ON CONFLICT DO NOTHING`, not `DO UPDATE`), so `enabled = false` is
 never flipped back even if this row were somehow lost.
 
+## `jobs` (background-jobs framework, 2026-08-12)
+> *Migration 0066. New table; changes nothing existing. The registry row for one piece of
+> background work. **Its columns are split by OWNERSHIP and the split is load-bearing:** identity
+> (`name`, `description`, `plane`, `scope`, `managed`) is owned by CODE and reconciled at every
+> boot; schedule (`enabled`, `schedule_kind`, `interval_secs`, `window_*`, `timezone`,
+> `history_limit`) is owned by an ADMIN and is never overwritten by a sync. A boot that clobbered
+> an admin's 02:00–06:00 window because a developer edited a literal would make the whole surface
+> untrustworthy, so the reconcile writes the two sets with different SQL rather than one blanket
+> upsert.*
+
+| column | type | notes |
+|---|---|---|
+| `id` | `TEXT` PRIMARY KEY | the code-owned dotted identifier (`artwork.sweep`). **Not a generated uuid** — a job's identity is authored in code, so the id in the URL, the id in the log line and the primary key are one string. |
+| `name` | `TEXT` NOT NULL | operator-facing display name. Code-owned. |
+| `description` | `TEXT` NOT NULL DEFAULT `''` | what the job does. Code-owned; for an unmanaged row it is also the API's `unmanaged_note`. |
+| `plane` | `TEXT` NOT NULL | `CHECK (plane IN ('control','agent'))`. Where the work executes — it decides which of the two dispatch paths ever sees a run, not merely how it is displayed. |
+| `scope` | `TEXT` NOT NULL | `CHECK (scope IN ('instance','host'))`. `instance` = one run for the deployment; `host` = one independent run per host. |
+| `managed` | `BOOLEAN` NOT NULL DEFAULT `TRUE` | `false` is the **"listed but not adopted"** state: the row exists so the Jobs page can show an operator a goroutine they cannot otherwise see, and the list of unmanaged rows doubles as the adoption backlog. It is never scheduled and has no run history. |
+| `enabled` | `BOOLEAN` NOT NULL DEFAULT `TRUE` | the operator's kill switch. A disabled job never runs, **not even from a manual trigger**. |
+| `schedule_kind` | `TEXT` NOT NULL | `CHECK (schedule_kind IN ('interval','event','manual'))`. |
+| `interval_secs` | `INTEGER` NULL | `CHECK (interval_secs IS NULL OR interval_secs >= 60)`. The 60 s floor is deliberate: the dispatcher tick is 10 s, and a job that wants to run more often than once a minute is not a background job. Measured from the **end** of the previous run. |
+| `window_start` | `TIME` NULL | permitted run window, evaluated in `timezone`. A window that **wraps midnight** (22:00 → 04:00) is legal. |
+| `window_end` | `TIME` NULL | the window governs **STARTING** a run, never stopping one: killing a half-finished dedupe pass or a half-built template is worse than overrunning by minutes. |
+| `window_days` | `SMALLINT[]` NOT NULL DEFAULT `'{}'` | 0 = Sunday … 6 = Saturday, matching Go's `time.Weekday`. Empty = every day. **A day constrains the instant the window OPENS**, so a wrapping window on `{5}` runs Friday 22:00 → Saturday 04:00. |
+| `timezone` | `TEXT` NOT NULL DEFAULT `'UTC'` | IANA name. Only the *window* is zone-sensitive; an interval is a duration in absolute time. |
+| `history_limit` | `INTEGER` NOT NULL DEFAULT `50` | `CHECK (history_limit BETWEEN 1 AND 500)` — how many `job_runs` rows this job retains. |
+| `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
+| `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | maintained by the shared `set_updated_at` trigger. |
+
+```sql
+CONSTRAINT jobs_window_paired     CHECK ((window_start IS NULL) = (window_end IS NULL)),
+CONSTRAINT jobs_interval_needed   CHECK (schedule_kind <> 'interval' OR interval_secs IS NOT NULL),
+CONSTRAINT jobs_window_days_valid CHECK (window_days <@ ARRAY[0,1,2,3,4,5,6]::SMALLINT[])
+```
+
+**There is no seeding in the migration, deliberately.** *Which* jobs exist is code-owned and
+reconciled at boot (the same shape `settings` seeding already uses), so adopting a job never means
+editing an applied migration.
+
+## `job_runs` (background-jobs framework, 2026-08-12)
+> *Migration 0066. New table; changes nothing existing. Every run of every job on either plane — a
+> control-plane sweep and an agent-side warm-up produce the **same row shape**, distinguished only
+> by `host_id`. **A `pending` row IS the next run**: there is deliberately no `next_run_at` column
+> on `jobs`, because a denormalized next-run timestamp is exactly the derived state that drifts out
+> of sync with the thing it describes.*
+
+| column | type | notes |
+|---|---|---|
+| `id` | `UUID` PRIMARY KEY DEFAULT `gen_random_uuid()` | the `run_id` on the wire, and the only run handle an agent ever holds. |
+| `job_id` | `TEXT` NOT NULL → `jobs(id)` **ON DELETE CASCADE** | |
+| `host_id` | `UUID` NULL → `hosts(id)` **ON DELETE CASCADE** | NULL for a `scope='instance'` job; the target host for a `scope='host'` one. **The agreement between this and `jobs.scope` is enforced in Go, not by a `CHECK`**: a cross-table invariant is not expressible as a row constraint, and a tautological `CHECK` that pretends otherwise is worse than an honest comment. |
+| `state` | `TEXT` NOT NULL | `CHECK (state IN ('pending','running','succeeded','failed','deferred','skipped','aborted'))`. `deferred` = the job's own gate refused (an outcome, not an error); `aborted` = the claim-timeout reaper's verdict, and the one state a host may never report about itself. |
+| `trigger` | `TEXT` NOT NULL | `CHECK (trigger IN ('schedule','manual','event'))`. |
+| `actor_user_id` | `UUID` NULL → `users(id)` **ON DELETE SET NULL** | who pressed Run now. `SET NULL` so deleting an operator does not delete the record that a run happened. |
+| `attempt` | `INTEGER` NOT NULL DEFAULT `1` | `CHECK (attempt >= 1)`. The deferral ladder's counter (30 s doubling, capped at 15 min). **PERSISTED**, unlike the in-memory backoff it replaces, so a back-off decision survives an agent reconnect and a control-plane restart — and, for the first time, is visible to an operator. |
+| `scheduled_for` | `TIMESTAMPTZ` NOT NULL | when this run may start. For a `pending` row this **is** the job's next-run time. |
+| `claimed_at` | `TIMESTAMPTZ` NULL | stamped when a dispatcher or an agent claims the row; the reaper's input. |
+| `started_at` | `TIMESTAMPTZ` NULL | |
+| `finished_at` | `TIMESTAMPTZ` NULL | duration is **derived** from these two, never stored. |
+| `params` | `JSONB` NOT NULL DEFAULT `'{}'::jsonb` | the opaque per-job JSON the control plane stored when it materialized the run (for an event trigger, whatever the event carried). Handed to the runner verbatim; **the framework never interprets it**. |
+| `summary` | `JSONB` NOT NULL DEFAULT `'{}'::jsonb` | the runner's own result blob, in its own vocabulary. |
+| `error` | `TEXT` NULL | failure text for a `failed` run. |
+| `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
+
+```sql
+CONSTRAINT job_runs_summary_bounded CHECK (octet_length(summary::text) <= 4096),
+CONSTRAINT job_runs_params_bounded  CHECK (octet_length(params::text)  <= 4096)
+```
+
+Both bounds are the **same 4096-byte ceiling `admin_activity.details` already uses**. A summary
+that blows the bound **fails the REPORT, never the run** — the work happened, and losing the record
+of a successful pass because its bookkeeping was verbose would be the wrong failure.
+
+```sql
+CREATE UNIQUE INDEX job_runs_open_per_target
+    ON job_runs (job_id, COALESCE(host_id, '00000000-0000-0000-0000-000000000000'::uuid))
+    WHERE state IN ('pending', 'running');
+
+CREATE INDEX job_runs_due     ON job_runs (scheduled_for) WHERE state = 'pending';
+CREATE INDEX job_runs_claimed ON job_runs (claimed_at)    WHERE state = 'running';
+CREATE INDEX job_runs_history ON job_runs (job_id, created_at DESC);
+CREATE INDEX job_runs_host    ON job_runs (host_id, created_at DESC) WHERE host_id IS NOT NULL;
+```
+
+**`job_runs_open_per_target` is THE single-flight guarantee**, and it lives in the database rather
+than in code so that a second dispatcher instance, a double-clicked "Run now" and a racing event
+trigger are **impossible rather than merely unlikely**. The zero UUID stands in for "no host" so
+that instance-scoped rows collide with **each other** — a plain partial index on a nullable column
+would not, since `NULL <> NULL`. The index is the **invariant, not the error path**: every insert
+goes through one materialize helper that treats a unique violation as "a run is already open" and
+returns that run, rather than surfacing a constraint error. The remaining four indexes are the
+dispatcher's hot paths: the due-run scan, the abandoned-claim reap, and the two history reads (per
+job for the viewer, per host for a host detail page).
+
 ## Session state machine (shared contract)
 This is the canonical lifecycle. `agent-api.md` and `control-api.md` use exactly these
 names. State is owned by the **control plane** (it writes the row); the agent *reports*
@@ -1935,6 +2029,9 @@ control-plane/migrations/
   0061_runtime_preset_network.up.sql -- (first-run experience §S2, purely additive) ALTER runtime_presets ADD network TEXT NOT NULL DEFAULT '' CONSTRAINT runtime_presets_network_ck CHECK (network IN ('', 'none', 'bridge')). Container network is a PER-APP REQUIREMENT carried by the runtime preset, not a host env var: app containers run `--network none` by default (correct for almost everything), but Steam's first boot must reach the internet to download steamui.so or it clean-exits and the session dies as "media path interrupted" (#463) — flipping a host-wide env var would open the network for every app on that host to fix one, so the requirement travels with the image via its preset instead. `''` = INHERIT and is the default, so this migration changes nothing on upgrade: every existing preset reads `''` and the agent keeps its existing fallback chain (`QUASAR_CONTAINER_NETWORK`, else `none`). Only a preset that states a value overrides it; an app's own `runtime_spec.network` overrides the preset in turn, within the same `none`/`bridge` range. `host` is DELIBERATELY EXCLUDED FROM THE CHECK: `--network host` removes the container's network namespace rather than widening it, putting the app on the host's own loopback (control plane, Postgres, the docker proxy, any admin-only port) and letting it bind host ports — and because a preset is portable (materialized from a catalog image manifest that may have been authored on another machine), accepting `host` here would let a manifest dissolve the isolation boundary on every host that installs it. Host networking remains reachable only through the agent's own `QUASAR_CONTAINER_NETWORK` operator knob, which is host-local and never travels with a preset or manifest. The CHECK is one of four independent defence-in-depth layers (also the admin CRUD's `400`, P5 manifest install validation, and the agent's independent backstop) — an arbitrary string must never reach `docker run --network`. The down migration drops the column and the CHECK; any non-default value configured while 0061 was applied is discarded.
   0062_host_readiness_and_app_exit_detail.up.sql -- (first-run experience §S1 + §S5, purely additive) ALTER hosts ADD readiness JSONB NULL + readiness_reported_at TIMESTAMPTZ NULL; ALTER sessions ADD failure_code TEXT NULL + app_log_tail TEXT NULL. **§S1 (hosts):** the agent probes its own view of the host (NVIDIA EGL vendor config, libnvidia-eglcore, 32-bit GL, render node, `/dev/uinput`, user namespaces) and reports the result on the EXISTING host-observability channel (`agent-api.md` `capacity.readiness`); stored opaquely, exactly like `hosts.storage`/`hosts.effective_settings` before it, so the check set can grow, shrink or be renamed without ever needing another migration. NULL means "no amendment-aware agent has reported yet", distinct from `'[]'` ("reported, nothing to say"); keep-if-absent on report, so a stale readiness set is possible, and `readiness_reported_at` is what makes that visible instead of silently presenting old evidence as current. ADVISORY ONLY: nothing in the scheduler, the admission path, or session launch reads either column — a host with every check failing still registers and still runs sessions. **§S5 (sessions):** `failure_code` is the machine classification of a terminal failure (`'app_exited_early'` today), sent by the agent as `session_state.reason_code`; it sits beside `error_message` rather than replacing it — `error_message` is operator prose that may be rewritten freely, this is the stable key the UI branches on. `app_log_tail` holds the app container's own last ~100 log lines, captured while it ran; it needs its own column because it cannot share `error_message` (that field renders inline as a one-line reason everywhere it appears, and a hundred lines of Steam output pasted into it would wreck every existing surface). App containers run `--rm`, so these lines are unrecoverable once the daemon reaps the container — this column is the only surviving copy (#463). Neither sessions column is indexed: both are read only when a specific session row is already being fetched by id. NOTHING existing changes on any of the four columns: all NULL by default, no backfill, byte-identical behaviour for every pre-amendment agent and control plane. The down migration drops all four columns.
   0064_signaling_allowed_origins.up.sql -- (first-run wizard v2 §S6e, purely additive) ALTER instance_settings ADD allowed_origins TEXT[] NOT NULL DEFAULT '{}'. QUASAR_ALLOWED_ORIGINS was env-only, gated exactly /v1/signal, and its 403 is STRUCTURALLY INVISIBLE TO BROWSER JS — the case it exists for (a reverse proxy that rewrites Host, so the same-origin exemption misses) is therefore an outage an operator cannot diagnose from the client. Moving it to a column makes it admin-settable and reportable by GET /v1/admin/access-check. THE ENV VAR REMAINS AN OVERRIDE, NOT A DEFAULT: when it is SET — including to the empty string, which is a deliberate "explicitly nothing" — it wins outright and the column is not consulted, which is exactly what makes the upgrade a no-op for every existing deployment. An empty array is NOT deny-all (same-origin and no-Origin requests still pass), so a fresh instance keeps working with nothing configured; '*' is refused by the PATCH handler because a wildcard is indistinguishable from having no allow-list, as are out-of-range ports and non-canonical IPv6 spellings (both stored normalized, so a saved entry always matches what a browser actually sends). text[] rather than a comma-joined column because the value is a set. NUMBERING: 0063 was taken by a migration that was subsequently withdrawn, so this pair lands at 0064 — a number already applied to a live database must never be reused, since golang-migrate keys on the version alone. This migration originally also created instance_tls_certificate for the §S6d certificate-upload endpoint; that endpoint was split out before either shipped, so the table went with it and no deployed database has ever had it. The down migration drops the column.
+  -- (migration 0065 predates this prose ledger's last refresh; the committed SQL in migrations/
+  --  is authoritative. The jobs-framework amendment adds the line below.)
+  0066_jobs_framework.up.sql -- (background-jobs framework, PURELY ADDITIVE, requires sign-off. See control-api.md §Background jobs and §`jobs` / §`job_runs` above.) CREATE jobs (id TEXT PK, name, description, plane CHECK IN ('control','agent'), scope CHECK IN ('instance','host'), managed BOOLEAN DEFAULT TRUE, enabled BOOLEAN DEFAULT TRUE, schedule_kind CHECK IN ('interval','event','manual'), interval_secs CHECK (NULL OR >= 60), window_start/window_end TIME, window_days SMALLINT[] DEFAULT '{}', timezone DEFAULT 'UTC', history_limit DEFAULT 50 CHECK BETWEEN 1 AND 500, timestamps + set_updated_at trigger) + jobs_window_paired / jobs_interval_needed / jobs_window_days_valid CHECKs; CREATE job_runs (id UUID PK, job_id -> jobs ON DELETE CASCADE, host_id UUID NULL -> hosts ON DELETE CASCADE, state CHECK IN ('pending','running','succeeded','failed','deferred','skipped','aborted'), trigger CHECK IN ('schedule','manual','event'), actor_user_id -> users ON DELETE SET NULL, attempt CHECK >= 1, scheduled_for, claimed_at, started_at, finished_at, params JSONB DEFAULT '{}', summary JSONB DEFAULT '{}', error, created_at) + job_runs_summary_bounded / job_runs_params_bounded CHECKs (octet_length <= 4096, the same ceiling admin_activity.details uses) + UNIQUE INDEX job_runs_open_per_target (job_id, COALESCE(host_id, zero-uuid)) WHERE state IN ('pending','running') + INDEXes job_runs_due / job_runs_claimed / job_runs_history / job_runs_host. NOTHING existing changes: two new tables, no altered column, no backfill. THERE IS NO SEEDING HERE, deliberately — which jobs exist is code-owned and reconciled at boot, so adopting a job never means editing an applied migration. A `pending` row IS the next run, which is why there is no next_run_at column to drift out of sync with the rows it would describe. job_runs_open_per_target IS the single-flight guarantee and it lives in the database rather than in code, so "two dispatchers double-fired" and "Run now while it is already queued" are impossible rather than merely unlikely; the zero UUID stands in for "no host" because a plain partial index on a nullable column would NOT make instance-scoped rows collide (NULL <> NULL). The host_id/scope agreement is enforced in Go and NOT by a CHECK: it is a cross-table invariant, and a tautological CHECK pretending otherwise is worse than an honest comment. attempt is PERSISTED backoff state, unlike the in-memory ladder it replaces, so a defer/back-off decision survives an agent reconnect and a control-plane restart. The two 4096-byte bounds fail the REPORT, never the run. ROLLBACK, standing repo rule: once applied, never deploy a control-plane binary embedding only <= 0065 — boot's golang-migrate m.Up() crash-loops with "no migration found for version 66". The down migration drops both tables; the loss is the run history and every admin-owned schedule edit (identity is code-owned and is re-reconciled at the next boot), so a re-apply returns every job to its code-declared default schedule.
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`
