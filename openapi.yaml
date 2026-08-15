@@ -1605,6 +1605,51 @@ paths:
             (Phase 3) home_not_provisioned - the target tile's parent has no home on THIS
             session's host - or parent_app_disabled.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  /v1/sessions/{id}/display:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    patch:
+      tags: [sessions]
+      summary: Change the live render resolution / interface scale of a running session (owner or admin).
+      description: |
+        SESSION-DISPLAY-UPDATE amendment (additive, pre-approved 2026-08-15). Best-effort relay
+        to the assigned host's agent-api session_display_update message - modelled directly on
+        POST /v1/sessions/{id}/swap: no session-state transition, and a rejection is always a
+        no-op (the session is left running exactly as it was).
+
+        RENDER RESOLUTION AND UI SCALE ARE EPHEMERAL: agent-held only, never written to the
+        sessions table, never present on the Session resource. The encode caps, interpipe
+        boundary, and the session's pinned stream WxH are UNCHANGED by this endpoint - only the
+        compositor's advertised wl_output logical mode and wp_fractional_scale_v1
+        preferred_scale move. Clients read the live values back via session_metrics
+        (agent-api.md) - the only authoritative readback - or keep their own last-acked value.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SessionDisplayUpdate" }
+      responses:
+        "202":
+          description: Accepted; agent is applying the update. Body is the current session (Session shape is unchanged by this endpoint).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session]
+                properties:
+                  session: { $ref: "#/components/schemas/Session" }
+        "400": { description: "validation_failed — dims not both-or-neither, dims not even, dims out of [16, session stream WxH], or ui_scale outside [1.0, 3.0].", content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller is neither owner nor admin.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >-
+            session_not_running - the session's top-level state is not running - or
+            display_update_rejected - the agent rejected the update, or no ack arrived within
+            the control plane's command timeout. The session is left untouched in either case.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/sessions/{id}/trace/clock:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
@@ -3686,6 +3731,33 @@ components:
           type: array
           items: { $ref: "#/components/schemas/Session" }
         next_cursor: { type: [string, "null"] }
+    SessionDisplayUpdate:
+      type: object
+      additionalProperties: false
+      description: >-
+        PATCH /v1/sessions/{id}/display body (session-display-update, additive, pre-approved
+        2026-08-15). At least one property must be present. render_width/render_height are
+        BOTH-OR-NEITHER (the server rejects one without the other with 400 validation_failed).
+        Omitted properties are left unchanged - this is a partial update, not a snapshot. Both
+        dims must be even and within [16, the session's pinned stream width/height]; ui_scale
+        must be within [1.0, 3.0]. Ephemeral - not persisted, not reflected on Session.
+      properties:
+        render_width:
+          type: integer
+          format: int32
+          minimum: 16
+          description: New app-facing wl_output logical width, in pixels. Must be even and ≤ the session's stream width. Requires render_height.
+        render_height:
+          type: integer
+          format: int32
+          minimum: 16
+          description: New app-facing wl_output logical height, in pixels. Must be even and ≤ the session's stream height. Requires render_width.
+        ui_scale:
+          type: number
+          format: double
+          minimum: 1.0
+          maximum: 3.0
+          description: New wp_fractional_scale_v1 preferred_scale hint pushed to session toplevels.
     LaunchRequest:
       type: object
       required: [app_id]

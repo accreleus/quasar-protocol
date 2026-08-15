@@ -32,6 +32,18 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > (no reservation resize — deferred). See `docs/phase2/P2-02-contract-app-swap.md`. **Stops at the
 > contract — the interpipe implementation is P2-07.**
 
+> **Amendment — session-display-update (live render resolution / UI scale), additive, pre-approved
+> 2026-08-15.** Adds the `PATCH /v1/sessions/{id}/display` endpoint (§Sessions), one error code —
+> `display_update_rejected` (409) — and one Authorization-table row (owner-or-admin, same rule as
+> `DELETE`/`swap`). **Purely additive:** a new endpoint + new code, no change to any existing shape.
+> Modelled directly on `session_swap_app` (P2-02): a best-effort relay to the assigned host's agent
+> (`agent-api.md` `session_display_update`) that never transitions session state and whose rejection
+> is always a no-op. **Render resolution and UI scale are EPHEMERAL** — agent-held only, never
+> written to the `sessions` table and never present on the `Session` resource; the encoded stream
+> `WxH` is unaffected (§Sessions `stream` block is unchanged by this endpoint). Clients read the
+> live values back via `session_metrics` (`agent-api.md`), or keep their own last-acked value. See
+> `agent-api.md` §`session_display_update`. **Stops at the contract.**
+
 > **Amendment — P3-01 (host-lifecycle + multi-host scheduling), additive, requires sign-off.**
 > Adds the host drain/cordon admin operations `POST /v1/hosts/{id}/drain` and
 > `POST /v1/hosts/{id}/uncordon` (§Hosts), two Authorization rows (both **admin**), and the
@@ -1023,6 +1035,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/apps`, `GET /v1/apps/{id}` | user | the library — **both reads require auth** *(UI-P1: the list was public until 2026-07-27; see the breaking-change amendment. `favourite` is resolved from the bearer identity, so an anonymous read could not answer it anyway)*. **(Phase 2: both are now entitlement-scoped — the list for every role including admin, the single read for non-admins as a `404`. This is not a role gate and produces no `403`; an entitlement is a per-subject grant, not a role. The unfiltered catalogue is `GET /v1/admin/apps`.)** |
 | `GET /v1/sessions/{id}`, `GET /v1/sessions`, `DELETE /v1/sessions/{id}` | **owner or admin** | resource-ownership check (`403` otherwise), not a blanket admin gate |
 | `POST /v1/sessions/{id}/swap` | **owner or admin** | *(P2-02)* same ownership check as `DELETE`. **(Phase 2: additionally `403 forbidden` when the **session owner** is not entitled to the target app — keyed on the owner, never on the caller, so an admin swapping someone else's session cannot launder their own entitlements into it)** |
+| `PATCH /v1/sessions/{id}/display` | **owner or admin** | *(session-display-update)* live render resolution / UI scale change — same ownership check as `DELETE`/`swap`; best-effort relay to the host agent, no session-state transition |
 | `POST /v1/sessions/{id}/stats` | **owner or admin** | *(P4-01)* the client posts its own session's browser telemetry — same ownership check as `DELETE` |
 | `GET /v1/admin/sessions/{id}/metrics` | **admin** | *(P4-01)* per-session telemetry read (oversight) |
 | `POST /v1/me/devices` | user (self) | *(P4-01)* upsert the caller's own device capability; owner is the bearer identity, never a body field |
@@ -3107,6 +3120,60 @@ interpipe boundary while encode + `webrtcbin` stay up, so the browser stream nev
       session launder their own entitlements into that user's session: the session would end up
       running an app its owner may not launch, and its owner keeps the stream. The question this
       check asks is "may this session run this app", and a session's access is its owner's.
+
+### `PATCH /v1/sessions/{id}/display` — change render resolution / interface scale (live)
+> *Additive amendment (session-display-update), pre-approved 2026-08-15. New endpoint; no change
+> to any existing shape. Modelled on `POST /v1/sessions/{id}/swap` — a best-effort relay to the
+> assigned host's agent that never transitions session state and whose rejection is always a
+> no-op.*
+
+Lowers (or restores) the **app-facing compositor render resolution** of a live session's `wl_output`
+logical mode, and/or pushes a new **UI scale** (`wp_fractional_scale_v1 preferred_scale`) to its
+toplevels — **without** touching the encode caps, the interpipe boundary, or the session's pinned
+**stream** `WxH`. The composited scene, produced at the (possibly lower) render size, is upscaled
+into the unchanged encode framebuffer. Owner-or-admin (same rule as `DELETE`/`swap`).
+```json
+// request — at least one field; render_width/render_height are both-or-neither
+{ "render_width": 1280, "render_height": 720, "ui_scale": 1.5 }
+// 202 — accepted; agent is applying it. Body is the current session (unchanged shape).
+{ "session": {
+    "id": "<uuid>", "app_id": "<uuid>",
+    "state": "running", "state_detail": "running", "error_message": null,
+    "stream": { "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 15000, "h264_profile": "main" },
+    "created_at": "...", "started_at": "...", "ended_at": null
+  } }
+```
+- **Async, best-effort relay — like swap, but with no state-machine involvement at all.** The
+  control plane validates the request, sends `session_display_update` (`agent-api.md`) to the
+  assigned host, and returns `202`. **No `state` or `state_detail` transition accompanies this
+  call** — unlike swap there is no `swapping`-style detail to poll, because render size / UI scale
+  are not part of the session state machine (`schema.md`).
+- **Render resolution and UI scale are EPHEMERAL.** Neither value is written to the `sessions`
+  table, and neither appears on the `Session` resource returned here or by `GET /v1/sessions/{id}`
+  — the response body's `Session` shape is **completely unchanged** by this endpoint. A client
+  reads the live values back from `session_metrics` (`agent-api.md` — the *only* authoritative
+  readback), or keeps its own last-acked value.
+- **The encoded stream resolution does not change.** `stream.width`/`stream.height` (and the rest
+  of the `stream` block) are exactly as the session was launched (and any subsequent swap) left
+  them; this endpoint cannot raise the render size above the stream size, and never resizes,
+  re-negotiates, or renegotiates the encode/transport in any way.
+- **Validation (`400 validation_failed`):** `render_width`/`render_height` supplied together or
+  not at all; both **even**; `16 ≤ render_width ≤` the session's stream `width` and
+  `16 ≤ render_height ≤` the session's stream `height`; `ui_scale`, if present, within
+  `[1.0, 3.0]`. At least one of `render_width`+`render_height` or `ui_scale` must be present.
+- **Errors:**
+  - `404 not_found` — no such session. **Checked before the ownership check**, so a non-owner
+    cannot use this endpoint to probe whether a session id exists.
+  - `403 forbidden` — caller is neither owner nor admin.
+  - `409 session_not_running` — the session's top-level `state` is not `running`.
+  - `409 display_update_rejected` — the agent rejected the update (out-of-range values it
+    re-validated, or no `session_state`-adjacent hold on the session), or no `ack` arrived within
+    the control plane's normal command timeout. **The session is left untouched in every
+    rejection** — same no-op contract as a rejected swap; this call never fails or changes the
+    session's `state`/`state_detail`.
+- **Semantics recap:** this is a live, best-effort **presentation** knob relayed to the host agent
+  — not a resize, not a renegotiation, not a session-state transition, and not persisted anywhere
+  in the control plane.
 
 ---
 
