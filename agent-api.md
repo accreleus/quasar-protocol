@@ -17,6 +17,16 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > `webrtcbin` tail live (no signaling renegotiation — `signaling.md` is unchanged). See
 > `docs/phase2/P2-02-contract-app-swap.md`. **Stops at the contract — P2-07 implements the swap.**
 
+> **Amendment — session-display-update (live render resolution / UI scale), additive, pre-approved
+> 2026-08-15.** Adds one control→node message, `session_swap_app`'s sibling `session_display_update`
+> (§Messages — control → node), with the same rejected-is-a-no-op ack contract as the swap. **Additive**
+> — a new `ControlMsg` variant; no existing message, field, or the assign/start/stop/swap ack contract
+> changes. The encode caps, interpipe boundary, and stream WxH are **untouched** — only the
+> compositor's advertised `wl_output` logical mode and `wp_fractional_scale_v1 preferred_scale`
+> change. Both values are **ephemeral** (agent-held only; not persisted in `sessions`, not on the
+> `Session` resource) and are echoed back, when non-default, on `session_metrics` (§`session_metrics`)
+> as the sole authoritative readback. See `control-api.md` `PATCH /v1/sessions/{id}/display`.
+
 > **Amendment — host-runtime-settings-admin: additive, requires sign-off.** Adds two new
 > downstream (control → node) messages: `config_update` (push the resolved knob block after
 > registration and after every admin change) and `restart` (ask the agent to exit cleanly so
@@ -410,7 +420,10 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   "frames_encoded": 299,
   "frames_dropped": 1,
   "app_launch_state": "game_running",
-  "bytes_used": 123456789
+  "bytes_used": 123456789,
+  "render_width": 1280,
+  "render_height": 720,
+  "ui_scale": 1.5
 }
 ```
 - **Lightweight fields (always present):** realized `fps`, actual `bitrate_kbps`, mean
@@ -455,6 +468,16 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   against the last report, and storage usage is visibility-only today (`control-api.md`).
   *Documented here as doc-drift repair: this field has been on the wire since P5-03; no
   wire change.*
+- **`render_width` / `render_height` / `ui_scale`** *(optional, session-display-update)* — the
+  compositor's **current** app-facing `wl_output` logical mode and `preferred_scale`, present
+  **only when non-default**, i.e. render size ≠ the session's pinned stream size, or
+  `ui_scale ≠ 1.0` — same omit-when-default convention as the other optional correlated fields
+  above. Set by `session_assign` (default = stream size / `1.0`) and moved only by
+  `session_display_update` (§`session_display_update`). **These fields are the ONLY
+  authoritative readback of the live render resolution / UI scale** — neither value lives in
+  `session_state`, the `Session` resource, or the `sessions` table (both are agent-held,
+  ephemeral state); a consumer that wants to know the current render size or UI scale reads the
+  latest `session_metrics` sample, or otherwise trusts its own last-acked value.
 - The control plane writes a `session_metrics` row with `source='agent'` (`schema.md`).
   A malformed or unparsable message is dropped without dropping the connection. A sample whose
   `session_id` is not currently `running` on this host (e.g. it arrived as the session went
@@ -706,6 +729,55 @@ does not change the reservation; see `schema.md`):
 - `session_state{ state:"failed", error:"<reason>" }` — swap failed and the previous app could
   **not** be restored; the session is terminal and its reservation is released (the normal `failed`
   path). **Roll back when possible; only fail the session when rollback is impossible.**
+
+### `session_display_update` — live render resolution / UI scale (session-display-update)
+> *Additive amendment. New downstream message; no existing message, field, or ack contract
+> changes. An older agent that does not recognise `session_display_update` treats it as an
+> unknown `type` (existing discipline) — wire-silent, exactly like `image_build` on a P2 agent.*
+
+Tells the agent to change a `running` session's **compositor-side app-facing presentation**
+without touching the encode/stream path: the app-facing `wl_output` **logical mode** (the
+"render resolution" the composited scene is produced at, then upscaled into the pinned encode
+framebuffer) and/or the **UI scale** driven to toplevels via `wp_fractional_scale_v1`'s
+`preferred_scale`.
+```json
+{
+  "type": "session_display_update",
+  "id": "<cmd-id>",
+  "session_id": "<uuid>",
+  "render_width": 1280,
+  "render_height": 720,
+  "ui_scale": 1.5
+}
+```
+- `render_width` / `render_height` *(int, optional, both-or-neither)* — the new app-facing
+  logical mode, in pixels. Omitted (both) ⇒ unchanged.
+- `ui_scale` *(number, optional)* — the new `preferred_scale` hint. Omitted ⇒ unchanged.
+- **The agent enforces, and rejects out-of-range values for:** `16 ≤ render_width ≤` the
+  session's pinned **stream** width, `16 ≤ render_height ≤` the session's pinned stream height,
+  both **even**; `1.0 ≤ ui_scale ≤ 3.0`. The render size may only be lowered relative to the
+  stream size (never raised past it) — the composited scene is always upscaled into, never
+  downscaled past, the encode framebuffer.
+- **Encode caps, interpipe, and stream `WxH` are NOT changed by this message.** Only the
+  compositor's advertised `wl_output` mode and `preferred_scale` move; the pinned encode
+  resolution, bitrate ladder, and codec are exactly as `session_assign` (and any subsequent
+  `session_swap_app`) left them.
+- **Ack semantics — same contract as `session_swap_app` (differs from assign/start).** The
+  agent replies `ack{ id, ok, error? }`:
+  - `ack{ok:true}` — the values (whichever were present) were validated and applied.
+  - **`ack{ok:false, error}` — the agent rejected the command (e.g.
+    `display_update_rejected: render_height 8 below floor 16`). The session is left running
+    with its *previous* render size / UI scale and stays `running` — the update is a no-op.**
+    A rejected `session_display_update` **never fails the session and never changes session
+    state**, exactly like a rejected swap.
+- **Ephemeral, agent-held state.** Neither value is stored in the `sessions` table or exposed on
+  the `Session` resource (`control-api.md`) — the agent is the sole holder between messages. The
+  **only** authoritative readback is `session_metrics` (§`session_metrics`, below), never
+  `session_state` and never the `Session` resource.
+- **Any host may receive this message** — an older agent that does not understand
+  `session_display_update` silently ignores it (unknown `type` ⇒ unknown enum variant on
+  deserialize, the same wire-silent behavior documented for `image_build`/`config_update`). The
+  control plane treats the absence of an `ack` within its normal command timeout as a rejection.
 
 ### `config_update` — push host override knobs (host-runtime-settings-admin)
 > *Additive amendment. New downstream message; no change to any existing message. Fire-and-
