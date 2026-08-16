@@ -3062,16 +3062,21 @@ client. Neither field is a session-state authority: `state` remains the only pro
 
 The session `stream` block gains:
 - **`external_width` / `external_height`** *(optional int)* — the session's **current**
-  encoded/streamed size, present **only when it differs from the launch size** (`stream.width`/
-  `stream.height`, which remain "the truth of the profile" and never move — `session-display-
-  update` never touched them and this amendment doesn't either). Set by `session_assign`
-  (default = launch size, hence absent) and moved only by `PATCH /v1/sessions/{id}/display`'s
-  `stream_width`/`stream_height`. Like `session-display-update`'s render size, this pair is
-  **ephemeral** — not written to the `sessions` table — but the control plane keeps an
-  **in-memory cache of the last-acked value** (populated from the agent's `session_metrics`,
-  `agent-api.md`) so a `GET` between updates still reflects the current external size without a
-  client having to remember it; **a control-plane restart drops the cache** until the next
-  `session_metrics` sample repopulates it.
+  encoded/streamed size. **Present whenever the control plane KNOWS the current external size** —
+  i.e. it has seen either a `202` from `PATCH /v1/sessions/{id}/display` or a `session_metrics`
+  sample reporting it (`agent-api.md`) — **including when that size equals the launch size.**
+  **Absent means *unknown*, not "at launch":** a control plane that has not yet received either
+  signal for this session (freshly restarted, or no `stream_width`/`stream_height` update and no
+  metrics sample have landed yet) omits the pair entirely, and a client MUST NOT infer "still at
+  launch size" from absence. (`stream.width`/`stream.height` remain "the truth of the profile"
+  and never move — `session-display-update` never touched them and this amendment doesn't
+  either.) Moved only by `PATCH /v1/sessions/{id}/display`'s `stream_width`/`stream_height`. Like
+  `session-display-update`'s render size, this pair is **ephemeral** — not written to the
+  `sessions` table — but the control plane keeps an **in-memory cache of the last-known value**
+  (populated from the `202` ack path and from the agent's `session_metrics`, `agent-api.md`) so a
+  `GET` between updates still reflects the current external size without a client having to
+  remember it; **a control-plane restart drops the cache**, and the pair reads as absent again
+  until the next `202` or `session_metrics` sample repopulates it.
 - **`external_resize_supported`** *(optional bool)* — whether the assigned host's encoder can
   live-resize the stream at all; readback of `agent-api.md` `session_metrics.
   external_resize_supported`. **Absent until the agent reports** (older agent, or no sample yet)
@@ -3086,6 +3091,10 @@ The session `stream` block gains:
   - **16:10** — 2560x1600, 1920x1200, 1680x1050, 1440x900, 1280x800
   - **21:9** — 3440x1440, 2560x1080
   - **4:3** — 1600x1200, 1280x960, 1024x768
+  **21:9 family membership is by a set of reduced ratios, not one single ratio** — `3440x1440`
+  reduces to `43:18` and `2560x1080` reduces to `64:27` (a third, `7:3`, is reserved for a future
+  entry); this control-plane table is the reference for family membership, not a computed
+  tolerance.
   `stream_width`/`stream_height` on `PATCH /v1/sessions/{id}/display` MUST be one of these pairs
   (after filtering to `≤` launch) or the request is `400 validation_failed` — see
   §`PATCH /v1/sessions/{id}/display`. **Not to be confused with the admin-configured stream-profile
@@ -3225,12 +3234,15 @@ banner at the top of this document. Owner-or-admin (same rule as `DELETE`/`swap`
   `session_metrics` (`agent-api.md` — the *only* authoritative readback), or keeps its own
   last-acked value.
 - **(DRAFT) External/stream resolution is also EPHEMERAL, with one difference:** it changes what
-  is actually **encoded**, so the control plane keeps an **in-memory cache of the last-acked
-  external size** and surfaces it on the `Session` resource as `stream.external_width` /
-  `stream.external_height` (present only when ≠ launch — see §GET /v1/sessions/{id}) purely for
-  UI convenience; it is still not written to the `sessions` table, and the cache is lost on a
-  control-plane restart until the next `session_metrics` sample repopulates it. `session_metrics`
-  remains the sole *authoritative* readback, same as render size.
+  is actually **encoded**, so the control plane keeps an **in-memory cache of the last-known
+  external size** — populated from this endpoint's own `202` ack path as well as from
+  `session_metrics` — and surfaces it on the `Session` resource as `stream.external_width` /
+  `stream.external_height` (present whenever the control plane knows the current external size,
+  **including when it equals the launch size**; absent means *unknown*, not "at launch" — see
+  §GET /v1/sessions/{id}) purely for UI convenience; it is still not written to the `sessions`
+  table, and the cache is lost on a control-plane restart (fields read as absent again) until the
+  next `202` or `session_metrics` sample repopulates it. `session_metrics` remains the sole
+  *authoritative* readback, same as render size.
 - **(DRAFT) Semantics of `stream_width`/`stream_height`:** changes the **coded size** — what is
   encoded and streamed — at the **next IDR**; there is **no WebRTC renegotiation**
   (`signaling.md` unchanged), the client `<video>` element simply follows the new coded size.

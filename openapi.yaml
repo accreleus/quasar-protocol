@@ -3283,11 +3283,15 @@ components:
           type: integer
           description: >-
             DRAFT session-display-stream (2026-08-16, AWAITING SIGN-OFF). Current EXTERNAL
-            (encoded/streamed) width on session.stream; absent on an app's display_stream and
-            absent whenever it equals the launch width/height (width/height above). Ephemeral,
-            in-memory control-plane cache of the last-acked value (agent session_metrics is the
-            authoritative source) — populated by session_display_update's stream_width/
-            stream_height. See control-api.md for the INTERNAL-vs-EXTERNAL vocabulary.
+            (encoded/streamed) width on session.stream; absent on an app's display_stream.
+            PRESENT WHENEVER THE CONTROL PLANE KNOWS the current external size — i.e. it has seen
+            a 202 from PATCH /v1/sessions/{id}/display or a session_metrics sample reporting it —
+            INCLUDING when that size equals the launch width/height. ABSENT MEANS UNKNOWN (a
+            fresh control plane, or no such signal yet for this session), NOT "at launch size" —
+            do not infer launch size from absence. Ephemeral, in-memory control-plane cache of the
+            last-known value (agent session_metrics is the authoritative source), lost on a
+            control-plane restart until the next 202 or session_metrics sample repopulates it. See
+            control-api.md for the INTERNAL-vs-EXTERNAL vocabulary.
         external_height:
           type: integer
           description: "DRAFT session-display-stream. Pairs with external_width; see its description."
@@ -3305,7 +3309,9 @@ components:
             PATCH /v1/sessions/{id}/display (always <= the launch size, launch size always
             included). Always present on session.stream for a running session; absent on an app's
             display_stream. Not the admin-configured stream-profile "rungs" (AS10-01) — a separate,
-            fixed table unrelated to the admin encode-rung catalog.
+            fixed table unrelated to the admin encode-rung catalog. 21:9 family membership is by a
+            set of reduced ratios {43:18, 64:27, 7:3} — 3440x1440 reduces to 43:18, 2560x1080 to
+            64:27 — control-api.md's table is the reference, not a computed tolerance.
           items:
             type: array
             items: { type: integer }
