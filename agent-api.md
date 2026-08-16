@@ -508,6 +508,25 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   omit-when-default fields above, this one is a capability flag, not a value that has a default to
   omit); **absent from an older agent**, which a consumer treats as *unknown*, not `false`.
   Readback surfaces as `Session.stream.external_resize_supported` (`control-api.md`).
+- **(DRAFT) `ladder_speed_bias`** *(int, optional)* — the SPT-08 ladder's current encoder
+  speed-bias rung (0 = the session's configured quality posture). **Present only when
+  non-zero**; absent means the baseline posture, never "unknown". Signal-only for the
+  control plane: nothing server-side reacts to it.
+- **(DRAFT) `ladder_res_rung`** *(int, optional)* — the ladder's current EXTERNAL
+  resolution rung index into the session's aspect family (`0` = the launch size).
+  **Present only when non-zero.** The rung's realized pixel size is still reported by
+  `stream_width`/`stream_height`; this is the ladder's own index, which is what makes a
+  step distinguishable from a manual PATCH landing on the same size.
+- **(DRAFT) `external_owner`** *(string, optional, `"auto" | "pinned"`)* — who currently
+  owns the external size. `"auto"` = the ABR ladder may move it; `"pinned"` = a user or
+  admin set it via `PATCH /v1/sessions/{id}/display` and the ladder will not move it.
+  **Present only alongside `stream_width`/`stream_height`** (at the launch size there is
+  nothing to own). An agent that omits it on a non-default size is pre-ladder: treat the
+  size as `"pinned"`, since only a manual PATCH could have moved it.
+- **(DRAFT, phase 2) `ladder_fps`** *(int, optional)* — the ladder's realized target
+  frame rate when the fps rung has stepped below the session's launch fps. **Present only
+  when below the launch fps.** Reserved by this amendment; the agent does not emit it
+  until the fps rung ships.
 - The control plane writes a `session_metrics` row with `source='agent'` (`schema.md`).
   A malformed or unparsable message is dropped without dropping the connection. A sample whose
   `session_id` is not currently `running` on this host (e.g. it arrived as the session went
@@ -919,6 +938,13 @@ The control plane sends `config_update`:
   in `GET /v1/admin/hosts/{id}/settings`.
 - **Live-class knobs** (`abr_enabled`, `gop`, `slices`, etc.) take effect on the **next session
   build**. Running sessions are never modified mid-life — the pipeline is static once built.
+- **(DRAFT) The `settings` block is an OPAQUE passthrough of the control plane's knob
+  catalog.** This document deliberately does not enumerate the keys — the catalog is the
+  contract (`GET /v1/admin/config/catalog`, `control-api.md`), and knobs are added there
+  without a protocol amendment. The 2026-08-16 adaptation wave adds `abr_mode` (enum
+  `off|protective|smooth`, which **supersedes** the lossy `abr_enabled` bool — `false` ⇒
+  `off`, `true` ⇒ defer to `abr_mode`) plus the `abr_ladder*` family; all are live-class
+  and all reach the agent through this same block with no message-shape change.
 - **Restart-class knobs** (`encoder`, `render_node`, `cuda_device`) are read at the agent's
   **first session build** (inside the `ensure_gst_init` call, which runs the `gst::init` process-
   wide `Once`). A `config_update` carrying a new restart-class value after sessions have already

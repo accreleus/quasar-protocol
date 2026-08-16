@@ -3292,6 +3292,22 @@ banner at the top of this document. Owner-or-admin (same rule as `DELETE`/`swap`
   knob relayed to the host agent — not a renegotiation, not a session-state transition, and (aside
   from the DRAFT external-size cache, which is a convenience readback, not the source of truth)
   not persisted anywhere in the control plane.
+- **(DRAFT) Pin / release semantics.** A `stream_width`/`stream_height` PATCH is a
+  **statement of ownership**, not just a resize:
+  - **PATCH to any NON-launch size ⇒ the session is PINNED.** The host's ABR resolution
+    ladder (`abr_ladder_resolution`, per-host Host Settings) stops moving the external size
+    for the rest of the session, or until released. A human chose; the ladder must not
+    fight them.
+  - **PATCH to the session's LAUNCH size ⇒ RELEASED back to auto.** "Back to launch" is the
+    release; there is no separate field, and none will be added — the launch size is
+    already the one value every client can name and every session accepts.
+  - The ownership is **agent-held and ephemeral**, like the size itself. It is reported
+    back on `session_metrics.external_owner` (`"auto" | "pinned"`, agent-api.md) and is not
+    stored in the `sessions` table. A client renders "Auto · 1920×1080" vs a plain size
+    from that key.
+  - A PATCH that the agent **rejects** changes neither the size nor the ownership.
+  - On a host where the ladder is off (the default), every session is effectively `"auto"`
+    until a PATCH pins it — the flag is still reported, and still released the same way.
 
 ---
 
@@ -5060,6 +5076,17 @@ as a `config_update` message (`agent-api.md`).
   reconnected with updated config).
 - **Errors:** `404 not_found` — no host with that id; `400 validation_failed` — bad knob key,
   wrong type, or out-of-range value; `409 restart_required` — as above.
+
+**(DRAFT) Adaptation knob group (2026-08-16).** `abr_mode` (enum `off|protective|smooth`,
+default `smooth`) supersedes the deprecated `abr_enabled` bool, which remains in the
+catalog for compatibility (`false` ⇒ `off`; `true` ⇒ defer to `abr_mode`). The
+`abr_ladder*` family exposes the SPT-08 ladder: the encoder-speed-bias rung's hysteresis,
+and the external-resolution rung's comfort-bitrate exponent, engage/recover fractions and
+dwells, minimum step interval and floor height. All are live-class. **Cross-knob
+validation:** `PATCH /v1/admin/hosts/{id}/settings` returns `400 validation_failed` when
+the RESOLVED configuration would collapse the resolution rung's hysteresis band
+(`abr_ladder_res_recover_frac` must exceed `abr_ladder_res_engage_frac` by ≥ 0.05); the
+message names **both** keys, because a patch that sets only one can still break the pair.
 
 ### `POST /v1/admin/hosts/{id}/restart` — restart a host's agent *(host-observability-2)*
 > *Additive, admin-gated. New endpoint; no change to any existing shape.*
