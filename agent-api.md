@@ -523,10 +523,10 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   **Present only alongside `stream_width`/`stream_height`** (at the launch size there is
   nothing to own). An agent that omits it on a non-default size is pre-ladder: treat the
   size as `"pinned"`, since only a manual PATCH could have moved it.
-- **(approved 2026-08-16, phase 2) `ladder_fps`** *(int, optional)* — the ladder's realized target
+- **(approved 2026-08-16) `ladder_fps`** *(int, optional)* — the ladder's realized target
   frame rate when the fps rung has stepped below the session's launch fps. **Present only
-  when below the launch fps.** Reserved by this amendment; the agent does not emit it
-  until the fps rung ships.
+  when below the launch fps.** Emitted since the fps rung shipped (2026-08-17); absent on
+  hosts where the rung is disabled or inert.
 - The control plane writes a `session_metrics` row with `source='agent'` (`schema.md`).
   A malformed or unparsable message is dropped without dropping the connection. A sample whose
   `session_id` is not currently `running` on this host (e.g. it arrived as the session went
