@@ -1609,7 +1609,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     patch:
       tags: [sessions]
-      summary: Change the live render resolution / interface scale of a running session (owner or admin).
+      summary: Change the live render resolution / interface scale / (DRAFT) external resolution of a running session (owner or admin).
       description: |
         SESSION-DISPLAY-UPDATE amendment (additive, pre-approved 2026-08-15). Best-effort relay
         to the assigned host's agent-api session_display_update message - modelled directly on
@@ -1618,10 +1618,22 @@ paths:
 
         RENDER RESOLUTION AND UI SCALE ARE EPHEMERAL: agent-held only, never written to the
         sessions table, never present on the Session resource. The encode caps, interpipe
-        boundary, and the session's pinned stream WxH are UNCHANGED by this endpoint - only the
-        compositor's advertised wl_output logical mode and wp_fractional_scale_v1
-        preferred_scale move. Clients read the live values back via session_metrics
-        (agent-api.md) - the only authoritative readback - or keep their own last-acked value.
+        boundary, and the session's pinned stream WxH are UNCHANGED by render_width/render_height/
+        ui_scale - only the compositor's advertised wl_output logical mode and
+        wp_fractional_scale_v1 preferred_scale move. Clients read the live values back via
+        session_metrics (agent-api.md) - the only authoritative readback - or keep their own
+        last-acked value.
+
+        DRAFT SESSION-DISPLAY-STREAM amendment (additive, 2026-08-16, AWAITING SIGN-OFF; do not
+        implement against it until merged). Adds stream_width/stream_height: the EXTERNAL
+        (encoded/streamed) size, independent of render_width/render_height (INTERNAL). Unlike
+        render size, this changes what the encoder actually produces - the coded size moves at
+        the next IDR, with no WebRTC renegotiation. Gated on the assigned host's encoder
+        supporting a live resize (readback: Session.stream.external_resize_supported). Ephemeral
+        like render size, but mirrored into an in-memory control-plane cache
+        (Session.stream.external_width/external_height) for GET convenience; session_metrics
+        remains the sole authoritative readback. See control-api.md for the full
+        INTERNAL-vs-EXTERNAL vocabulary and the fixed stream.rungs table.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -1638,7 +1650,7 @@ paths:
                 required: [session]
                 properties:
                   session: { $ref: "#/components/schemas/Session" }
-        "400": { description: "validation_failed — dims not both-or-neither, dims not even, dims out of [16, session stream WxH], or ui_scale outside [1.0, 3.0].", content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "400": { description: "validation_failed — render_width/render_height not both-or-neither, dims not even, dims out of [16, session pinned LAUNCH WxH] (independent of the current external/stream size, 2026-08-16 amendment), ui_scale outside [1.0, 3.0], or (DRAFT) stream_width/stream_height not both-or-neither or not one of the session's stream.rungs pairs.", content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
           description: Caller is neither owner nor admin.
@@ -1648,7 +1660,10 @@ paths:
           description: >-
             session_not_running - the session's top-level state is not running - or
             display_update_rejected - the agent rejected the update, or no ack arrived within
-            the control plane's command timeout. The session is left untouched in either case.
+            the control plane's command timeout - or (DRAFT session-display-stream, AWAITING
+            SIGN-OFF) external_resize_unsupported - the assigned host's encoder cannot live-resize
+            the stream, only returned when the request includes stream_width/stream_height. The
+            session is left untouched in every case.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/sessions/{id}/trace/clock:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
@@ -3264,6 +3279,57 @@ components:
         codec: { allOf: [ { $ref: "#/components/schemas/Codec" } ], description: "Multi-codec: the resolved session video codec on session.stream; absent on an app's display_stream. Additive; h264 for every pre-multi-codec session. h264_profile applies only when codec is h264." }
         playout0_ms: { type: integer, description: "AS-02: tier-selected initial receiver playout target (ms) on session.stream; absent on an app's display_stream." }
         mic: { type: boolean, description: "Microphone capture (2026-08-02): the GRANTED state on session.stream (request mic AND instance mic_capture_enabled); absent on an app's display_stream and on pre-amendment sessions (absent = false)." }
+        external_width:
+          type: integer
+          description: >-
+            DRAFT session-display-stream (2026-08-16, AWAITING SIGN-OFF). Current EXTERNAL
+            (encoded/streamed) width on session.stream; absent on an app's display_stream.
+            PRESENT WHENEVER THE CONTROL PLANE KNOWS the current external size — i.e. it has seen
+            a 202 from PATCH /v1/sessions/{id}/display or a session_metrics sample reporting it —
+            INCLUDING when that size equals the launch width/height. ABSENT MEANS UNKNOWN (a
+            fresh control plane, or no such signal yet for this session), NOT "at launch size" —
+            do not infer launch size from absence. Ephemeral, in-memory control-plane cache of the
+            last-known value (agent session_metrics is the authoritative source), lost on a
+            control-plane restart until the next 202 or session_metrics sample repopulates it. See
+            control-api.md for the INTERNAL-vs-EXTERNAL vocabulary.
+        external_height:
+          type: integer
+          description: "DRAFT session-display-stream. Pairs with external_width; see its description."
+        external_resize_supported:
+          type: boolean
+          description: >-
+            DRAFT session-display-stream. Whether the assigned host's encoder can live-resize the
+            stream at all (readback of agent-api.md session_metrics.external_resize_supported).
+            Absent until an amendment-aware agent reports = unknown, never false.
+        external_owner:
+          type: string
+          enum: [auto, pinned]
+          description: >-
+            DRAFT abr-resolution-fps-ladder amendment (2026-08-17, AWAITING SIGN-OFF). Who
+            currently owns the live external size on session.stream: "auto" (the host's ABR
+            resolution ladder) or "pinned" (a PATCH /v1/sessions/{id}/display stream_width/
+            stream_height set it to a non-launch size, which suspends the ladder for the rest of
+            the session or until released). Readback of agent-api.md
+            session_metrics.external_owner. PRESENT ONLY WHEN KNOWN AND external_width/
+            external_height differ from the launch width/height — mirrors external_width's
+            presence rule, since the agent reports external_owner only in that same window.
+            Absent on every pre-amendment session and while the external size sits at launch.
+        rungs:
+          type: array
+          description: >-
+            DRAFT session-display-stream. The fixed, aspect-ratio-filtered table of [width,height]
+            pairs this session's stream_width/stream_height may be set to via
+            PATCH /v1/sessions/{id}/display (always <= the launch size, launch size always
+            included). Always present on session.stream for a running session; absent on an app's
+            display_stream. Not the admin-configured stream-profile "rungs" (AS10-01) — a separate,
+            fixed table unrelated to the admin encode-rung catalog. 21:9 family membership is by a
+            set of reduced ratios {43:18, 64:27, 7:3} — 3440x1440 reduces to 43:18, 2560x1080 to
+            64:27 — control-api.md's table is the reference, not a computed tolerance.
+          items:
+            type: array
+            items: { type: integer }
+            minItems: 2
+            maxItems: 2
     AppListItem:
       # UI-P1: kind + favourite are added HERE, so App and AdminApp — which are allOf
       # compositions over this schema — inherit both. There is no read shape that omits them.
@@ -3736,28 +3802,54 @@ components:
       additionalProperties: false
       description: >-
         PATCH /v1/sessions/{id}/display body (session-display-update, additive, pre-approved
-        2026-08-15). At least one property must be present. render_width/render_height are
-        BOTH-OR-NEITHER (the server rejects one without the other with 400 validation_failed).
-        Omitted properties are left unchanged - this is a partial update, not a snapshot. Both
-        dims must be even and within [16, the session's pinned stream width/height]; ui_scale
-        must be within [1.0, 3.0]. Ephemeral - not persisted, not reflected on Session.
+        2026-08-15; stream_width/stream_height added by DRAFT session-display-stream, 2026-08-16,
+        AWAITING SIGN-OFF). At least one property (or both-or-neither pair) must be present.
+        render_width/render_height are BOTH-OR-NEITHER, and independently so are
+        stream_width/stream_height (the server rejects either pair supplied alone with 400
+        validation_failed). Omitted properties are left unchanged - this is a partial update, not
+        a snapshot. render_width/render_height must be even and within [16, the session's pinned
+        LAUNCH width/height]; ui_scale must be within [1.0, 3.0]; stream_width/stream_height
+        (DRAFT) must be even and must resolve to one of the session's stream.rungs pairs (always
+        <= the launch size). (2026-08-16 amendment: render and external/stream size are
+        INDEPENDENT axes - render is bounded only by the pinned launch size, never by the
+        current or any past external size; a stream size below the current render size is
+        downsampled by the encoder from the unchanged render framebuffer, and render is never
+        forced down to match.) Ephemeral - not persisted to the sessions table; stream_width/
+        stream_height (DRAFT) is mirrored into an in-memory cache surfaced as
+        Session.stream.external_width/external_height for GET convenience only.
       properties:
         render_width:
           type: integer
           format: int32
           minimum: 16
-          description: New app-facing wl_output logical width, in pixels. Must be even and ≤ the session's stream width. Requires render_height.
+          description: New app-facing wl_output logical width, in pixels. Must be even and ≤ the session's pinned LAUNCH width, independent of the current external/stream size. Requires render_height.
         render_height:
           type: integer
           format: int32
           minimum: 16
-          description: New app-facing wl_output logical height, in pixels. Must be even and ≤ the session's stream height. Requires render_width.
+          description: New app-facing wl_output logical height, in pixels. Must be even and ≤ the session's pinned LAUNCH height, independent of the current external/stream size. Requires render_width.
         ui_scale:
           type: number
           format: double
           minimum: 1.0
           maximum: 3.0
           description: New wp_fractional_scale_v1 preferred_scale hint pushed to session toplevels.
+        stream_width:
+          type: integer
+          format: int32
+          minimum: 16
+          description: >-
+            DRAFT session-display-stream (AWAITING SIGN-OFF). New EXTERNAL (encoded/streamed)
+            width, in pixels. Must be even and must, together with stream_height, match one of
+            the session's stream.rungs pairs. Requires stream_height. Rejected with
+            409 external_resize_unsupported if the assigned host's encoder cannot live-resize.
+        stream_height:
+          type: integer
+          format: int32
+          minimum: 16
+          description: >-
+            DRAFT session-display-stream (AWAITING SIGN-OFF). Pairs with stream_width; see its
+            description. Requires stream_width.
     LaunchRequest:
       type: object
       required: [app_id]
