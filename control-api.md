@@ -3058,7 +3058,7 @@ and no endpoint that sets either. **The UI renders `error_message` as prose and 
 preformatted** — the two fields have different rendering needs and must not be conflated in a
 client. Neither field is a session-state authority: `state` remains the only progress signal.
 
-#### `stream.external_width` / `external_height` / `external_resize_supported` / `rungs` — live external (encoded) resolution (session-display-stream, DRAFT)
+#### `stream.external_width` / `external_height` / `external_resize_supported` / `external_owner` / `rungs` — live external (encoded) resolution (session-display-stream, DRAFT)
 > *Additive amendment, DRAFT 2026-08-16, AWAITING SIGN-OFF. Extends the `stream` block already
 > returned by session GET/list and by `PATCH /v1/sessions/{id}/display`'s `202` body; no existing
 > `stream` field changes meaning or presence rule. See the vocabulary note at the top of this
@@ -3086,6 +3086,17 @@ The session `stream` block gains:
   external_resize_supported`. **Absent until the agent reports** (older agent, or no sample yet)
   — absence means *unknown*, never `false`. A client that wants a hard answer either waits for a
   sample or attempts the `PATCH` and handles `409 external_resize_unsupported`.
+- **`external_owner`** *(optional string, `"auto"` | `"pinned"`, abr-resolution-fps-ladder
+  amendment, DRAFT 2026-08-17, AWAITING SIGN-OFF)* — who currently owns the current external
+  size: the host's ABR resolution ladder (`"auto"`) or a manual `PATCH` (`"pinned"`, see §Pin /
+  release semantics below). Readback of `agent-api.md` `session_metrics.external_owner`, cached
+  the same way and on the same lifecycle as `external_width`/`external_height` (in-memory only,
+  lost on a control-plane restart). **Present only when known AND `external_width`/
+  `external_height` differ from the launch `width`/`height`** — the agent itself only reports
+  `external_owner` in that same window (there is no meaningful owner of the launch size), so this
+  is a narrower presence rule than `external_width`'s "present whenever known, including at
+  launch". A client renders an "Auto · `external_width`×`external_height`" chip when this reads
+  `"auto"`, a plain size otherwise, and nothing extra when the key is absent.
 - **`rungs`** *(array of `[width, height]` pairs, always present for a `running` session)* — the
   discrete external-resolution steps this session may be set to via
   `PATCH /v1/sessions/{id}/display`, filtered to the launch profile's aspect-ratio family and to
@@ -3303,8 +3314,12 @@ banner at the top of this document. Owner-or-admin (same rule as `DELETE`/`swap`
     already the one value every client can name and every session accepts.
   - The ownership is **agent-held and ephemeral**, like the size itself. It is reported
     back on `session_metrics.external_owner` (`"auto" | "pinned"`, agent-api.md) and is not
-    stored in the `sessions` table. A client renders "Auto · 1920×1080" vs a plain size
-    from that key.
+    stored in the `sessions` table. **The control plane also surfaces it on the `Session`
+    resource as `stream.external_owner`** (abr-resolution-fps-ladder amendment, DRAFT
+    2026-08-17 — see §GET /v1/sessions/{id} above), the same way `external_width`/
+    `external_height` mirror the size — so a client never has to open its own path to
+    `session_metrics` just to render the "Auto ·" chip. A client renders "Auto · 1920×1080"
+    vs a plain size from that key.
   - A PATCH that the agent **rejects** changes neither the size nor the ownership.
   - On a host where the ladder is off (the default), every session is effectively `"auto"`
     until a PATCH pins it — the flag is still reported, and still released the same way.

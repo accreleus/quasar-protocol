@@ -3301,6 +3301,19 @@ components:
             DRAFT session-display-stream. Whether the assigned host's encoder can live-resize the
             stream at all (readback of agent-api.md session_metrics.external_resize_supported).
             Absent until an amendment-aware agent reports = unknown, never false.
+        external_owner:
+          type: string
+          enum: [auto, pinned]
+          description: >-
+            DRAFT abr-resolution-fps-ladder amendment (2026-08-17, AWAITING SIGN-OFF). Who
+            currently owns the live external size on session.stream: "auto" (the host's ABR
+            resolution ladder) or "pinned" (a PATCH /v1/sessions/{id}/display stream_width/
+            stream_height set it to a non-launch size, which suspends the ladder for the rest of
+            the session or until released). Readback of agent-api.md
+            session_metrics.external_owner. PRESENT ONLY WHEN KNOWN AND external_width/
+            external_height differ from the launch width/height — mirrors external_width's
+            presence rule, since the agent reports external_owner only in that same window.
+            Absent on every pre-amendment session and while the external size sits at launch.
         rungs:
           type: array
           description: >-
