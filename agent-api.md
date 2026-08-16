@@ -27,6 +27,23 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > `Session` resource) and are echoed back, when non-default, on `session_metrics` (§`session_metrics`)
 > as the sole authoritative readback. See `control-api.md` `PATCH /v1/sessions/{id}/display`.
 
+> **Amendment — session-display-stream (live external/encoded resolution), additive, DRAFT
+> 2026-08-16, AWAITING SIGN-OFF.** Sibling of `session_display_update`'s render-resolution half:
+> adds `stream_width`/`stream_height` to that same message (§`session_display_update`) and two
+> new optional `session_metrics` fields — `stream_width`/`stream_height` (present when ≠ launch)
+> and `external_resize_supported` (bool, always present from a capable agent; absent from an
+> older one, meaning *unknown*). **Additive** — new optional fields on an existing downstream
+> message and an existing upstream report; no existing field, message, or ack contract changes.
+> Unlike render resolution/UI scale, this pair changes what the **encoder** actually produces —
+> the coded size moves at the **next IDR**, with **no WebRTC renegotiation** (`signaling.md`
+> unchanged) — so it is gated on encoder support: an agent whose encoder cannot live-resize
+> rejects with `ack{ok:false, error:"display_update_rejected: encoder does not support live
+> resize"}` rather than attempting it. See `control-api.md` `PATCH /v1/sessions/{id}/display` for
+> the INTERNAL-vs-EXTERNAL vocabulary and the fixed rung table. **The in-session ABR governor
+> does not drive this yet** — manual/API lever only; a later amendment may add automatic stepping,
+> and this message shape is what it would reuse. **DRAFT — awaiting Michael's sign-off; do not
+> implement against this until it is merged.**
+
 > **Amendment — host-runtime-settings-admin: additive, requires sign-off.** Adds two new
 > downstream (control → node) messages: `config_update` (push the resolved knob block after
 > registration and after every admin change) and `restart` (ask the agent to exit cleanly so
@@ -478,6 +495,19 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   `session_state`, the `Session` resource, or the `sessions` table (both are agent-held,
   ephemeral state); a consumer that wants to know the current render size or UI scale reads the
   latest `session_metrics` sample, or otherwise trusts its own last-acked value.
+- **`stream_width` / `stream_height`** *(optional, session-display-stream, DRAFT)* — the
+  encoder's **current** external/streamed size, present **only when non-default**, i.e. ≠ the
+  session's launch size — same omit-when-default convention as `render_width`/`render_height`
+  above. Set by `session_assign` (default = launch size) and moved only by
+  `session_display_update`'s `stream_width`/`stream_height` (§`session_display_update`). This is
+  the **authoritative** readback the control plane's `Session.stream.external_width`/
+  `external_height` in-memory cache is populated from (`control-api.md`); the cache is a
+  convenience, this sample is the source of truth.
+- **`external_resize_supported`** *(bool, session-display-stream, DRAFT)* — whether this session's
+  encoder can live-resize the stream at all. **Always present from a capable agent** (unlike the
+  omit-when-default fields above, this one is a capability flag, not a value that has a default to
+  omit); **absent from an older agent**, which a consumer treats as *unknown*, not `false`.
+  Readback surfaces as `Session.stream.external_resize_supported` (`control-api.md`).
 - The control plane writes a `session_metrics` row with `source='agent'` (`schema.md`).
   A malformed or unparsable message is dropped without dropping the connection. A sample whose
   `session_id` is not currently `running` on this host (e.g. it arrived as the session went
@@ -730,16 +760,21 @@ does not change the reservation; see `schema.md`):
   **not** be restored; the session is terminal and its reservation is released (the normal `failed`
   path). **Roll back when possible; only fail the session when rollback is impossible.**
 
-### `session_display_update` — live render resolution / UI scale (session-display-update)
+### `session_display_update` — live render resolution / UI scale / external resolution (session-display-update; session-display-stream DRAFT)
 > *Additive amendment. New downstream message; no existing message, field, or ack contract
 > changes. An older agent that does not recognise `session_display_update` treats it as an
 > unknown `type` (existing discipline) — wire-silent, exactly like `image_build` on a P2 agent.*
+>
+> **Amendment — session-display-stream (live external/encoded resolution), additive, DRAFT
+> 2026-08-16, AWAITING SIGN-OFF.** Adds `stream_width`/`stream_height` below. **DRAFT — do not
+> implement against the `stream_width`/`stream_height` fields until this is merged.**
 
 Tells the agent to change a `running` session's **compositor-side app-facing presentation**
-without touching the encode/stream path: the app-facing `wl_output` **logical mode** (the
-"render resolution" the composited scene is produced at, then upscaled into the pinned encode
-framebuffer) and/or the **UI scale** driven to toplevels via `wp_fractional_scale_v1`'s
-`preferred_scale`.
+and/or its **encoded/streamed size**: the app-facing `wl_output` **logical mode** (the "render
+resolution" / INTERNAL size the composited scene is produced at) and/or the **UI scale** driven
+to toplevels via `wp_fractional_scale_v1`'s `preferred_scale` — unchanged from session-display-
+update — and, **DRAFT**, the **EXTERNAL** (encoder) size the composited scene is upscaled into
+before it is streamed.
 ```json
 {
   "type": "session_display_update",
@@ -747,37 +782,68 @@ framebuffer) and/or the **UI scale** driven to toplevels via `wp_fractional_scal
   "session_id": "<uuid>",
   "render_width": 1280,
   "render_height": 720,
-  "ui_scale": 1.5
+  "ui_scale": 1.5,
+  "stream_width": 1920,
+  "stream_height": 1080
 }
 ```
 - `render_width` / `render_height` *(int, optional, both-or-neither)* — the new app-facing
   logical mode, in pixels. Omitted (both) ⇒ unchanged.
 - `ui_scale` *(number, optional)* — the new `preferred_scale` hint. Omitted ⇒ unchanged.
+- **(DRAFT) `stream_width` / `stream_height`** *(int, optional, both-or-neither)* — the new
+  encoder/external size, in pixels. Omitted (both) ⇒ unchanged.
 - **The agent enforces, and rejects out-of-range values for:** `16 ≤ render_width ≤` the
-  session's pinned **stream** width, `16 ≤ render_height ≤` the session's pinned stream height,
-  both **even**; `1.0 ≤ ui_scale ≤ 3.0`. The render size may only be lowered relative to the
-  stream size (never raised past it) — the composited scene is always upscaled into, never
-  downscaled past, the encode framebuffer.
-- **Encode caps, interpipe, and stream `WxH` are NOT changed by this message.** Only the
-  compositor's advertised `wl_output` mode and `preferred_scale` move; the pinned encode
-  resolution, bitrate ladder, and codec are exactly as `session_assign` (and any subsequent
-  `session_swap_app`) left them.
+  session's **current external** width, `16 ≤ render_height ≤` the session's current external
+  height, both **even**; `1.0 ≤ ui_scale ≤ 3.0`. The render size may only be lowered relative to
+  the current external size (never raised past it) — the composited scene is always upscaled
+  into, never downscaled past, the encode framebuffer. (Before session-display-stream existed,
+  "current external" was always the pinned launch stream size, since nothing could move it; the
+  rule itself is unchanged, only what bounds it can now move.)
+- **(DRAFT) The agent additionally enforces, for `stream_width`/`stream_height`:** both **even**,
+  `16 ≤` each `≤` the session's **launch** stream width/height, and — **the load-bearing new
+  check** — that its own encoder actually **supports a live resize**. An encoder that does not
+  (e.g. a hardware encoder whose driver requires a full re-init to change coded size) rejects
+  every `stream_width`/`stream_height` request outright, regardless of value, with
+  `ack{ok:false, error:"display_update_rejected: encoder does not support live resize"}`. A
+  capable encoder that rejects only because of an out-of-range value follows the same
+  `display_update_rejected: <reason>` convention as the render-size rejection below. If the new
+  external size is **below** the current render size, the agent **clamps the render size down**
+  to match (never raises it) as part of applying the update — the "may only be lowered relative
+  to the current external size" rule above, enforced proactively rather than left to reject the
+  render fields on a later, separate call.
+- **Encode caps, interpipe, and (absent `stream_width`/`stream_height`) stream `WxH` are NOT
+  changed by this message.** Only the compositor's advertised `wl_output` mode and
+  `preferred_scale` move by default; the pinned encode resolution, bitrate ladder, and codec are
+  exactly as `session_assign` (and any subsequent `session_swap_app`) left them **unless**
+  `stream_width`/`stream_height` is present, in which case (DRAFT) the coded size — and only the
+  coded size, never the bitrate ladder or codec — moves at the **next IDR**. No renegotiation:
+  the `webrtcbin`/DataChannel/ICE state is untouched (`signaling.md` unchanged); the client
+  `<video>` element follows the new coded size automatically.
 - **Ack semantics — same contract as `session_swap_app` (differs from assign/start).** The
   agent replies `ack{ id, ok, error? }`:
   - `ack{ok:true}` — the values (whichever were present) were validated and applied.
   - **`ack{ok:false, error}` — the agent rejected the command (e.g.
-    `display_update_rejected: render_height 8 below floor 16`). The session is left running
-    with its *previous* render size / UI scale and stays `running` — the update is a no-op.**
-    A rejected `session_display_update` **never fails the session and never changes session
-    state**, exactly like a rejected swap.
-- **Ephemeral, agent-held state.** Neither value is stored in the `sessions` table or exposed on
-  the `Session` resource (`control-api.md`) — the agent is the sole holder between messages. The
-  **only** authoritative readback is `session_metrics` (§`session_metrics`, below), never
-  `session_state` and never the `Session` resource.
+    `display_update_rejected: render_height 8 below floor 16`, or, DRAFT,
+    `display_update_rejected: encoder does not support live resize`). The session is left running
+    with its *previous* render size / UI scale / external size and stays `running` — the update
+    is a no-op.** A rejected `session_display_update` **never fails the session and never changes
+    session state**, exactly like a rejected swap.
+- **Ephemeral, agent-held state.** No value here is stored in the `sessions` table; render size
+  and UI scale are never exposed on the `Session` resource, while (DRAFT) the external size is
+  additionally mirrored into an **in-memory, best-effort** control-plane cache
+  (`Session.stream.external_width`/`external_height`, `control-api.md`) purely for `GET`
+  convenience — the agent remains the sole authoritative holder for all three. The **only**
+  authoritative readback for any of them is `session_metrics` (§`session_metrics`, above), never
+  `session_state` and never the `Session` resource being treated as a source of truth.
 - **Any host may receive this message** — an older agent that does not understand
   `session_display_update` silently ignores it (unknown `type` ⇒ unknown enum variant on
   deserialize, the same wire-silent behavior documented for `image_build`/`config_update`). The
   control plane treats the absence of an `ack` within its normal command timeout as a rejection.
+  **(DRAFT)** An agent that recognises `session_display_update` but predates session-display-
+  stream ignores unknown `stream_width`/`stream_height` fields on deserialize (additive-field
+  discipline) and behaves exactly as a session-display-update-only agent — i.e. it never resizes
+  the stream and never sets `external_resize_supported` on `session_metrics`, which a caller
+  correctly reads as *unknown*.
 
 ### `config_update` — push host override knobs (host-runtime-settings-admin)
 > *Additive amendment. New downstream message; no change to any existing message. Fire-and-

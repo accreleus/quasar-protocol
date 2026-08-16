@@ -44,6 +44,31 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > live values back via `session_metrics` (`agent-api.md`), or keep their own last-acked value. See
 > `agent-api.md` §`session_display_update`. **Stops at the contract.**
 
+> **Amendment — session-display-stream (live external/encoded resolution), additive, DRAFT
+> 2026-08-16, AWAITING SIGN-OFF.** Sibling of `session-display-update` (2026-08-15), for the
+> **other** half of the resolution vocabulary this repo now needs two words for:
+> - **INTERNAL resolution** — the app-facing `wl_output` logical mode `session-display-update`
+>   already controls (`render_width`/`render_height`). What the composited scene is *produced* at.
+> - **EXTERNAL resolution** — what is actually **encoded and streamed** to the client: the new
+>   `stream_width`/`stream_height` this amendment adds. What the composited scene is *upscaled
+>   into* before it reaches the encoder.
+> Both are independent, live, ephemeral knobs, and both stay `≤` the session's **launch** size
+> (the `stream` block as `session_assign` first set it — `session-display-update` never moved it
+> and still doesn't); INTERNAL additionally stays `≤` the **current** EXTERNAL size (the existing
+> rule, restated because "current" now moves). Extends `PATCH /v1/sessions/{id}/display`
+> (§Sessions) with `stream_width`/`stream_height` (both-or-neither, must resolve to one of the
+> session's `stream.rungs` — see §Sessions §`GET /v1/sessions/{id}`) and one error code,
+> `external_resize_unsupported` (409). **Purely additive:** new request/response fields and a new
+> code on an already-additive endpoint; no existing field, status code, or shape changes. Unlike
+> `session-display-update`, this changes what the **encoder** actually produces — the coded size
+> moves at the **next IDR**, with **no WebRTC renegotiation** (`signaling.md` unchanged; the
+> client `<video>` element follows the new coded size on its own) — so it is gated on the
+> assigned host's encoder supporting a live resize (readback: `stream.external_resize_supported`,
+> below). **The in-session ABR governor does not drive this yet** — it is a manual/API lever
+> only; a later amendment may add automatic external-size stepping, and this message shape is
+> what it would reuse. See `agent-api.md` §`session_display_update` / §`session_metrics`.
+> **DRAFT — awaiting Michael's sign-off; do not implement against this until it is merged.**
+
 > **Amendment — P3-01 (host-lifecycle + multi-host scheduling), additive, requires sign-off.**
 > Adds the host drain/cordon admin operations `POST /v1/hosts/{id}/drain` and
 > `POST /v1/hosts/{id}/uncordon` (§Hosts), two Authorization rows (both **admin**), and the
@@ -1035,7 +1060,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/apps`, `GET /v1/apps/{id}` | user | the library — **both reads require auth** *(UI-P1: the list was public until 2026-07-27; see the breaking-change amendment. `favourite` is resolved from the bearer identity, so an anonymous read could not answer it anyway)*. **(Phase 2: both are now entitlement-scoped — the list for every role including admin, the single read for non-admins as a `404`. This is not a role gate and produces no `403`; an entitlement is a per-subject grant, not a role. The unfiltered catalogue is `GET /v1/admin/apps`.)** |
 | `GET /v1/sessions/{id}`, `GET /v1/sessions`, `DELETE /v1/sessions/{id}` | **owner or admin** | resource-ownership check (`403` otherwise), not a blanket admin gate |
 | `POST /v1/sessions/{id}/swap` | **owner or admin** | *(P2-02)* same ownership check as `DELETE`. **(Phase 2: additionally `403 forbidden` when the **session owner** is not entitled to the target app — keyed on the owner, never on the caller, so an admin swapping someone else's session cannot launder their own entitlements into it)** |
-| `PATCH /v1/sessions/{id}/display` | **owner or admin** | *(session-display-update)* live render resolution / UI scale change — same ownership check as `DELETE`/`swap`; best-effort relay to the host agent, no session-state transition |
+| `PATCH /v1/sessions/{id}/display` | **owner or admin** | *(session-display-update; DRAFT session-display-stream adds external/stream resolution)* live render resolution / UI scale (and, DRAFT, external/encoded resolution) change — same ownership check as `DELETE`/`swap`; best-effort relay to the host agent, no session-state transition |
 | `POST /v1/sessions/{id}/stats` | **owner or admin** | *(P4-01)* the client posts its own session's browser telemetry — same ownership check as `DELETE` |
 | `GET /v1/admin/sessions/{id}/metrics` | **admin** | *(P4-01)* per-session telemetry read (oversight) |
 | `POST /v1/me/devices` | user (self) | *(P4-01)* upsert the caller's own device capability; owner is the bearer identity, never a body field |
@@ -3029,6 +3054,44 @@ and no endpoint that sets either. **The UI renders `error_message` as prose and 
 preformatted** — the two fields have different rendering needs and must not be conflated in a
 client. Neither field is a session-state authority: `state` remains the only progress signal.
 
+#### `stream.external_width` / `external_height` / `external_resize_supported` / `rungs` — live external (encoded) resolution (session-display-stream, DRAFT)
+> *Additive amendment, DRAFT 2026-08-16, AWAITING SIGN-OFF. Extends the `stream` block already
+> returned by session GET/list and by `PATCH /v1/sessions/{id}/display`'s `202` body; no existing
+> `stream` field changes meaning or presence rule. See the vocabulary note at the top of this
+> document and `openapi.yaml` `Stream`.*
+
+The session `stream` block gains:
+- **`external_width` / `external_height`** *(optional int)* — the session's **current**
+  encoded/streamed size, present **only when it differs from the launch size** (`stream.width`/
+  `stream.height`, which remain "the truth of the profile" and never move — `session-display-
+  update` never touched them and this amendment doesn't either). Set by `session_assign`
+  (default = launch size, hence absent) and moved only by `PATCH /v1/sessions/{id}/display`'s
+  `stream_width`/`stream_height`. Like `session-display-update`'s render size, this pair is
+  **ephemeral** — not written to the `sessions` table — but the control plane keeps an
+  **in-memory cache of the last-acked value** (populated from the agent's `session_metrics`,
+  `agent-api.md`) so a `GET` between updates still reflects the current external size without a
+  client having to remember it; **a control-plane restart drops the cache** until the next
+  `session_metrics` sample repopulates it.
+- **`external_resize_supported`** *(optional bool)* — whether the assigned host's encoder can
+  live-resize the stream at all; readback of `agent-api.md` `session_metrics.
+  external_resize_supported`. **Absent until the agent reports** (older agent, or no sample yet)
+  — absence means *unknown*, never `false`. A client that wants a hard answer either waits for a
+  sample or attempts the `PATCH` and handles `409 external_resize_unsupported`.
+- **`rungs`** *(array of `[width, height]` pairs, always present for a `running` session)* — the
+  discrete external-resolution steps this session may be set to via
+  `PATCH /v1/sessions/{id}/display`, filtered to the launch profile's aspect-ratio family and to
+  sizes `≤` the launch size (the launch size is always one of the listed pairs). The fixed rung
+  table, by family:
+  - **16:9** — 3840x2160, 2560x1440, 1920x1080, 1600x900, 1280x720
+  - **16:10** — 2560x1600, 1920x1200, 1680x1050, 1440x900, 1280x800
+  - **21:9** — 3440x1440, 2560x1080
+  - **4:3** — 1600x1200, 1280x960, 1024x768
+  `stream_width`/`stream_height` on `PATCH /v1/sessions/{id}/display` MUST be one of these pairs
+  (after filtering to `≤` launch) or the request is `400 validation_failed` — see
+  §`PATCH /v1/sessions/{id}/display`. **Not to be confused with the admin-configured stream-profile
+  "rungs"** (§Stream profiles, AS10-01) — this is a fixed, aspect-ratio-derived table for live
+  external-resize, unrelated to the admin encode-rung catalog and not itself admin-editable.
+
 ### `GET /v1/sessions/{id}/events` — session lifecycle push (SSE, 2026-08-02)
 > *Additive amendment — one new read-only endpoint, no existing shape changes. Signed off
 > alongside the game-exit lifecycle work; exists to replace client lifecycle POLLING with
@@ -3127,40 +3190,71 @@ interpipe boundary while encode + `webrtcbin` stay up, so the browser stream nev
 > assigned host's agent that never transitions session state and whose rejection is always a
 > no-op.*
 
-Lowers (or restores) the **app-facing compositor render resolution** of a live session's `wl_output`
-logical mode, and/or pushes a new **UI scale** (`wp_fractional_scale_v1 preferred_scale`) to its
-toplevels — **without** touching the encode caps, the interpipe boundary, or the session's pinned
-**stream** `WxH`. The composited scene, produced at the (possibly lower) render size, is upscaled
-into the unchanged encode framebuffer. Owner-or-admin (same rule as `DELETE`/`swap`).
+> **Amendment — session-display-stream (live external/encoded resolution), additive, DRAFT
+> 2026-08-16, AWAITING SIGN-OFF.** Adds `stream_width`/`stream_height` to the request body (below)
+> and `409 external_resize_unsupported` to this endpoint's error set. See the vocabulary note at
+> the top of this document. **DRAFT — do not implement against this section until it is merged.**
+
+Lowers (or restores) the **INTERNAL** (app-facing compositor `wl_output` logical mode) and/or
+**EXTERNAL** (encoded/streamed) resolution of a live session, and/or pushes a new **UI scale**
+(`wp_fractional_scale_v1 preferred_scale`) to its toplevels. INTERNAL and EXTERNAL are
+independent request-field pairs on the same endpoint — see the vocabulary note in the amendment
+banner at the top of this document. Owner-or-admin (same rule as `DELETE`/`swap`).
 ```json
-// request — at least one field; render_width/render_height are both-or-neither
-{ "render_width": 1280, "render_height": 720, "ui_scale": 1.5 }
-// 202 — accepted; agent is applying it. Body is the current session (unchanged shape).
+// request — at least one field/pair; render_width/render_height and stream_width/stream_height
+// are each both-or-neither, independently of one another
+{ "render_width": 1280, "render_height": 720, "ui_scale": 1.5, "stream_width": 1920, "stream_height": 1080 }
+// 202 — accepted; agent is applying it. Body is the current session (stream gains optional
+// external_width/external_height/external_resize_supported/rungs — see §GET /v1/sessions/{id}).
 { "session": {
     "id": "<uuid>", "app_id": "<uuid>",
     "state": "running", "state_detail": "running", "error_message": null,
-    "stream": { "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 15000, "h264_profile": "main" },
+    "stream": { "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 15000, "h264_profile": "main",
+                "external_resize_supported": true, "rungs": [[1920,1080],[1600,900],[1280,720]] },
     "created_at": "...", "started_at": "...", "ended_at": null
   } }
 ```
 - **Async, best-effort relay — like swap, but with no state-machine involvement at all.** The
   control plane validates the request, sends `session_display_update` (`agent-api.md`) to the
   assigned host, and returns `202`. **No `state` or `state_detail` transition accompanies this
-  call** — unlike swap there is no `swapping`-style detail to poll, because render size / UI scale
-  are not part of the session state machine (`schema.md`).
-- **Render resolution and UI scale are EPHEMERAL.** Neither value is written to the `sessions`
-  table, and neither appears on the `Session` resource returned here or by `GET /v1/sessions/{id}`
-  — the response body's `Session` shape is **completely unchanged** by this endpoint. A client
-  reads the live values back from `session_metrics` (`agent-api.md` — the *only* authoritative
-  readback), or keeps its own last-acked value.
-- **The encoded stream resolution does not change.** `stream.width`/`stream.height` (and the rest
-  of the `stream` block) are exactly as the session was launched (and any subsequent swap) left
-  them; this endpoint cannot raise the render size above the stream size, and never resizes,
-  re-negotiates, or renegotiates the encode/transport in any way.
-- **Validation (`400 validation_failed`):** `render_width`/`render_height` supplied together or
-  not at all; both **even**; `16 ≤ render_width ≤` the session's stream `width` and
-  `16 ≤ render_height ≤` the session's stream `height`; `ui_scale`, if present, within
-  `[1.0, 3.0]`. At least one of `render_width`+`render_height` or `ui_scale` must be present.
+  call** — unlike swap there is no `swapping`-style detail to poll, because neither render size,
+  UI scale, nor (DRAFT) external/stream size are part of the session state machine (`schema.md`).
+- **Render resolution and UI scale are EPHEMERAL** (unchanged from session-display-update).
+  Neither value is written to the `sessions` table, and neither appears on the `Session` resource
+  returned here or by `GET /v1/sessions/{id}`. A client reads the live values back from
+  `session_metrics` (`agent-api.md` — the *only* authoritative readback), or keeps its own
+  last-acked value.
+- **(DRAFT) External/stream resolution is also EPHEMERAL, with one difference:** it changes what
+  is actually **encoded**, so the control plane keeps an **in-memory cache of the last-acked
+  external size** and surfaces it on the `Session` resource as `stream.external_width` /
+  `stream.external_height` (present only when ≠ launch — see §GET /v1/sessions/{id}) purely for
+  UI convenience; it is still not written to the `sessions` table, and the cache is lost on a
+  control-plane restart until the next `session_metrics` sample repopulates it. `session_metrics`
+  remains the sole *authoritative* readback, same as render size.
+- **(DRAFT) Semantics of `stream_width`/`stream_height`:** changes the **coded size** — what is
+  encoded and streamed — at the **next IDR**; there is **no WebRTC renegotiation**
+  (`signaling.md` unchanged), the client `<video>` element simply follows the new coded size.
+  `stream.width`/`stream.height` (the launch size, "the truth of the profile") are **never**
+  affected by this call. The app-facing (INTERNAL) size is unaffected **unless** the current
+  `render_width`/`render_height` exceeds the new external size, in which case the agent clamps
+  the render size down to match (never up) — the composited scene is always upscaled into, never
+  downscaled past, the encode framebuffer, exactly as session-display-update's INTERNAL-vs-launch
+  rule already required, restated here because "the ceiling" now moves.
+- **The encoded stream resolution does not change unless `stream_width`/`stream_height` is
+  present.** Absent, `stream.width`/`stream.height` (and the rest of the `stream` block) stay
+  exactly as the session was launched (and any subsequent swap) left them.
+- **Validation (`400 validation_failed`):**
+  - `render_width`/`render_height` supplied together or not at all; both **even**; `16 ≤
+    render_width ≤` the session's **current EXTERNAL** width and `16 ≤ render_height ≤` the
+    session's current EXTERNAL height (previously "stream width/height" — now stated as
+    "current external", since session-display-stream (DRAFT) is what makes that value move);
+    `ui_scale`, if present, within `[1.0, 3.0]`.
+  - **(DRAFT)** `stream_width`/`stream_height` supplied together or not at all; the pair MUST be
+    one of the session's `stream.rungs` (§GET /v1/sessions/{id}) — the fixed, aspect-ratio-filtered
+    table, always `≤` the launch size. A pair not on that list (wrong aspect family, above launch,
+    or simply not a listed rung) is `400 validation_failed`.
+  - At least one of `render_width`+`render_height`, `ui_scale`, or (DRAFT) `stream_width`+
+    `stream_height` must be present.
 - **Errors:**
   - `404 not_found` — no such session. **Checked before the ownership check**, so a non-owner
     cannot use this endpoint to probe whether a session id exists.
@@ -3171,9 +3265,15 @@ into the unchanged encode framebuffer. Owner-or-admin (same rule as `DELETE`/`sw
     the control plane's normal command timeout. **The session is left untouched in every
     rejection** — same no-op contract as a rejected swap; this call never fails or changes the
     session's `state`/`state_detail`.
-- **Semantics recap:** this is a live, best-effort **presentation** knob relayed to the host agent
-  — not a resize, not a renegotiation, not a session-state transition, and not persisted anywhere
-  in the control plane.
+  - **(DRAFT) `409 external_resize_unsupported`** — the assigned host's encoder cannot live-resize
+    the stream at all (`stream.external_resize_supported` reads `false`, or the agent's ack said
+    so). Only returned for a request that includes `stream_width`/`stream_height`; a
+    render-size-only or ui-scale-only request never sees this code. Like every other rejection on
+    this endpoint, the session is left untouched.
+- **Semantics recap:** this is a live, best-effort **presentation** (and, DRAFT, **encode-size**)
+  knob relayed to the host agent — not a renegotiation, not a session-state transition, and (aside
+  from the DRAFT external-size cache, which is a convenience readback, not the source of truth)
+  not persisted anywhere in the control plane.
 
 ---
 
