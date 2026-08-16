@@ -1650,7 +1650,7 @@ paths:
                 required: [session]
                 properties:
                   session: { $ref: "#/components/schemas/Session" }
-        "400": { description: "validation_failed — render_width/render_height not both-or-neither, dims not even, dims out of [16, session current EXTERNAL WxH], ui_scale outside [1.0, 3.0], or (DRAFT) stream_width/stream_height not both-or-neither or not one of the session's stream.rungs pairs.", content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "400": { description: "validation_failed — render_width/render_height not both-or-neither, dims not even, dims out of [16, session pinned LAUNCH WxH] (independent of the current external/stream size, 2026-08-16 amendment), ui_scale outside [1.0, 3.0], or (DRAFT) stream_width/stream_height not both-or-neither or not one of the session's stream.rungs pairs.", content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
           description: Caller is neither owner nor admin.
@@ -3794,10 +3794,14 @@ components:
         render_width/render_height are BOTH-OR-NEITHER, and independently so are
         stream_width/stream_height (the server rejects either pair supplied alone with 400
         validation_failed). Omitted properties are left unchanged - this is a partial update, not
-        a snapshot. render_width/render_height must be even and within [16, the session's CURRENT
-        EXTERNAL width/height]; ui_scale must be within [1.0, 3.0]; stream_width/stream_height
+        a snapshot. render_width/render_height must be even and within [16, the session's pinned
+        LAUNCH width/height]; ui_scale must be within [1.0, 3.0]; stream_width/stream_height
         (DRAFT) must be even and must resolve to one of the session's stream.rungs pairs (always
-        <= the launch size). Ephemeral - not persisted to the sessions table; stream_width/
+        <= the launch size). (2026-08-16 amendment: render and external/stream size are
+        INDEPENDENT axes - render is bounded only by the pinned launch size, never by the
+        current or any past external size; a stream size below the current render size is
+        downsampled by the encoder from the unchanged render framebuffer, and render is never
+        forced down to match.) Ephemeral - not persisted to the sessions table; stream_width/
         stream_height (DRAFT) is mirrored into an in-memory cache surfaced as
         Session.stream.external_width/external_height for GET convenience only.
       properties:
@@ -3805,12 +3809,12 @@ components:
           type: integer
           format: int32
           minimum: 16
-          description: New app-facing wl_output logical width, in pixels. Must be even and ≤ the session's current EXTERNAL width. Requires render_height.
+          description: New app-facing wl_output logical width, in pixels. Must be even and ≤ the session's pinned LAUNCH width, independent of the current external/stream size. Requires render_height.
         render_height:
           type: integer
           format: int32
           minimum: 16
-          description: New app-facing wl_output logical height, in pixels. Must be even and ≤ the session's current EXTERNAL height. Requires render_width.
+          description: New app-facing wl_output logical height, in pixels. Must be even and ≤ the session's pinned LAUNCH height, independent of the current external/stream size. Requires render_width.
         ui_scale:
           type: number
           format: double

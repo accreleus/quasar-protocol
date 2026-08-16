@@ -54,8 +54,12 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 >   into* before it reaches the encoder.
 > Both are independent, live, ephemeral knobs, and both stay `≤` the session's **launch** size
 > (the `stream` block as `session_assign` first set it — `session-display-update` never moved it
-> and still doesn't); INTERNAL additionally stays `≤` the **current** EXTERNAL size (the existing
-> rule, restated because "current" now moves). Extends `PATCH /v1/sessions/{id}/display`
+> and still doesn't). **(2026-08-16 amendment) INTERNAL and EXTERNAL are independent axes, full
+> stop** — INTERNAL is bounded ONLY by the launch size, never by the current or any past EXTERNAL
+> size. EXTERNAL may sit below the current INTERNAL size; the encoder downsamples the (unchanged)
+> render framebuffer, and the app never sees a mode change. This supersedes an earlier draft of
+> this amendment that also clamped INTERNAL to the current EXTERNAL size. Extends
+> `PATCH /v1/sessions/{id}/display`
 > (§Sessions) with `stream_width`/`stream_height` (both-or-neither, must resolve to one of the
 > session's `stream.rungs` — see §Sessions §`GET /v1/sessions/{id}`) and one error code,
 > `external_resize_unsupported` (409). **Purely additive:** new request/response fields and a new
@@ -3247,20 +3251,22 @@ banner at the top of this document. Owner-or-admin (same rule as `DELETE`/`swap`
   encoded and streamed — at the **next IDR**; there is **no WebRTC renegotiation**
   (`signaling.md` unchanged), the client `<video>` element simply follows the new coded size.
   `stream.width`/`stream.height` (the launch size, "the truth of the profile") are **never**
-  affected by this call. The app-facing (INTERNAL) size is unaffected **unless** the current
-  `render_width`/`render_height` exceeds the new external size, in which case the agent clamps
-  the render size down to match (never up) — the composited scene is always upscaled into, never
-  downscaled past, the encode framebuffer, exactly as session-display-update's INTERNAL-vs-launch
-  rule already required, restated here because "the ceiling" now moves.
+  affected by this call. **The app-facing (INTERNAL/render) size is never affected by this call
+  either (2026-08-16 amendment):** render and external/stream size are independent axes, each
+  bounded only by the session's pinned LAUNCH size, never by each other. When the external size
+  lands below the current render size, the encoder's scale stage simply downsamples the
+  (unchanged) render framebuffer into the smaller encoded frame — the app never sees a mode
+  change from a stream-only update, and stepping the external size back up later is a
+  passthrough. This replaces the earlier "agent clamps the render size down to match" rule.
 - **The encoded stream resolution does not change unless `stream_width`/`stream_height` is
   present.** Absent, `stream.width`/`stream.height` (and the rest of the `stream` block) stay
   exactly as the session was launched (and any subsequent swap) left them.
 - **Validation (`400 validation_failed`):**
   - `render_width`/`render_height` supplied together or not at all; both **even**; `16 ≤
-    render_width ≤` the session's **current EXTERNAL** width and `16 ≤ render_height ≤` the
-    session's current EXTERNAL height (previously "stream width/height" — now stated as
-    "current external", since session-display-stream (DRAFT) is what makes that value move);
-    `ui_scale`, if present, within `[1.0, 3.0]`.
+    render_width ≤` the session's **pinned LAUNCH** width and `16 ≤ render_height ≤` the
+    session's pinned LAUNCH height (2026-08-16 amendment: render is bounded only by the launch
+    size — independent of the external/stream size entirely, never by "current external"); `ui_scale`,
+    if present, within `[1.0, 3.0]`.
   - **(DRAFT)** `stream_width`/`stream_height` supplied together or not at all; the pair MUST be
     one of the session's `stream.rungs` (§GET /v1/sessions/{id}) — the fixed, aspect-ratio-filtered
     table, always `≤` the launch size. A pair not on that list (wrong aspect family, above launch,

@@ -793,12 +793,11 @@ before it is streamed.
 - **(DRAFT) `stream_width` / `stream_height`** *(int, optional, both-or-neither)* — the new
   encoder/external size, in pixels. Omitted (both) ⇒ unchanged.
 - **The agent enforces, and rejects out-of-range values for:** `16 ≤ render_width ≤` the
-  session's **current external** width, `16 ≤ render_height ≤` the session's current external
-  height, both **even**; `1.0 ≤ ui_scale ≤ 3.0`. The render size may only be lowered relative to
-  the current external size (never raised past it) — the composited scene is always upscaled
-  into, never downscaled past, the encode framebuffer. (Before session-display-stream existed,
-  "current external" was always the pinned launch stream size, since nothing could move it; the
-  rule itself is unchanged, only what bounds it can now move.)
+  session's **pinned LAUNCH** width, `16 ≤ render_height ≤` the session's pinned LAUNCH height,
+  both **even**; `1.0 ≤ ui_scale ≤ 3.0`. (2026-08-16 amendment: render and external/stream size
+  are **independent axes** — render is bounded only by the session's pinned launch size, never by
+  the current or any past external size. This replaces the earlier "render ≤ current external,
+  never raised past it" rule.)
 - **(DRAFT) The agent additionally enforces, for `stream_width`/`stream_height`:** both **even**,
   `16 ≤` each `≤` the session's **launch** stream width/height, and — **the load-bearing new
   check** — that its own encoder actually **supports a live resize**. An encoder that does not
@@ -806,11 +805,11 @@ before it is streamed.
   every `stream_width`/`stream_height` request outright, regardless of value, with
   `ack{ok:false, error:"display_update_rejected: encoder does not support live resize"}`. A
   capable encoder that rejects only because of an out-of-range value follows the same
-  `display_update_rejected: <reason>` convention as the render-size rejection below. If the new
-  external size is **below** the current render size, the agent **clamps the render size down**
-  to match (never raises it) as part of applying the update — the "may only be lowered relative
-  to the current external size" rule above, enforced proactively rather than left to reject the
-  render fields on a later, separate call.
+  `display_update_rejected: <reason>` convention as the render-size rejection above. If the new
+  external size lands **below** the current render size, the agent does **not** touch the render
+  size — the encoder's scale stage simply downsamples the (unchanged, larger) compositor
+  framebuffer into the smaller encoded frame; the app never sees a mode change from a
+  stream-only update, and stepping the external size back up later is a passthrough.
 - **Encode caps, interpipe, and (absent `stream_width`/`stream_height`) stream `WxH` are NOT
   changed by this message.** Only the compositor's advertised `wl_output` mode and
   `preferred_scale` move by default; the pinned encode resolution, bitrate ladder, and codec are
