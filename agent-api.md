@@ -527,6 +527,16 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   frame rate when the fps rung has stepped below the session's launch fps. **Present only
   when below the launch fps.** Emitted since the fps rung shipped (2026-08-17); absent on
   hosts where the rung is disabled or inert.
+- **(approved 2026-08-17) `abr_floor_kbps`** *(number, optional)* — the ABR governor's
+  **current** lower bound in kbit/s, when the adaptation ladder has moved it off the floor
+  the session launched with. **Present only when ≠ the launch floor**; absent therefore
+  means "the floor this session launched with", never "unknown" — the same
+  omit-when-default convention as `ladder_fps` above. The companion to
+  `abr_setpoint_kbps`: without it a consumer cannot tell a setpoint that was *chosen* from
+  one that is *pinned at the floor*, because since the floor-follows-rung amendment the
+  floor is not a session constant. Signal-only for the control plane — nothing server-side
+  reacts to it; it is stored verbatim into the metrics JSONB for the diagnostic bundle and
+  soak reports.
 - The control plane writes a `session_metrics` row with `source='agent'` (`schema.md`).
   A malformed or unparsable message is dropped without dropping the connection. A sample whose
   `session_id` is not currently `running` on this host (e.g. it arrived as the session went
