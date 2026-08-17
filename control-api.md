@@ -3785,6 +3785,15 @@ ownership rule as `POST /v1/sessions/{id}/stats`; non-owner `403`, unknown id `4
 Best-effort: a malformed event is dropped, not fataled. Accepting trace events never affects
 session state.
 
+**`bench.window` is instrument-only.** It is emitted solely by the SPA's bench mode
+(`?bench=1`), which decodes the `quasar-benchapp` per-frame marker in the page and posts one
+aggregate per second; an ordinary user session never emits it. Its payload is free-form like
+every other event payload — deliberately NOT a persisted stats key, because the browser stats
+series is allow-listed per `schema.md` and a measurement instrument must not extend that
+contract. Additive: no existing event's shape changes, and a control plane that does not know
+the type simply drops it (the bench harness therefore also reads its windows straight out of
+the page, and does not depend on this ingest path).
+
 ### `POST /v1/sessions/{id}/trace/clock` — client posts a clock-offset estimate
 The browser reports its client↔host clock-offset estimate (from the deep-trace ping/pong sync)
 for **its** live session. Owner-or-admin (same ownership rule as the trace-events POST). Returns

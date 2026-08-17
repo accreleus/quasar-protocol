@@ -5524,7 +5524,7 @@ components:
             required: [ts_unix_ms, type]
             properties:
               ts_unix_ms: { type: integer }
-              type: { type: string, enum: [playout.changed, client.freeze_detected, client.visibility_changed, webrtc.state_changed] }
+              type: { type: string, enum: [playout.changed, client.freeze_detected, client.visibility_changed, webrtc.state_changed, bench.window] }
               payload: { type: object, additionalProperties: true }
     TraceClockRequest:
       type: object
