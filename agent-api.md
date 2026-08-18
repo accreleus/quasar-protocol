@@ -537,6 +537,41 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   floor is not a session constant. Signal-only for the control plane — nothing server-side
   reacts to it; it is stored verbatim into the metrics JSONB for the diagnostic bundle and
   soak reports.
+- **(approved 2026-08-19) host-stage latency probe keys** — eleven optional numeric
+  fields, emitted only while the node-agent's host-stage latency probe is enabled
+  (`QUASAR_LATENCY_PROBE=1`, or the `latency_probe` host setting — Live class). All
+  values are milliseconds on the host monotonic clock, aggregated over `window_ms`.
+  The nine stage keys are absent when the probe is off **and** absent for any window in
+  which that stage collected no sample — absent means "not measured", never zero (the
+  `abr_floor_kbps` convention):
+  - **`probe_capture_to_enc_in_p50_ms`** / **`probe_capture_to_enc_in_p95_ms`** — per-frame
+    elapsed from the compositor element's src pad push to the encoder's sink pad,
+    correlated on buffer PTS (interpipe boundary + leaky queue + GPU convert/scale).
+  - **`probe_enc_out_to_send_p50_ms`** / **`probe_enc_out_to_send_p95_ms`** — encoder src
+    pad to that frame's access unit leaving the post-`rtpbin` egress seam (immediately
+    before SRTP). Differs from `probe_pay_to_send_*` by the parser + payloader cost.
+  - **`probe_pay_to_send_p50_ms`** / **`probe_pay_to_send_p95_ms`** — first RTP packet of
+    an access unit at the payloader to that access unit's marker packet at the egress
+    seam (RTP session processing, TWCC insertion, pacer).
+  - **`probe_pts_to_emit_p50_ms`** / **`probe_pts_to_emit_p95_ms`** — pipeline clock time
+    at the compositor src pad push minus the buffer's PTS (mapped through base time): the
+    compositor's own internal hold.
+  - **`probe_compositor_frame_interval_p95_ms`** — p95 wall-clock interval between
+    consecutive buffers at the compositor src pad (realized cadence; contrast
+    `compositor_pts_delta_p95_ms`, which is PTS-derived and reports the nominal).
+  - **`probe_send_desyncs`** / **`probe_pts_unmatched`** *(number, optional)* — the
+    probe's own diagnostic counters for the window: encoder-src entries dropped without a
+    pair (depth cap or age bound), and encoder-input buffers whose PTS the compositor ring
+    did not hold. **These two deliberately break the absent-means-not-measured
+    convention:** they are present whenever the probe is armed, *including as `0`*,
+    because a zero is the machine-readable statement "this stage is healthy" and absence
+    is the statement "the probe is off". Without them a sparse stage has no reason.
+
+  Authority: none. Observability only — no control-plane behaviour, classifier input,
+  scheduling decision, or ABR action may key on them; a control plane that does not
+  recognise them ignores them, as with every other additive `session_metrics` field.
+  Design + measurement: quasar `docs/superpowers/specs/2026-08-18-latency-probe-design.md`,
+  `docs/reports/2026-08-18-latency-probe/REPORT.md` (host share of glass-to-glass = 5.4 ms).
 - The control plane writes a `session_metrics` row with `source='agent'` (`schema.md`).
   A malformed or unparsable message is dropped without dropping the connection. A sample whose
   `session_id` is not currently `running` on this host (e.g. it arrived as the session went
