@@ -5390,7 +5390,7 @@ components:
         payload: { type: object, additionalProperties: true }
     Falsifier:
       type: object
-      description: "One named, estimator-qualified number the verdict relies on (ST-09). `holds` is whether the data satisfies the condition; a series with no samples reports value null, n 0, holds false and a note."
+      description: "One named, estimator-qualified number the verdict relies on (ST-09). `holds` is whether the data satisfies the condition; a series with no samples reports value null, n 0, holds false and a note. Some falsifiers are INFORMATIVE — client.present_beat_fraction is compared against the upper bound of its own unit, so it cannot fail; it is in the set to carry the number and the note that explains it."
       required: [name, estimator, value, op, threshold, unit, n, holds]
       properties:
         name: { type: string, description: "Taxonomy series name, e.g. encoder.fps." }
@@ -5398,7 +5398,7 @@ components:
         value: { type: [number, "null"], description: "Null when the series had no samples in the window." }
         op: { type: string, enum: [">=", "<=", ">", "<", "=="] }
         threshold: { type: number }
-        unit: { type: string, enum: [fps, ms, count, bool] }
+        unit: { type: string, enum: [fps, ms, count, bool, fraction] }
         n: { type: integer, description: "Samples the estimator consumed." }
         holds: { type: boolean }
         note: { type: string }
