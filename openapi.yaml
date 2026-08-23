@@ -5427,7 +5427,7 @@ components:
       required: [name, estimator, value, op, threshold, unit, n, holds]
       properties:
         name: { type: string, description: "Taxonomy series name, e.g. encoder.fps." }
-        estimator: { type: string, enum: [p10, p95, max, delta, mean, any] }
+        estimator: { type: string, enum: [p10, p95, max, delta, mean, any, count_ge_threshold] }
         value: { type: [number, "null"], description: "Null when the series had no samples in the window." }
         op: { type: string, enum: [">=", "<=", ">", "<", "=="] }
         threshold: { type: number }
@@ -5456,6 +5456,7 @@ components:
             to_ms: { type: integer }
             n_host: { type: integer, description: "Agent samples in the window." }
             n_client: { type: integer, description: "Browser samples in the window." }
+            warmup_excluded_ms: { type: integer, description: "Milliseconds at the head of the window excluded from warm-up-sensitive rules (hitch detection and the encoder.fps floor). 0 when nothing was excluded." }
         clock:
           type: object
           required: [quality]
@@ -5463,6 +5464,8 @@ components:
             quality: { type: string, enum: [measured, unmeasured] }
             offset_ms: { type: number }
             uncertainty_ms: { type: number }
+            applied: { type: boolean, description: "Whether the offset was actually applied to the client-clock series before the rules ran. False for an unmeasured clock, in which case every cross-source coincidence claim is downgraded and says so." }
+            age_ms: { type: integer, description: "Now minus the clock's measured_at (ms). Staleness is visible: the client re-posts the offset while it drifts, so a large age means the estimate stopped being refreshed." }
         evidence_tier:
           type: string
           enum: [full, host_only, client_only, insufficient]
@@ -5585,6 +5588,14 @@ components:
                   packets_lost_delta: { type: integer }
                   rtt_ms_p95: { type: number }
         classifier: { $ref: "#/components/schemas/Verdict" }
+        ingest:
+          type: object
+          description: "Per-session ingest rejection counters (in-memory, admin-read-only). A client sample or trace event whose ts_unix_ms is not plausibly a Unix-epoch-ms stamp is dropped at ingest rather than stored where it would silently vanish outside every read window. Absent or zeroed when nothing was rejected; the batch itself still returns 202."
+          required: [rejected_ts]
+          properties:
+            rejected_ts: { type: integer, description: "Client samples + trace events dropped for an implausible ts_unix_ms since this control plane last started." }
+            last_rejected_ts_unix_ms: { type: integer, description: "The offending value, verbatim." }
+            last_rejected_reason: { type: string, description: "The likely domain of the offending value, e.g. \"looks like seconds\"." }
         captures:
           type: array
           description: "session-capture: every capture belonging to this session, REGARDLESS of the bundle's window (captures are sparse, explicitly requested, and exempt from the rolling trace prune). Always present; empty when there are none."

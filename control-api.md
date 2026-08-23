@@ -182,6 +182,25 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > `docs/session-trace/trace-format.md` §8 and `docs/session-trace/thresholds.json` (the single
 > golden threshold file, versioned by `thresholds_version`).
 
+> **Amendment — clock-aligned series + ingest validation, additive, approved by Michael
+> 2026-08-23 (additive, admin-only read).** Makes the measured clock offset **load-bearing**
+> rather than merely reported. (1) `Verdict.clock` gains `applied` (whether the offset was
+> applied to the client-clock series before the rules ran) and `age_ms` (now minus
+> `measured_at`), and `Verdict.window` gains `warmup_excluded_ms`. (2) `Falsifier.estimator`
+> gains the value `count_ge_threshold` — a count of samples at or above a threshold, alongside
+> the existing `max` row, so one outlier sample can no longer carry a verdict. (3) The
+> diagnostic bundle gains an optional **`ingest`** object (`rejected_ts`,
+> `last_rejected_ts_unix_ms`, `last_rejected_reason`): a client sample or trace event whose
+> `ts_unix_ms` is outside ±24 h of server now is **dropped** at ingest — it would otherwise be
+> stored where every read window silently excludes it — counted per session in memory, and
+> logged at most once per session per minute naming the offending value and its likely domain
+> ("looks like seconds" / "looks like performance.now" / "looks like nanoseconds"). The batch
+> still returns `202`; a rejection is never a client-visible error. **Purely additive:** no
+> existing key, status code, or endpoint changes, and every new field is optional to read. The
+> agent's own ingest is unvalidated (it is the trusted host reporter) and `agent-api.md` is
+> unchanged. Sign convention and the tolerance rule live in
+> `docs/session-trace/trace-format.md` §4.
+
 > **Amendment — SPT-05 (Stream Perf Tuning Phase C), additive, requires sign-off.** Three pieces.
 > **(1)** Adds the §Host encoder certification section: six **admin-only** endpoints (a
 > script-orchestrated run lifecycle — open a run, launch/finalize one bench cell, poll/complete the
@@ -1119,7 +1138,7 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/hosts/{id}/console-config` | **admin** | *(CM-01)* read a host's console-mode config + reported capabilities |
 | `PATCH /v1/admin/hosts/{id}/console-config` | **admin** | *(CM-01)* update a host's console-mode config |
 | `GET /v1/admin/sessions/{id}/trace`, `.../trace/window`, `.../trace/metrics`, `.../trace/events` | **admin** | *(ST-01)* the bounded recent session trace (samples + events + clock) |
-| `GET /v1/admin/sessions/{id}/diagnostic-bundle` | **admin** | *(ST-01/ST-06)* the assembled bundle — metadata + clock + aligned series + events + derived windows + classifier verdict |
+| `GET /v1/admin/sessions/{id}/diagnostic-bundle` | **admin** | *(ST-01/ST-06)* the assembled bundle — metadata + clock + aligned series + events + derived windows + classifier verdict + `ingest` rejection counters |
 | `GET /v1/admin/sessions/{id}/verdict` | **admin** | *(ST-09)* the **Verdict** alone — state + evidence + reason + window + clock + tier + falsifiers. Observability only; no session authority. Same window parameters and clamps as the bundle |
 | `GET /v1/sessions/{id}/verdict` | **owner or admin** | *(ST-09)* the same Verdict for the caller's **own** session — resource-ownership check (`403` otherwise), the same one `DELETE /v1/sessions/{id}` applies; rate-limited per session like the other owner-scoped telemetry routes |
 | `POST /v1/admin/sessions/{id}/trace/annotations` | **admin** | *(ST-01)* an operator annotation marker on the trace timeline |
