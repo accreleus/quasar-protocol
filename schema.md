@@ -1173,14 +1173,36 @@ the key suffix (`_ms`, `_kbps`). The `source` column scopes which set applies.
   `latest_metrics` (`control-api.md`) **must** keep them source-scoped (namespace or pick by
   source), never blind-overlay one key over the other.
 
-> **Retention (bounded — load-bearing).** This table must not grow without bound. The policy
-> (implemented in `P4-05`, tunable there): (1) the control plane keeps only a **rolling
-> recent window per session** while it runs (prune samples older than a window — e.g. the
-> last hour — so a long-lived session has bounded rows); and (2) on a session reaching a
-> **terminal** state, its metrics are retained for a short TTL for post-hoc troubleshooting,
-> then deleted (or dropped immediately via the `ON DELETE CASCADE` if the session row is
-> reaped). The admin "recent history" view (`P4-06`) is always a bounded window, never the
-> full history. No metric write is on the session hot path — ingestion is decoupled from the
+> **Retention (bounded — load-bearing).** This table must not grow without bound.
+>
+> *Amended 2026-08-23 (approved by Michael): storage policy only — no wire, column, or type
+> change. The original text described the post-terminal TTL as "short" and left it
+> unimplemented; in practice a terminal session's telemetry was deleted the instant it
+> stopped, which is precisely when an operator wants to read it.*
+>
+> The policy, implemented in `control-plane/internal/telemetry`:
+>
+> 1. **Rolling window.** While a session is **non-terminal**, samples older than the rolling
+>    window are swept, so a long-lived session has bounded rows. Default 1 hour
+>    (`QUASAR_TELEMETRY_ROLLING_WINDOW`).
+> 2. **Post-mortem retention.** On a session reaching a **terminal** state its telemetry is
+>    **frozen, not deleted** — the rolling window is no longer applied to it — and kept for
+>    the post-mortem retention so the verdict and diagnostic-bundle reads still answer on a
+>    session that failed hours ago. Default 24 hours
+>    (`QUASAR_TELEMETRY_POSTMORTEM_RETENTION`, which must be >= the rolling window). After
+>    that it is swept: samples, non-capture events, and the `session_trace_clock` row.
+> 3. **Captures are exempt** from both rules — see `session_trace_events` below.
+>
+> Both durations are measured against the server-side `created_at` (the ingestion clock),
+> never a reporter's `ts_unix_ms`, so a skewed reporter clock cannot evade the cap.
+>
+> **One periodic janitor applies all of this** (`telemetry.retain`, every 5 minutes by
+> default), in bounded batches. **No ingest path prunes** — the earlier shape ran a DELETE on
+> each of the four ingest paths, on the hot path, almost always deleting nothing. The
+> `ON DELETE CASCADE` remains the backstop if a `sessions` row is ever reaped.
+>
+> The admin "recent history" view (`P4-06`) is always a bounded window, never the full
+> history. No metric write is on the session hot path — ingestion is decoupled from the
 > lifecycle transaction.
 
 ## `user_devices` (P4-01)
@@ -1245,12 +1267,16 @@ Indexes:
   the bundle's per-type derived windows.
 
 **Plain Postgres only — no `CREATE EXTENSION`, no `create_hypertable`.** A plain relational table
-on the existing retention/prune model (`trace-format.md` §6): rolling per-session window
-(`metricsRetentionWindow`) + terminal prune + FK cascade.
+on the same retention model as `session_metrics` (`trace-format.md` §6): rolling window while the
+session runs, post-mortem retention once it is terminal, then sweep; FK cascade as the backstop.
 
-> **Retention.** Same posture as `session_metrics`: a rolling recent window per session while it
-> runs, a short post-terminal TTL, then delete (or immediate cascade on session-row reap). No
-> event write is on the session hot path.
+> **Retention.** Same policy as `session_metrics` above, with one exception: **capture results
+> (`diag.*`) are exempt from both the rolling window and the post-mortem sweep.** A capture is an
+> artifact a human explicitly asked for, polls for by id, and may go looking for long after the
+> session ended — "why did that session behave that way" is asked in the past tense. It is safe to
+> exempt because captures are sparse (one per explicit request), single-flight per session, and
+> bounded in bytes by their own budget and again on the wire. Captures leave with the session
+> row's `ON DELETE CASCADE` and by nothing else. No event write is on the session hot path.
 
 ## `session_trace_clock` (Observability v2, ST-01)
 > *Additive, observability amendment (migration 0016, same migration as `session_trace_events`).
@@ -1273,6 +1299,11 @@ sentinel `client_offset_ms = 0` — offset 0 is a measured value, not a default 
 
 Migration `0016_session_trace`: creates both tables + the two `session_trace_events` indexes in
 one `BEGIN; … COMMIT;` block. The down migration drops them in reverse order.
+
+> **Retention (amended 2026-08-23).** The clock row is swept by the **post-mortem sweep**, with the
+> session's samples and events — not only by the `ON DELETE CASCADE`. `sessions` rows are not
+> deleted in practice, so relying on the cascade alone left one clock row behind per terminal
+> session, forever.
 
 ---
 
