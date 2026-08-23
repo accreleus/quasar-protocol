@@ -656,8 +656,11 @@ agent wall-clock at **completion**, and this payload:
      an admin who captures a pipeline graph and then stops the session must still be able to
      read it.
   3. **Bounded on the wire.** The control plane rejects a `session_trace_event` whose payload
-     exceeds **256 KiB** — belt and braces beside the agent's own `budget.max_bytes`, because
-     the exemption above means a `diag.*` row lives as long as the session does.
+     exceeds **1 MiB** — belt and braces beside the agent's own `budget.max_bytes`, because the
+     exemption above means a `diag.*` row lives as long as the session does. The cap is on the
+     JSON payload, not on `compressed_bytes`, and the two are deliberately far apart: a capture
+     at the 256 KiB byte budget is base64-encoded on the wire (×4/3 ≈ 350 KiB) inside a JSON
+     object, so a cap set at the budget itself would reject a perfectly legal maximum capture.
 - Host-ownership validation, the drop-never-fatal posture, and the "never session authority"
   rule are exactly as for every other `session_trace_event` — a `diag.*` event from a host that
   does not own the session is dropped, and no capture ever moves a session.
