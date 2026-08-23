@@ -1124,6 +1124,13 @@ read) and the per-source ordering cheaply.
 
 **`metrics` field dictionary.** All keys optional (a reporter sends what it has); units are in
 the key suffix (`_ms`, `_kbps`). The `source` column scopes which set applies.
+
+> **The dictionary of record is `docs/session-trace/metrics.json` in the quasar repo — the
+> *metric manifest*.** It carries, per key, the four things a key suffix cannot: the unit, the
+> clock the value sits on, the window it summarises, and the estimator that produced it (plus the
+> key carrying its sample count, and whether the key is stored at all). Read it before reading a
+> number. What follows here stays the **storage-shape** reference — which keys exist per source —
+> and is deliberately not a second copy of the manifest's semantics.
 - **`source='agent'` (host-observable):** `fps`, `bitrate_kbps`, `encode_ms`,
   `encode_ms_p50`, `encode_ms_p95`, `frames_encoded`, `frames_dropped` (encoder-side),
   `source_fps`, `compositor_fps`, `compositor_pts_delta_p50_ms`, `compositor_pts_delta_p95_ms`,

@@ -460,6 +460,19 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   configure-only commits do not increment `source_fps`. Maximum interpipe queue level, queue dwell p50/p95 and drop count; encode-time
   p50/p95; and RTP access-unit fps plus wire bitrate. Optional percentile fields are omitted
   in an empty window. Counters and maxima are per-window, bounded, and observational only.
+- **The field dictionary of record is `docs/session-trace/metrics.json` in the quasar repo — the
+  *metric manifest*.** Every key of this message is listed there with its unit, the clock its
+  value sits on (`host_monotonic`, `gst_pts`, …), the window it summarises, the estimator that
+  produced it and the key carrying its sample count. Three traps this message carries that no key
+  name reveals, all now written down there: `compositor_pts_delta_p50_ms`/`_p95_ms` are **nominal**
+  PTS spacing off the shared pipeline clock (a flat ~16.668 ms at 60 fps however badly the realized
+  cadence jitters — `probe_compositor_frame_interval_p95_ms` is the realized one);
+  `frames_dropped` here is **encoder-side**, detected by a 500 ms pending-FIFO timeout because no
+  hardware or software H.264 encoder exposes a dropped-frame property, and shares its name with a
+  completely different client-side key; and `window_ms` and `bytes_used` travel on this message but
+  are **not written into the stored `metrics` JSONB** at all. Keys documented in this section that
+  no agent has ever emitted are named as such in the manifest rather than left to look absent —
+  today that is `app_launch_state` (below), which is specified here and implemented nowhere.
 - **`app_launch_state`** *(optional string)* — coarse in-container application launch
   state, when the app image reports one:
   `"starting" | "client_only" | "game_running" | "game_exited"`.

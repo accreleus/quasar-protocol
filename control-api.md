@@ -3486,9 +3486,16 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
                    "present_long_frames": 0, "present_n": 59,
                    // RVFC captureTime capability (not abs-capture-time wire proof):
                    "rvfc_capture_time_available": 1, "abs_capture_time_negotiated": 0,
-                   // RVFC capture-to-display estimate (legacy key name retained):
-                   "glass_to_glass_ms": 71, "network_pacing_ms": 7.5,
-                   "decode_display_ms": 30.9 },
+                   // RVFC capture-to-display estimate. Both keys carry the SAME
+                   // value this release: glass_to_glass_ms is deprecated (it
+                   // overclaims — this is capture-time-to-present, not glass to
+                   // glass) and rvfc_capture_to_display_ms is its replacement:
+                   "glass_to_glass_ms": 71, "rvfc_capture_to_display_ms": 71,
+                   "network_pacing_ms": 7.5,
+                   "decode_display_ms": 30.9,
+                   // measured client-side and posted, but DROPPED at ingest (they
+                   // are not in the browser allow-list) — see the manifest:
+                   "input_msg_per_sec": 118, "input_backpressure": 0 },
       // optional sibling STRING fields (the metrics dictionary is numeric):
       "codec_mime_type": "video/H264" }   // UI-P6; see §Codec decision
   ] }
@@ -3504,6 +3511,21 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
   `decode_display_ms`) are emitted only after valid, fresh RVFC capture-to-display samples. They
   are not a strict abs-capture-time measurement. *(Supersedes the removed
   deep-trace toggle / pixel-overlay instrument.)*
+- **The field dictionary of record is `docs/session-trace/metrics.json` in the quasar repo — the
+  *metric manifest*.** For every key on either telemetry wire it states the unit, the clock the
+  value sits on, the window it summarises, the estimator that produced it, and the key carrying
+  its sample count. The taxonomy, the browser ingest allow-list, the diagnostics-panel labels and
+  the `trace-format.md` §2 table are all derived from it mechanically. `schema.md`'s field
+  dictionary remains the storage-shape reference; the manifest is where a key's MEANING lives, and
+  the two must not be duplicated into each other. The manifest is also where a key that is posted
+  and then dropped (`input_*`), or declared and never produced (`encode_ms`), is named as such.
+- *(Additive, approved 2026-08-23)* **`rvfc_capture_to_display_ms`** replaces `glass_to_glass_ms`
+  under a name that does not overclaim: the number is RTP capture-time to browser present, a
+  **median over a never-drained ring of up to 600 RVFC samples** — minutes of history sitting
+  beside 1 s numbers — and it excludes app render and client scan-out, so it was never
+  glass-to-glass. The client posts **both** keys with the same value this release; the taxonomy
+  carries `client.rvfc_capture_to_display_ms` alongside `client.glass_to_glass_ms`, and no
+  falsifier, derived window or stored series changes.
 - *(UI-P6, additive)* `codec_mime_type` is an optional per-sample **string** carrying the
   `getStats()` codec `mimeType` the receiver is actually decoding. It is a sibling of the numeric
   `metrics` object, not a key inside it. The server normalises it to the wire codec vocabulary and
