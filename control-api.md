@@ -3458,6 +3458,11 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
                    // presentation pacing (#108, always-on; schema.md dictionary):
                    "present_fps": 59.8, "present_interval_sd_ms": 2.9,
                    "present_interval_p95_ms": 18.0, "playout_target_ms": 100,
+                   // present cadence — the distribution, not just its mean
+                   // (additive, approved 2026-08-23; read present_fps_median):
+                   "present_fps_median": 60.0, "present_interval_median_ms": 16.67,
+                   "present_interval_max_ms": 33.4, "present_beat_fraction": 0.02,
+                   "present_long_frames": 0, "present_n": 59,
                    // RVFC captureTime capability (not abs-capture-time wire proof):
                    "rvfc_capture_time_available": 1, "abs_capture_time_negotiated": 0,
                    // RVFC capture-to-display estimate (legacy key name retained):
@@ -3484,6 +3489,20 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
   records it on the session as `negotiated_codec` so an operator can compare it against the
   server-resolved `stream.codec` — see §Codec decision for the full rule (newest usable value wins,
   written only on change, never for a terminal session, junk dropped).
+- *(Present cadence, additive, approved 2026-08-23)* `present_fps` is fps from the **mean**
+  presentation interval and keeps that meaning forever — the stored series must stay comparable.
+  It is no longer the number to read: when the source frame rate equals the client's display
+  refresh rate, a single missed vsync doubles one interval and drags the mean, which is how a
+  healthy 2560x1440@120 session reported 88-108 fps on 2026-08-22. The six additive keys ship the
+  distribution instead. `present_fps_median` and `present_interval_median_ms` are the estimator
+  that survives a doubled frame; `present_interval_max_ms` is the window's real longest interval
+  (and the source of `client.freeze_detected`'s `gap_ms`, which is now omitted rather than
+  fabricated when unknown); `present_beat_fraction` is the share of intervals within +/-20% of
+  exactly 2x the median — the inherent vsync beat when source fps == display Hz, not stutter;
+  `present_long_frames` counts intervals above 2.5x the median, which the beat never produces, so
+  a beat with zero long frames is benign; `present_n` is how many intervals the window held. Below
+  five intervals every `present_*` key is omitted rather than computed from a fragment. All six are
+  optional: a client that predates them simply omits them, and the server stores what arrives.
 - Best-effort: a malformed sample is dropped, not fataled. Accepting telemetry never affects
   session state — with the single, deliberate exception of the two observability fields the client
   is the only source of truth for: the AS10-11 `client_health` class and the UI-P6

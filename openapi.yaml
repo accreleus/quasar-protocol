@@ -5180,9 +5180,15 @@ components:
         decode_ms: { type: number }
         packets_lost: { type: integer }
         frames_dropped: { type: integer }
-        present_fps: { type: number }
+        present_fps: { type: number, description: "Presentation fps derived from the MEAN RVFC interval. DEPRECATED as a headline: at source fps == display Hz a single missed vsync doubles one interval and drags the mean (a healthy 1440p120 session read 88-108 on 2026-08-22). Read present_fps_median. Retained unchanged for series continuity." }
+        present_fps_median: { type: number, description: "Presentation fps from the MEDIAN RVFC interval — the fps a viewer perceives, unmoved by an occasional doubled frame. The number to read." }
+        present_interval_median_ms: { type: number, description: "Median frame-to-frame presentation interval (ms)." }
         present_interval_sd_ms: { type: number }
         present_interval_p95_ms: { type: number }
+        present_interval_max_ms: { type: number, description: "Longest presentation interval in the window (ms) — the real stall length, and the source of client.freeze_detected's gap_ms." }
+        present_beat_fraction: { type: number, description: "Share (0..1) of the window's intervals within +/-20% of exactly 2x the median. At source fps == display Hz this is the inherent vsync beat, not stutter; read it beside present_long_frames." }
+        present_long_frames: { type: integer, description: "Intervals longer than 2.5x the median — above the doubled band, so genuine stalls rather than the beat. Zero is what makes a beat benign." }
+        present_n: { type: integer, description: "Intervals the window actually contained. Below 5 every other present_* key is omitted rather than computed from a fragment." }
         playout_target_ms: { type: number }
         rvfc_capture_time_available: { type: integer, description: "RVFC captureTime has a current validated sample (0/1); stale/missing/invalid captureTime resets it. Not proof of abs-capture-time RTP negotiation." }
         abs_capture_time_negotiated: { type: integer, description: "Strict abs-capture-time RTP-extension negotiation evidence (0 until SDP/RTP wire proof exists)." }
@@ -5460,7 +5466,7 @@ components:
                 unmeasured: { type: boolean, enum: [true] }
         series:
           type: object
-          description: "Named metric series; keys include encoder.encode_ms, encoder.fps, abr.setpoint_kbps, transport.rtt_ms, transport.packets_lost, client.present_interval_sd_ms, client.rvfc_capture_time_available, and qualified client.glass_to_glass_ms. Unmarked historical glass_to_glass values are omitted."
+          description: "Named metric series; keys include encoder.encode_ms, encoder.fps, abr.setpoint_kbps, transport.rtt_ms, transport.packets_lost, client.present_interval_sd_ms, the present-cadence series client.present_fps_median / client.present_interval_median_ms / client.present_interval_max_ms / client.present_beat_fraction / client.present_long_frames / client.present_n (absent for sessions from clients predating them), client.rvfc_capture_time_available, and qualified client.glass_to_glass_ms. client.present_fps remains a MEAN and is kept for continuity; client.present_fps_median is the one to read. Unmarked historical glass_to_glass values are omitted."
           additionalProperties:
             type: array
             items: { $ref: "#/components/schemas/TraceSeriesPoint" }
