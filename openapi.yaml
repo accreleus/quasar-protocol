@@ -2462,6 +2462,39 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/sessions/{id}/capture:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [admin]
+      summary: Arm one bounded, on-demand observation of a live session.
+      description: "session-capture. Observability only; arming a capture never changes a session. 202 means ARMED, not done — poll GET .../captures/{capture_id} for the result."
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CaptureRequest" } } }
+      responses:
+        "202": { description: "Armed; the agent acked." , content: { application/json: { schema: { $ref: "#/components/schemas/CaptureAccepted" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "capture_busy (one in flight) or session_not_running." , content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: "capture_kind_unsupported — the agent does not know this kind, or cannot do it now." , content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "501": { description: "capture_unsupported — this host's agent predates captures. Rebuild it; retrying will not help." , content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: "agent_not_connected — the session's host has no live agent connection." , content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /v1/admin/sessions/{id}/captures/{capture_id}:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - { name: capture_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [admin]
+      summary: Read one capture's stored result.
+      description: "session-capture. 404 until the result arrives — that is the poll signal, not an error. Not window-bounded: captures are sparse and exempt from the rolling trace prune."
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/Capture" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /v1/admin/sessions/{id}/trace/annotations:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
@@ -5437,6 +5470,48 @@ components:
           type: array
           items: { $ref: "#/components/schemas/Falsifier" }
         thresholds_version: { type: string }
+    CaptureRequest:
+      type: object
+      description: "POST /v1/admin/sessions/{id}/capture body (session-capture)."
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          description: "The control plane owns this vocabulary and grows it; the enum is today's set, not a closed world."
+          enum: [pipeline_dot, encoder_props, burst_stats]
+        params:
+          type: object
+          description: "burst_stats only; ignored by the other kinds. Clamped by the control plane and again by the agent."
+          properties:
+            windows: { type: integer, minimum: 1, maximum: 40 }
+            window_ms: { type: integer, minimum: 100, maximum: 1000 }
+    CaptureAccepted:
+      type: object
+      description: "202 body: the capture is ARMED. The capture_id is minted before dispatch, so the caller holds the join key immediately."
+      required: [capture_id, kind, session_id, accepted_at]
+      properties:
+        capture_id: { type: string, format: uuid }
+        kind: { type: string }
+        session_id: { type: string, format: uuid }
+        accepted_at: { type: string, format: date-time }
+    Capture:
+      type: object
+      description: "One capture result — the stored diag.* trace event's payload plus its timestamp. Bounded by construction: compressed_bytes never exceeds the capture's byte budget."
+      required: [capture_id, kind, ts_unix_ms, encoding, content_type, bytes, compressed_bytes, truncated, duration_ms]
+      properties:
+        capture_id: { type: string, format: uuid }
+        kind: { type: string }
+        ts_unix_ms: { type: integer, description: "Agent wall-clock at completion." }
+        encoding: { type: string, enum: [gzip+base64, json], description: "gzip+base64 puts the payload in `data`; json puts it in `json`." }
+        content_type: { type: string, description: "What the decoded bytes are, e.g. text/vnd.graphviz or application/json." }
+        data: { type: string, description: "base64 of the gzip stream. Present when encoding = gzip+base64." }
+        json: { type: object, additionalProperties: true, description: "The result object. Present when encoding = json." }
+        bytes: { type: integer, description: "Uncompressed size AFTER any truncation." }
+        compressed_bytes: { type: integer }
+        original_bytes: { type: integer, description: "Uncompressed size BEFORE truncation." }
+        truncated: { type: boolean, description: "True when the budget forced a line-boundary cut; original_bytes then says how much was there." }
+        duration_ms: { type: integer, description: "arm to done." }
+        error: { type: string, description: "Set only when the capture was accepted and then failed. The event is still emitted, so a poller always terminates on a body." }
     DiagnosticBundle:
       type: object
       description: "GET /v1/admin/sessions/{id}/diagnostic-bundle response shape (ST-06/ST-07)."
@@ -5510,6 +5585,10 @@ components:
                   packets_lost_delta: { type: integer }
                   rtt_ms_p95: { type: number }
         classifier: { $ref: "#/components/schemas/Verdict" }
+        captures:
+          type: array
+          description: "session-capture: every capture belonging to this session, REGARDLESS of the bundle's window (captures are sparse, explicitly requested, and exempt from the rolling trace prune). Always present; empty when there are none."
+          items: { $ref: "#/components/schemas/Capture" }
 
     # ─── storage (P5-05) ─────────────────────────────────────────────────────────
     AdminHome:

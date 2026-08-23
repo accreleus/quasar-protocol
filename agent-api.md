@@ -615,6 +615,53 @@ samples; the control plane joins the two on one timeline for the diagnostic bund
   host is **dropped, not stored** — events never resurrect or alter a session (identical posture to
   `session_metrics`).
 
+**`diag.*` — on-demand capture results (session-capture, approved by Michael 2026-08-23).**
+> *Additive amendment to this message. No existing field changes; the addition is a family of
+> `event` values and the handling rules that go with them. An older control plane stores a
+> `diag.*` row like any other event and simply never prunes differently — the exemption below
+> is a control-plane behaviour, not a wire field.*
+
+The single result of a `session_capture` command (§`session_capture`) rides this message, with
+`event` one of `diag.pipeline_dot` | `diag.encoder_props` | `diag.burst_stats`, `ts_unix_ms` the
+agent wall-clock at **completion**, and this payload:
+```json
+{
+  "capture_id": "<uuid, echoed from the command>",
+  "kind": "pipeline_dot",
+  "encoding": "gzip+base64",
+  "content_type": "text/vnd.graphviz",
+  "data": "<base64 of the gzip stream>",
+  "bytes": 48213,
+  "compressed_bytes": 6104,
+  "original_bytes": 48213,
+  "truncated": false,
+  "duration_ms": 42
+}
+```
+- **`encoding`** is `"gzip+base64"` (the payload is in `data`) or `"json"` (the payload is the
+  object in `json`, used for small results). `content_type` names what the decoded bytes are.
+- **`bytes`** is the uncompressed size **after** any truncation, `original_bytes` the size
+  before it, `compressed_bytes` what is actually on the wire. `truncated` says which of the two
+  a reader is holding.
+- **`error`** *(string, optional)* — present only when the capture was **accepted** and then
+  failed (deadline, element gone). The event is still emitted: a capture that acked `ok` always
+  terminates in an event, so a poller never has to distinguish "still running" from "lost".
+- **Three handling rules, all control-plane side:**
+  1. **Reliable lane, never coalesced.** A `diag.*` event is persisted **synchronously**, the
+     same treatment `session.effective_media` already gets — diagnostic-queue saturation must
+     not be able to erase the one artifact an admin explicitly asked for.
+  2. **Exempt from the rolling prune.** The 1 h per-session window that reaps ordinary trace
+     events (`trace-format.md` §6) excludes `type LIKE 'diag.%'`, and so does the terminal
+     prune. A capture is deleted with its session's `ON DELETE CASCADE` and by nothing else —
+     an admin who captures a pipeline graph and then stops the session must still be able to
+     read it.
+  3. **Bounded on the wire.** The control plane rejects a `session_trace_event` whose payload
+     exceeds **256 KiB** — belt and braces beside the agent's own `budget.max_bytes`, because
+     the exemption above means a `diag.*` row lives as long as the session does.
+- Host-ownership validation, the drop-never-fatal posture, and the "never session authority"
+  rule are exactly as for every other `session_trace_event` — a `diag.*` event from a host that
+  does not own the session is dropped, and no capture ever moves a session.
+
 ### `image_state` — managed-image pull/remove progress (image-management P2)
 > *Additive amendment. A new upstream message; an older control plane ignores the unknown
 > `type`. Fire-and-forget (no `ack`), image-presence authority only — it never touches
@@ -906,6 +953,97 @@ before it is streamed.
   discipline) and behaves exactly as a session-display-update-only agent — i.e. it never resizes
   the stream and never sets `external_resize_supported` on `session_metrics`, which a caller
   correctly reads as *unknown*.
+
+### `session_capture` — a bounded, on-demand observation of a live session (session-capture, approved by Michael 2026-08-23)
+> *Additive, admin-only, observability-only amendment. New downstream message; no existing
+> message, field, or ack contract changes. An older agent that does not recognise
+> `session_capture` treats it as an unknown `type` — the existing wire-silent discipline
+> (`ControlMsg::Unknown`), exactly like `image_build` on a P2 agent. It carries **no session
+> authority**: a capture never changes session state, never touches the media path, and a
+> refused or failed capture is a no-op on a still-`running` session.*
+
+Tells the agent to **observe** a `running` session once — arm, gather within a byte **and**
+time budget, report as a single upstream `session_trace_event` — and stop. A capture is not a
+probe: nothing is inserted into the media path, no pad probe is added, no element is
+reconfigured. It reads what the pipeline already is.
+```json
+{
+  "type": "session_capture",
+  "id": "<cmd-id>",
+  "session_id": "<uuid>",
+  "capture_id": "<uuid minted by the control plane>",
+  "kind": "pipeline_dot",
+  "budget": { "max_bytes": 262144, "max_ms": 10000 },
+  "params": { "windows": 20, "window_ms": 250 }
+}
+```
+- **`capture_id`** *(uuid, required)* — minted by the **control plane**, before dispatch, and
+  echoed in the result payload. It is the join key between the `202` an admin already holds
+  and the `diag.*` event that arrives later; the agent never invents one.
+- **`kind`** *(string, required)* — one of `pipeline_dot` | `encoder_props` | `burst_stats`
+  (below). **The control plane owns this vocabulary and grows it**; an agent that does not
+  know a string nacks `unknown_kind` rather than guessing.
+- **`budget`** *(object, required)* — `max_bytes` (the **compressed** payload cap, default and
+  ceiling 262144) and `max_ms` (wall-clock arm→done, default 10000, ceiling 30000). The agent
+  clamps both to its own ceilings; it never honours a larger number than it can afford.
+- **`params`** *(object, optional)* — `burst_stats` only: `windows` (clamped to `1..40`) ×
+  `window_ms` (clamped to `100..1000`), and the product additionally clamped to
+  `budget.max_ms`. Ignored for the other kinds.
+
+**Ack semantics — same contract as `session_swap_app` / `session_display_update`.** The agent
+replies `ack{ id, ok, error? }`, and **a rejected capture never fails the session**:
+- `ack{ok:true}` — accepted and armed. The result arrives later as the `diag.*` event; the ack
+  is not the result.
+- `ack{ok:false, error:"busy"}` — a capture is already in flight for that session.
+  **Single-flight per session: refuse, never queue.** One observation at a time is the whole
+  cost bound.
+- `ack{ok:false, error:"unsupported"}` — this agent build knows the kind but cannot do it
+  *here, now* (e.g. the session has no encode pipeline yet).
+- `ack{ok:false, error:"unknown_kind"}` — the string is not in this agent's vocabulary.
+- `ack{ok:false, error:"no_such_session"}` — the agent does not hold that session.
+- **No ack at all ⇒ the agent predates `session_capture`.** An unknown `type` is wire-silent
+  (it does not produce an `error` reply), so the control plane's ack timeout is the only
+  signal available and it maps that to `501 capture_unsupported` — "rebuild this host's agent",
+  not "retry". This is the one deliberate difference from `session_display_update`, where a
+  timeout reads as a rejection: a capture mutates nothing, so attributing a silent host to an
+  old build costs nothing and names the actual remedy.
+
+**The safety envelope — what a capture may never contain.** These are properties of the
+capture, not of any one kind, and they hold for every kind added later:
+- **No media.** No pixels, no audio samples, no encoded bitstream, no frame contents.
+- **No input.** No key/pointer/gamepad events, no microphone.
+- **No credentials or identity.** Never `node_secret`, an enrollment token, a bearer, or the
+  environment wholesale. `encoder_props` reads an **allow-list** of property names — never
+  "every property on the element" — and elides any string value longer than 256 characters.
+- **No filesystem reach.** No path outside the session's own scratch directory is read or
+  named.
+- **Bounded by construction.** `compressed_bytes ≤ budget.max_bytes`. Over the cap, the agent
+  truncates the **uncompressed** text at a line boundary, recompresses, and sets
+  `truncated: true` with `original_bytes` — a capture is never allowed to grow past its budget
+  by being interesting.
+
+**Kinds.**
+- **`pipeline_dot`** — the encode pipeline's graph, `gst::debug_bin_to_dot_data` with
+  `CAPS_DETAILS | STATES`. **Deliberately not `NON_DEFAULT_PARAMS`**: element parameters can
+  be string properties carrying paths, which the envelope above forbids, and the allow-list
+  that makes `encoder_props` safe does not exist for a dot dump.
+  `content_type: "text/vnd.graphviz"`, `encoding: "gzip+base64"`.
+- **`encoder_props`** — the live encoder snapshot, `encoding: "json"`:
+  `{ "encoder_factory", "codec", "properties": { <allow-listed name>: <value> },
+  "caps": { "encoder_sink", "encoder_src", "payloader_src" }, "scale_stage"?: {…},
+  "ring"?: {…} }`. The same fields the `session.effective_media` snapshot carries, read
+  **now** rather than at launch — which is the point: a knob that moved after launch is
+  exactly what this answers.
+- **`burst_stats`** — a short, dense window series, `encoding: "json"`:
+  `{ "window_ms", "windows": [ { "t_ms", "encode_ms": {"n","p50","p95","max","samples":[…≤200]},
+  "dwell_ms": {…}, "fps", "bitrate_kbps", "frames_dropped", "queue_level_max",
+  "abr_setpoint_kbps", "gcc_estimate_kbps" } … ] }`. Denser than the `session_metrics`
+  heartbeat cadence for a bounded stretch, and only when asked — the reason it is a capture
+  and not a new always-on metric.
+
+**Result.** Exactly one upstream `session_trace_event` with `event: "diag.<kind>"` (below).
+A capture that is accepted and then fails still reports — the same event with `error` set —
+so an admin polling on `capture_id` always terminates on something other than a timeout.
 
 ### `config_update` — push host override knobs (host-runtime-settings-admin)
 > *Additive amendment. New downstream message; no change to any existing message. Fire-and-
