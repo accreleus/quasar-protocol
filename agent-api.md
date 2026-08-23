@@ -613,7 +613,8 @@ samples; the control plane joins the two on one timeline for the diagnostic bund
 ```
 - **`type`** is the WS message discriminator (`"session_trace_event"`). **`event`** is the trace
   event type from the agent allow-list (`abr.retarget`, `pipeline.source_swapped`,
-  `encoder.drop_detected`, `webrtc.state_changed`, `app.launch_state` — `trace-format.md` §3.2). **`payload`** is the
+  `encoder.drop_detected`, `webrtc.state_changed`, `app.launch_state`, `caps.negotiated`,
+  `sdp.answer_applied`, `encoder.stall`, `host.xid`, `host.gpu_fault` — `trace-format.md` §3.2). **`payload`** is the
   per-type object (`trace-format.md` §3). `ts_unix_ms` is the agent wall-clock at the event (same
   convention as `session_metrics.ts_unix_ms`).
 - **`webrtc.state_changed` — Connected/Completed both mean established.** ICE may jump
@@ -627,6 +628,43 @@ samples; the control plane joins the two on one timeline for the diagnostic bund
   without dropping the connection. An event whose `session_id` is not currently `running` on this
   host is **dropped, not stored** — events never resurrect or alter a session (identical posture to
   `session_metrics`).
+
+**Negotiation, stall and host-fault events (approved by Michael 2026-08-23; additive; new
+upstream trace event types).**
+> *Additive amendment to this message. No existing field changes and no existing event type
+> changes shape; the addition is five `event` values. An older control plane stores them like
+> any other event, or ignores them — the forward-compatibility rule in `trace-format.md` §3.1
+> already covers an unrecognised type.*
+
+Each is emitted on the **reliable lane** (the agent's ordered lifecycle channel, the treatment
+`session.effective_media` and `diag.*` get) rather than the bounded, droppable diagnostics lane.
+The reason is the same for all five: each one is the *only* statement of a fact, and a dropped
+copy leaves a stale or absent record that reads as the opposite of what happened.
+
+| `event` | when | payload |
+|---|---|---|
+| `caps.negotiated` | every time the encode branch (re)negotiates | `trigger` (`"launch"` \| `"rung_step"` \| `"scale_rebuild"` \| `"encoder_restart"` \| `"source_swap"`), `encoder_factory` (string\|null), `codec` (`"h264"`\|`"h265"`\|`"av1"`\|null), `profile` (string\|null — the LIVE value), `level` (string\|null), `encoder_sink_caps` / `encoder_src_caps` / `payloader_src_caps` (string\|null), `size` (`{w,h,fps}`) |
+| `sdp.answer_applied` | after a remote **answer** applied successfully | `pc` (`"video"`\|`"audio"`), `m_lines` (array of `{mid, kind, codec, port, direction, rejected}`), `rejected_count` (int), `ice_ufrag_changed` (bool, optional) |
+| `encoder.stall` | encoder output silence ≥ the host's stall threshold while input keeps arriving, and again on recovery | `phase` (`"detected"`\|`"recovered"`), `reason` (`"no_output"`\|`"input_starved"`\|`"negotiation"`), `since_ms` (int, on `detected`), `stalled_ms` (int, on `recovered`) |
+| `host.xid` | the NVIDIA kernel driver recorded an Xid fault | `code` (int), `pci` (string\|null), `pid` (int\|null), `name` (string\|null), `text` (string, ≤256 chars), `ts_unix_ms` (int) |
+| `host.gpu_fault` | a non-NVIDIA GPU fault the kernel recorded (amdgpu ring timeout / reset) | `vendor` (`"amd"`), `text` (string, ≤256 chars), `ts_unix_ms` (int) |
+
+- **`caps.negotiated` is NOT a replacement for `session.effective_media`.** That message keeps
+  its exact shape and its one-shot, first-offer semantics. This event exists because a one-shot
+  snapshot stops being true: a scale-stage rebuild renegotiates the branch, and on the Vulkan
+  path every resolution rung step is an encoder restart. After the first step the snapshot
+  describes caps that no longer exist.
+- **`sdp.answer_applied` is the success counterpart of `webrtc.remote_description_failed`.** An
+  answer can apply cleanly and still refuse media: `port: 0` or `direction: "inactive"` on an
+  m-line the agent offered to send. `rejected: true` marks exactly that, and `rejected_count > 0`
+  means that media will never flow on that PeerConnection even though nothing failed.
+- **`host.*` events belong to the HOST, not to a session.** The kernel does not know which
+  session's work faulted, so the agent emits the same event **once per running session** and not
+  at all when no session is running. A reader must treat two sessions reporting the same
+  `host.xid` as one fault seen twice, never as two faults. Host-ownership validation is
+  unchanged: the control plane still drops an event whose `session_id` is not `running` here.
+- **Authority: none.** Like every other `session_trace_event`, these are observability. No
+  session state, scheduling decision, ABR action or admission choice may key on them.
 
 **`diag.*` — on-demand capture results (session-capture, approved by Michael 2026-08-23).**
 > *Additive amendment to this message. No existing field changes; the addition is a family of
