@@ -1665,6 +1665,21 @@ paths:
             the stream, only returned when the request includes stream_width/stream_height. The
             session is left untouched in every case.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  /v1/sessions/{id}/verdict:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - { name: from, in: query, schema: { type: integer }, description: "Window start, unix ms. Same default (5 min) and clamp ([2,10] min) as the diagnostic bundle." }
+      - { name: to, in: query, schema: { type: integer }, description: "Window end, unix ms." }
+    get:
+      tags: [sessions]
+      summary: The Verdict for the caller's own session (owner or admin).
+      description: "ST-09. Same body as the admin form; owner-or-admin ownership check, rate-limited per session. Observability only."
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/Verdict" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
   /v1/sessions/{id}/trace/clock:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
@@ -2378,6 +2393,21 @@ paths:
       x-required-role: admin
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/DiagnosticBundle" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/sessions/{id}/verdict:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - { name: from, in: query, schema: { type: integer }, description: "Window start, unix ms. Same default (5 min) and clamp ([2,10] min) as the diagnostic bundle." }
+      - { name: to, in: query, schema: { type: integer }, description: "Window end, unix ms." }
+    get:
+      tags: [admin]
+      summary: The Verdict for a session — state, evidence, reason, window, clock, tier, falsifiers.
+      description: "ST-09. Observability only; reading a verdict never changes a session."
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/Verdict" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -5352,6 +5382,55 @@ components:
         ts_unix_ms: { type: integer }
         type: { type: string }
         payload: { type: object, additionalProperties: true }
+    Falsifier:
+      type: object
+      description: "One named, estimator-qualified number the verdict relies on (ST-09). `holds` is whether the data satisfies the condition; a series with no samples reports value null, n 0, holds false and a note."
+      required: [name, estimator, value, op, threshold, unit, n, holds]
+      properties:
+        name: { type: string, description: "Taxonomy series name, e.g. encoder.fps." }
+        estimator: { type: string, enum: [p10, p95, max, delta, mean, any] }
+        value: { type: [number, "null"], description: "Null when the series had no samples in the window." }
+        op: { type: string, enum: [">=", "<=", ">", "<", "=="] }
+        threshold: { type: number }
+        unit: { type: string, enum: [fps, ms, count, bool] }
+        n: { type: integer, description: "Samples the estimator consumed." }
+        holds: { type: boolean }
+        note: { type: string }
+    Verdict:
+      type: object
+      description: "The single stream-health judgement as a value (ST-09): state + prose evidence + the falsifiers that would overturn it + window/clock/tier. Observational only, no session authority. An unknown `verdict` string is DATA to a consumer."
+      required: [verdict, evidence, reason, window, clock, evidence_tier, falsifiers, thresholds_version]
+      properties:
+        verdict:
+          type: string
+          description: "The control plane owns this vocabulary and grows it; the enum below is today's set, not a closed world."
+          enum: [likely_encoder_saturation, likely_network_congestion, likely_client_presentation_limit, nominal, indeterminate_client_hidden, unknown]
+        evidence:
+          type: array
+          items: { type: string }
+        reason: { type: string, description: "One sentence." }
+        window:
+          type: object
+          required: [from_ms, to_ms, n_host, n_client]
+          properties:
+            from_ms: { type: integer }
+            to_ms: { type: integer }
+            n_host: { type: integer, description: "Agent samples in the window." }
+            n_client: { type: integer, description: "Browser samples in the window." }
+        clock:
+          type: object
+          required: [quality]
+          properties:
+            quality: { type: string, enum: [measured, unmeasured] }
+            offset_ms: { type: number }
+            uncertainty_ms: { type: number }
+        evidence_tier:
+          type: string
+          enum: [full, host_only, client_only, insufficient]
+        falsifiers:
+          type: array
+          items: { $ref: "#/components/schemas/Falsifier" }
+        thresholds_version: { type: string }
     DiagnosticBundle:
       type: object
       description: "GET /v1/admin/sessions/{id}/diagnostic-bundle response shape (ST-06/ST-07)."
@@ -5424,15 +5503,7 @@ components:
                   to_ms: { type: integer }
                   packets_lost_delta: { type: integer }
                   rtt_ms_p95: { type: number }
-        classifier:
-          type: object
-          properties:
-            verdict:
-              type: string
-              enum: [likely_encoder_saturation, likely_network_congestion, likely_client_presentation_limit, nominal, indeterminate_client_hidden, unknown]
-            evidence:
-              type: array
-              items: { type: string }
+        classifier: { $ref: "#/components/schemas/Verdict" }
 
     # ─── storage (P5-05) ─────────────────────────────────────────────────────────
     AdminHome:

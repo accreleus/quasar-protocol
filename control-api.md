@@ -161,6 +161,27 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > no session-state authority). `signaling.md`, `input.md`, `native-client.md` are unchanged. See
 > `docs/session-trace/contract-amendment.md` and `docs/session-trace/trace-format.md`.
 
+> **Amendment — ST-09 (Verdict value: falsifiers, window, clock, tier), additive, approved by
+> Michael 2026-08-23.** Turns the diagnostic bundle's `classifier` object into the **Verdict** —
+> one value that carries not only the state and its prose `evidence` (both **unchanged**) but the
+> numbers that would overturn it: `reason`, `window` (with per-source sample counts), `clock`
+> (quality + offset/uncertainty), `evidence_tier`, a `falsifiers` array, and
+> `thresholds_version`. Adds **two** observability-only reads that return that value alone:
+> `GET /v1/admin/sessions/{id}/verdict` (**admin**) and `GET /v1/sessions/{id}/verdict`
+> (**owner-or-admin**, the same ownership check as `DELETE /v1/sessions/{id}`), both reusing the
+> bundle's window query parameters and clamps. **Purely additive:** every existing key, status
+> code, and endpoint is unchanged; a consumer that reads only `classifier.verdict` +
+> `classifier.evidence` is unaffected. The verdict carries **no session authority** — it is
+> observational, exactly as the ST-01 classifier was. A **falsifier** is a named, estimator-
+> qualified number (`name`, `estimator`, `value`, `op`, `threshold`, `unit`, `n`, `holds`) that
+> the verdict relies on; `holds=false` means the data does not satisfy the condition, and a
+> series with `n=0` reports `value: null`, `holds: false` and a `note`. `evidence_tier` states
+> which sides of the measurement were actually present. **An unknown `verdict` string is DATA to
+> a consumer** — the control plane owns that vocabulary and grows it; a client must report an
+> unrecognised value verbatim, never fail on it. Shape and thresholds:
+> `docs/session-trace/trace-format.md` §8 and `docs/session-trace/thresholds.json` (the single
+> golden threshold file, versioned by `thresholds_version`).
+
 > **Amendment — SPT-05 (Stream Perf Tuning Phase C), additive, requires sign-off.** Three pieces.
 > **(1)** Adds the §Host encoder certification section: six **admin-only** endpoints (a
 > script-orchestrated run lifecycle — open a run, launch/finalize one bench cell, poll/complete the
@@ -1099,6 +1120,8 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `PATCH /v1/admin/hosts/{id}/console-config` | **admin** | *(CM-01)* update a host's console-mode config |
 | `GET /v1/admin/sessions/{id}/trace`, `.../trace/window`, `.../trace/metrics`, `.../trace/events` | **admin** | *(ST-01)* the bounded recent session trace (samples + events + clock) |
 | `GET /v1/admin/sessions/{id}/diagnostic-bundle` | **admin** | *(ST-01/ST-06)* the assembled bundle — metadata + clock + aligned series + events + derived windows + classifier verdict |
+| `GET /v1/admin/sessions/{id}/verdict` | **admin** | *(ST-09)* the **Verdict** alone — state + evidence + reason + window + clock + tier + falsifiers. Observability only; no session authority. Same window parameters and clamps as the bundle |
+| `GET /v1/sessions/{id}/verdict` | **owner or admin** | *(ST-09)* the same Verdict for the caller's **own** session — resource-ownership check (`403` otherwise), the same one `DELETE /v1/sessions/{id}` applies; rate-limited per session like the other owner-scoped telemetry routes |
 | `POST /v1/admin/sessions/{id}/trace/annotations` | **admin** | *(ST-01)* an operator annotation marker on the trace timeline |
 | `POST /v1/sessions/{id}/trace/events` | **owner or admin** | *(ST-01)* the client posts its own session's browser trace events — same ownership check as `POST .../stats`; `202` on accept |
 | `POST /v1/sessions/{id}/trace/clock` | **owner or admin** | *(ST-01/ST-05)* the client posts its own session's client↔host clock-offset estimate — same ownership check as `POST .../stats`; `202` on accept |
@@ -3878,20 +3901,61 @@ call. Built by joining the existing `session_metrics` JSONB (normalized to taxon
     "encoder_saturation":        [ { "from_ms": 1735689600000, "to_ms": 1735689600200, "encode_ms_p95": 20.1 } ],
     "likely_network_congestion": [ { "from_ms": 1735689600050, "to_ms": 1735689600200, "packets_lost_delta": 14, "rtt_ms_p95": 60 } ]
   },
-  "classifier": {
-    "verdict": "likely_network_congestion",
-    "evidence": [ "gcc downshift coincident with packets_lost rise and rtt p95 60ms",
-                  "encode_ms p95 below encoder ceiling; host fps steady",
-                  "client tab not hidden during the window" ]
-  }
+  "classifier": { "…": "the Verdict value — see below" }
 }
 ```
-- `classifier.verdict` is **observational only** — one of `likely_encoder_saturation` /
+- `classifier` is the **Verdict** (ST-09): the same `verdict` + `evidence` it always carried, plus
+  `reason`, `window`, `clock`, `evidence_tier`, `falsifiers` and `thresholds_version`. It is
+  identical to the body of `GET .../verdict` below.
+
+### `GET /v1/admin/sessions/{id}/verdict` — the Verdict alone (admin)
+### `GET /v1/sessions/{id}/verdict` — the same Verdict, owner-or-admin
+*(ST-09, additive, approved by Michael 2026-08-23.)* Both return **the same body**: the value the
+bundle carries as `classifier`, without the series and events. The admin form is admin-gated
+(`403` before lookup, `404` unknown session); the owner form applies the ownership check
+`DELETE /v1/sessions/{id}` uses (`404` unknown, `403` not yours) and is rate-limited per session.
+Both accept the bundle's `?from=&to=` unix-ms window and apply the same default (5 min) and clamp
+(`[2,10]` min). Neither has any session authority: reading a verdict never changes a session.
+```json
+// 200
+{
+  "verdict": "likely_network_congestion",
+  "evidence": [ "network congestion: {\"packets_lost_delta\":14,\"rtt_ms_p95\":60}",
+                "client tab not hidden during the window" ],
+  "reason": "Packet loss and round-trip time both crossed their congestion thresholds over a 300 s window (612 host, 598 client samples).",
+  "window":  { "from_ms": 1735689300000, "to_ms": 1735689600000, "n_host": 612, "n_client": 598 },
+  "clock":   { "quality": "measured", "offset_ms": -3.2, "uncertainty_ms": 1.8 },
+  "evidence_tier": "full",
+  "falsifiers": [
+    { "name": "transport.packets_lost", "estimator": "delta", "value": 14, "op": ">",  "threshold": 5,  "unit": "count", "n": 300, "holds": true },
+    { "name": "transport.rtt_ms",       "estimator": "p95",   "value": 60, "op": ">",  "threshold": 50, "unit": "ms",    "n": 300, "holds": true },
+    { "name": "encoder.encode_ms",      "estimator": "p95",   "value": 4.6,"op": "<",  "threshold": 16, "unit": "ms",    "n": 298, "holds": true },
+    { "name": "client.is_hidden",       "estimator": "any",   "value": 0,  "op": "==", "threshold": 0,  "unit": "bool",  "n": 298, "holds": true }
+  ],
+  "thresholds_version": "2026-08-23.1"
+}
+```
+- **`verdict`** is **observational only** — today one of `likely_encoder_saturation` /
   `likely_network_congestion` / `likely_client_presentation_limit` / `nominal` /
   `indeterminate_client_hidden` / `unknown`, with its `evidence` logged. **No automatic action.**
   `nominal` = healthy session (no negative signal AND the tab was not hidden);
   `indeterminate_client_hidden` fires when the *only* reason no verdict was reached is the
   `client.is_hidden` guard; `unknown` is reserved for genuine insufficient-data windows.
+  **The control plane owns this vocabulary and grows it: a string a consumer does not recognise
+  is DATA. Report it verbatim; never fail on it.**
+- **`falsifiers`** are the few numbers that would overturn the verdict — each is a taxonomy series
+  `name`, the `estimator` applied to it over the window (`p10|p95|max|delta|mean|any`), the
+  computed `value`, and the `op`/`threshold`/`unit` of the condition the verdict relies on.
+  `holds` is whether the data satisfies that condition. A series with no samples in the window
+  reports `value: null`, `n: 0`, `holds: false` and a `note`. `evidence` (prose) and `falsifiers`
+  (numbers) are deliberately separate: neither replaces the other.
+- **`evidence_tier`** — `full` (both host and client contributed ≥3 samples **and** the clock was
+  measured), `host_only` / `client_only` (one side missing, or the clock unmeasured so the two
+  sides cannot be aligned), `insufficient` (neither side reached 3 samples).
+- **`clock.quality`** is `measured` only when the session has a `session_trace_clock` row;
+  `unmeasured` caps `evidence_tier` below `full` and is called out in `reason`.
+- **`thresholds_version`** identifies the golden threshold set the falsifier thresholds came from
+  (`docs/session-trace/thresholds.json` in the quasar repo).
 
 ---
 
