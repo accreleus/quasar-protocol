@@ -1123,6 +1123,8 @@ endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`,
 | `GET /v1/admin/sessions/{id}/verdict` | **admin** | *(ST-09)* the **Verdict** alone — state + evidence + reason + window + clock + tier + falsifiers. Observability only; no session authority. Same window parameters and clamps as the bundle |
 | `GET /v1/sessions/{id}/verdict` | **owner or admin** | *(ST-09)* the same Verdict for the caller's **own** session — resource-ownership check (`403` otherwise), the same one `DELETE /v1/sessions/{id}` applies; rate-limited per session like the other owner-scoped telemetry routes |
 | `POST /v1/admin/sessions/{id}/trace/annotations` | **admin** | *(ST-01)* an operator annotation marker on the trace timeline |
+| `POST /v1/admin/sessions/{id}/capture` | **admin** | *(session-capture)* arm ONE bounded observation of a live session — `202` with the `capture_id`. Admin-only and **observability-only**: it moves no session state, and `403` precedes the lookup as everywhere else in this table. `409` busy / not running, `422` unknown or unsupported kind, `501` the host's agent predates captures, `503` its agent is not connected |
+| `GET /v1/admin/sessions/{id}/captures/{capture_id}` | **admin** | *(session-capture)* read that capture's stored result — `404` until it arrives, which is the poll signal, not an error |
 | `POST /v1/sessions/{id}/trace/events` | **owner or admin** | *(ST-01)* the client posts its own session's browser trace events — same ownership check as `POST .../stats`; `202` on accept |
 | `POST /v1/sessions/{id}/trace/clock` | **owner or admin** | *(ST-01/ST-05)* the client posts its own session's client↔host clock-offset estimate — same ownership check as `POST .../stats`; `202` on accept |
 | `GET /v1/admin/hosts/{id}/encoder-certification` | **admin** | *(SPT-05)* read a host's encoder-certification verdicts (latest per configuration) |
@@ -3975,6 +3977,88 @@ Both accept the bundle's `?from=&to=` unix-ms window and apply the same default 
   `unmeasured` caps `evidence_tier` below `full` and is called out in `reason`.
 - **`thresholds_version`** identifies the golden threshold set the falsifier thresholds came from
   (`docs/session-trace/thresholds.json` in the quasar repo).
+
+## On-demand capture (session-capture, approved by Michael 2026-08-23)
+> *Additive, admin-gated, observability-only amendment. Two new endpoints and one new key on
+> the diagnostic bundle; no existing shape, status code, or endpoint changes. Reads and the
+> arm are both `RequireAuth → RequireAdmin` (`403` before any resource lookup). Wire contract:
+> `agent-api.md` §`session_capture` (downstream) and §`session_trace_event` `diag.*`
+> (upstream). **No new table and no migration** — a capture is stored as a
+> `session_trace_events` row, exempt from the rolling prune. No session authority: arming,
+> polling, or reading a capture never changes a session.*
+
+A **capture** is a bounded, admin-triggered observation of a live session: arm it, the agent
+observes within a byte **and** time budget, and reports once. It exists because the three
+things that cost the most debugging time in August 2026 — *what is the encode graph actually
+wired as right now*, *what is the encoder's live property set*, and *what do encode times look
+like at a finer grain than the heartbeat* — were each answerable only by an ssh hop, a rebuild,
+or a guess. It is deliberately **not** a probe: nothing is inserted into the media path.
+
+### `POST /v1/admin/sessions/{id}/capture` — arm one capture (admin)
+```json
+// request
+{ "kind": "pipeline_dot", "params": { "windows": 20, "window_ms": 250 } }
+// 202 — the agent acked; the result arrives later
+{ "capture_id": "<uuid>", "kind": "pipeline_dot", "session_id": "<uuid>",
+  "accepted_at": "2026-08-23T12:00:00Z" }
+```
+- `kind` is required: `pipeline_dot` | `encoder_props` | `burst_stats`. `params` is optional
+  and read only by `burst_stats` (`windows` 1–40, `window_ms` 100–1000; both clamped, by the
+  control plane and again by the agent).
+- The `capture_id` is minted here, before dispatch, so the caller holds the join key the moment
+  it gets its `202`.
+- **`202`, never `200`:** the ack means *armed*, not *done*. The result is fetched from the
+  read below.
+
+| status | code | meaning |
+|---|---|---|
+| `202` | — | armed; poll the read below |
+| `404` | `not_found` | no such session (to an admin) |
+| `409` | `capture_busy` | a capture is already in flight for this session — **single-flight, never queued** |
+| `409` | `session_not_running` | the session is not `running`, so there is nothing to observe |
+| `422` | `capture_kind_unsupported` | the agent does not know this `kind`, or cannot do it on this session right now |
+| `501` | `capture_unsupported` | this host's agent predates captures (it never acked). Rebuild the agent; retrying will not help |
+| `503` | `agent_not_connected` | the session's host has no live agent connection |
+
+### `GET /v1/admin/sessions/{id}/captures/{capture_id}` — read the result (admin)
+```json
+// 200 — the stored diag.* event, verbatim payload plus its timestamp
+{ "capture_id": "<uuid>", "kind": "pipeline_dot", "ts_unix_ms": 1735689600000,
+  "encoding": "gzip+base64", "content_type": "text/vnd.graphviz",
+  "data": "<base64 of gzip>", "bytes": 48213, "compressed_bytes": 6104,
+  "original_bytes": 48213, "truncated": false, "duration_ms": 42 }
+```
+- **`404` until the result arrives.** That is the poll signal, not an error: arm, then poll
+  until `200` or the budget's `max_ms` plus a small grace elapses. A capture that failed after
+  being accepted returns `200` with `error` set — so a poller always terminates on a body.
+- `encoding` is `gzip+base64` (payload in `data`) or `json` (payload in `json`).
+- The read is **not** window-bounded, unlike every other trace read: captures are sparse,
+  explicitly requested, and exempt from the rolling prune, so scoping them to a recent window
+  would hide exactly the artifact the caller asked for.
+
+### The bundle gains `captures[]`
+`GET /v1/admin/sessions/{id}/diagnostic-bundle` grows one key: every capture belonging to the
+session, **regardless of the bundle's window** (same reasoning as above — they are sparse and
+prune-exempt), each entry the shape of the read above.
+```json
+"captures": [
+  { "capture_id": "<uuid>", "kind": "encoder_props", "ts_unix_ms": 1735689600000,
+    "encoding": "json", "content_type": "application/json",
+    "json": { "encoder_factory": "vulkanh264enc", "…": "…" },
+    "bytes": 812, "compressed_bytes": 812, "original_bytes": 812,
+    "truncated": false, "duration_ms": 3 }
+]
+```
+The array is always present (empty when the session has no captures), and the payloads ride
+inside it — bounded by construction, since no capture may exceed its `max_bytes`.
+
+### What a capture may never contain
+The agent enforces the envelope (`agent-api.md` §`session_capture`), and it is repeated here
+because it is the reason this surface is safe to expose at all: no media (pixels, audio,
+bitstream), no input or microphone, no credentials, no `node_secret`, no environment
+wholesale, no path outside the session's scratch directory. `encoder_props` reads an
+**allow-list** of property names and elides long string values. A capture is bounded in bytes
+and in time, single-flight per session, and refused rather than queued.
 
 ---
 
