@@ -28,6 +28,22 @@ info:
     `Authorization: Bearer <access_token>`. Admin endpoints (tagged
     `x-required-role: admin`) reject a valid non-admin token with 403 — the gate
     is server-enforced (`RequireAuth → RequireAdmin`), never UI-gated.
+
+    CLIENT VERSION GATE (#380, additive). Every bearer-authenticated endpoint
+    accepts the OPTIONAL request header `X-Quasar-Client-Version` (strict
+    MAJOR.MINOR.PATCH) and MAY answer `426 client_too_old` when the presented
+    version is below the operator-configured floor. It is enforced once, in the
+    shared auth middleware (`RequireAuth`), never per handler — so rather than
+    repeating the parameter and the response on ~200 operations, it is declared
+    once here and as the reusable `ClientVersionHeader` parameter /
+    `ClientTooOld` response components. Absent header ⇒ no gate (web/legacy);
+    malformed value ⇒ treated as absent (logged, not gated). Order of checks on a
+    bearer request: 401 → 426 → 403 → handler. See control-api.md §Client version
+    gate on bearer-authenticated endpoints.
+  x-global-request-headers:
+    - $ref: "#/components/parameters/ClientVersionHeader"
+  x-global-responses:
+    "426": { $ref: "#/components/responses/ClientTooOld" }
 servers:
   - url: http://{host}:{port}
     description: |
@@ -117,6 +133,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/LoginResponse" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "426": { $ref: "#/components/responses/ClientTooOld" }
         "429": { $ref: "#/components/responses/RateLimited" }
   /v1/auth/logout:
     post:
@@ -2887,6 +2904,22 @@ components:
       description: "The opaque access_token from POST /v1/auth/login (Authorization: Bearer <access_token>)."
 
   parameters:
+    ClientVersionHeader:
+      name: X-Quasar-Client-Version
+      in: header
+      required: false
+      description: >-
+        #380 (P9-08 follow-up): the calling client's own version, strict MAJOR.MINOR.PATCH.
+        Accepted on EVERY bearer-authenticated endpoint and enforced once in the shared auth
+        middleware, so it is declared here rather than repeated on each operation (see
+        info.x-global-request-headers). Absent = web/legacy client, no gate - identical to an
+        omitted client_version at login. Below the operator floor = 426 client_too_old. A value
+        that is not valid semver is treated as ABSENT and logged, deliberately unlike login
+        (which gates it): this header rides every request, so gating a typo would brick an
+        already-signed-in client on every call, and the gate is cooperative anyway - omitting
+        the header evades it just as effectively.
+      schema: { type: string, pattern: "^v?[0-9]+\\.[0-9]+\\.[0-9]+$" }
+      example: "1.2.0"
     PathId:
       name: id
       in: path
@@ -2951,6 +2984,13 @@ components:
     RateLimited:
       description: Too many requests.
       content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+    ClientTooOld:
+      description: >-
+        client_too_old (P9-08 / #380) - the presented client version is below the
+        operator-configured floor. Emitted by POST /v1/auth/login (body client_version) and by
+        the shared auth middleware on any bearer endpoint (header X-Quasar-Client-Version); the
+        body is byte-identical either way, so a client parses it from one place.
+      content: { application/json: { schema: { $ref: "#/components/schemas/ClientTooOldError" } } }
     Unavailable:
       description: "no_host_available / capacity_exhausted — well-formed but no room to place now (retryable)."
       content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
@@ -3166,6 +3206,23 @@ components:
       required: [error]
       properties:
         error: { $ref: "#/components/schemas/Error" }
+
+    ClientTooOldError:
+      type: object
+      description: >-
+        The 426 body (P9-08 / #380). The standard error envelope plus the two advisory fields as
+        TOP-LEVEL SIBLINGS - the same place the login 200 carries them, so a client reads them
+        from one location whatever the status. A gated client never reaches a 200, so this is its
+        only chance to learn which version to update to.
+      required: [error, min_client_version]
+      properties:
+        error: { $ref: "#/components/schemas/Error" }
+        min_client_version:
+          type: string
+          description: "Always present on a 426 - the gate only fires when a floor is configured."
+        latest_client_version:
+          type: string
+          description: "Present only when the operator configured a latest-version advisory."
 
     User:
       type: object

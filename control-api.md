@@ -995,6 +995,11 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   Missing/invalid/expired/revoked ⇒ `401`.
 - **Tokens, never passwords, on the wire** beyond the two auth endpoints (P1-2). The password is
   sent only to register/login over TLS; everything else is bearer-token.
+- **Client version (#380, additive):** a bearer-authenticated request MAY carry
+  `X-Quasar-Client-Version: <MAJOR.MINOR.PATCH>`. Absent ⇒ no gate (web/legacy behaviour,
+  exactly as an omitted `client_version` at login). Present and below the operator floor ⇒
+  `426 client_too_old`, enforced in the shared auth middleware. See
+  §Client version gate on bearer-authenticated endpoints.
 - **IDs** are UUID strings. **Timestamps** are RFC3339/ISO-8601 UTC strings. Enumerations
   (session `state`, `h264_profile`, host `status`, user `role`) use the exact `schema.md` values.
 - **Errors** use a uniform body and conventional status codes:
@@ -1025,7 +1030,10 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   `restart_required` (409, *host-runtime-settings* — a `PATCH` to
   `/v1/admin/hosts/{id}/settings` changed a restart-class knob while the host has live sessions
   but `restart_confirm` was not `true`; includes `{ "live_sessions": N }` in the error body),
-  `rate_limited` (429), `no_host_available` (503,
+  `rate_limited` (429), `client_too_old` (426, *P9-08 / #380* — the presented client version is
+  below the operator-configured floor; the body carries `min_client_version` (+
+  `latest_client_version` when configured) as top-level siblings of the `error` envelope),
+  `no_host_available` (503,
   *P2-01* — no online host/GPU can serve the request), `capacity_exhausted` (503, *P2-01* — a
   matching GPU is online but its free encode slots / VRAM cannot satisfy the request right now),
   `internal` (500). **Retryable:** `no_host_available`, `capacity_exhausted`, `rate_limited`
@@ -1062,7 +1070,10 @@ client made the call. Hiding the admin UI is **never** the access control — th
 is this server check. Order of checks: missing/invalid token ⇒ `401`; valid token but
 insufficient role ⇒ `403`. The `403` precedes any resource lookup, so an admin
 endpoint never leaks existence (e.g. a non-admin `PATCH` of any app id is `403`, not
-`404`).
+`404`). *(#380)* The client-version gate sits **between** those two checks — `401`, then
+`426 client_too_old`, then `403` — for the same reason the `403` precedes the lookup: each
+refusal is decided by the cheapest fact that settles it, and neither tells an unauthenticated
+caller anything. See §Client version gate on bearer-authenticated endpoints.
 
 | endpoint | required role | notes |
 |---|---|---|
@@ -1233,7 +1244,10 @@ distinction, to avoid user enumeration).
 > response advisories. A client below `min_client_version` SHOULD be hard-gated and one below
 > `latest_client_version` soft-warned — but the **enforcement rule is defined in P9-08
 > (#236)**; this amendment only specifies the fields. `client_version` is a semver string the
-> client owns; `contract_version` is the `protocol/` version tag the client built against.*
+> client owns; `contract_version` is the `protocol/` version tag the client built against.
+> **#380 extends the hard gate past login onto every bearer-authenticated endpoint, carried by
+> the optional `X-Quasar-Client-Version` header — see §Client version gate on
+> bearer-authenticated endpoints. The login shape above is unchanged.***
 
 > *(LP-SEC-01, additive) `device_key` is an **optional** request field. When present, the server
 > upserts the `(user_id, device_key)` `user_devices` row and **stamps the minted
@@ -1241,6 +1255,86 @@ distinction, to avoid user enumeration).
 > (legacy/native clients), behaviour is exactly as today: the token is minted with `device_id =
 > NULL` and is not device-revocable until a device-declaring re-login. The response shape is
 > unchanged.*
+
+### Client version gate on bearer-authenticated endpoints
+
+> **Amendment — #380 (P9-08 follow-up), additive, requires sign-off.** P9-08 gates only
+> `POST /v1/auth/login`, so a client holding a cached token is never re-checked: raising the
+> floor has no effect on it until the token expires. This amendment gives the version a
+> carrier on non-login requests so the floor is enforced *server-side* on every
+> authenticated call, per the server-enforced-authorization rule in §Authorization.
+> **Purely additive: one new OPTIONAL request header, no new endpoint, no new error code
+> (`client_too_old` already exists from P9-08), and no change to any existing request body,
+> response body, or status code.** `agent-api.md`, `signaling.md`, `input.md` and `schema.md`
+> are byte-identical — the header carries no state and nothing is persisted.
+
+**The header.** A client MAY send, on any endpoint that requires
+`Authorization: Bearer <access_token>`:
+
+```
+X-Quasar-Client-Version: 1.2.0
+```
+
+The value is a strict `MAJOR.MINOR.PATCH` semver string the client owns — the same grammar and
+the same meaning as `client_version` in the login body (pre-release / build metadata is not
+part of the grammar). There is no header twin of `contract_version`; that field stays a
+login-only handshake value.
+
+**Normative rule (server-enforced, uniform).** The gate is applied **in the shared auth
+middleware** — the same `RequireAuth` layer every bearer endpoint is wired through, exactly as
+`RequireAdmin` is the one place the admin role is checked. It is **never** re-implemented per
+handler, and no endpoint is exempt. Evaluation order on a bearer request is:
+
+1. missing / invalid / expired / revoked token ⇒ `401 unauthorized` (unchanged);
+2. **version gate** ⇒ `426 client_too_old` (this amendment);
+3. role gate ⇒ `403 forbidden` (unchanged, §Authorization);
+4. handler.
+
+The version gate runs **after** authentication and **before** the role check, so an
+unauthenticated caller can never probe the configured floor, and a too-old client gets the
+actionable `426` rather than a `403` it cannot act on.
+
+**Gate decision** — identical to login's, given the operator floor `min_client_version`:
+
+| header | floor configured? | outcome |
+|---|---|---|
+| absent | either | **proceed** — legacy / web client, no gate (same as an omitted `client_version` at login) |
+| present, ≥ floor | yes | proceed |
+| present, < floor | yes | **`426 client_too_old`** |
+| present, any value | no floor | proceed |
+| present, **not valid semver** | yes | **proceed** (treated as absent); the server SHOULD log a warning |
+
+> *The malformed case deliberately diverges from login, where an unparseable `client_version`
+> is gated. At login the client presents itself once, at a credential boundary, and a refusal
+> costs it one retry. On the bearer path the header rides **every** request, so gating a
+> malformed value would take a client that is already signed in and, on a single typo or an
+> unexpected suffix in its version string, brick every call it makes — including the ones it
+> would use to update itself. It also buys nothing: the gate is cooperative, and a client that
+> wants to evade it can simply omit the header. So a malformed header is treated as absent and
+> logged, not gated.*
+
+**`426` body** — byte-identical to login's `426`, so a client parses it from one place
+regardless of which call produced it:
+
+```json
+{
+  "error": { "code": "client_too_old",
+             "message": "client version is below the minimum supported version; please update" },
+  "min_client_version": "1.0.0",
+  "latest_client_version": "1.3.0"
+}
+```
+
+`min_client_version` is always present on a `426` (the gate only fires when a floor is
+configured); `latest_client_version` appears only when the operator configured one. Both are
+top-level siblings of the `error` envelope, matching the login `426` and the login `200`
+advisory.
+
+**Client obligation.** A native client SHOULD send the header on every authenticated request
+once it knows its own version, and SHOULD treat a `426` from any endpoint the way it treats a
+`426` from login: stop, surface the update prompt, and do not retry — the refusal is not
+retryable and no other endpoint will answer differently. The web client sends nothing and is
+unaffected.
 
 ### `POST /v1/auth/logout`
 Revokes the presented bearer token (`auth_tokens.revoked_at = now()`). `204`. Idempotent.
