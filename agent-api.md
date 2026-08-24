@@ -96,6 +96,19 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > `h265` is the wire spelling of HEVC (the control-plane profile catalog's `hevc` maps to `h265` on
 > this wire). See §`session_assign` and §`capacity`.
 
+> **Amendment — per-codec encoder throughput hint (#506), additive, requires sign-off.** Adds ONE
+> optional, additive field to the agent `capacity` report: **`codec_throughput`**, a map from a wire
+> codec (`"h264" | "h265" | "av1"`) to `{ "max_pixel_rate_mpix_s": <number> }` — the sustained encode
+> throughput, in megapixels per second, the host's *effective encoder element for that codec* can hold
+> at session settings. A host advertises a codec (`capacity.codecs`) without any notion of how fast it
+> encodes it, and the throughputs are not comparable: measured on an RTX 5090 (driver 610.57.04),
+> `vulkanh265enc` sustains ~395 Mpix/s while `vulkanh264enc` sustains ~1400 and `vulkanav1enc` ~1215.
+> 1440p120 needs 442 and 2160p60 needs 498, so an h265 session at either tier runs *below tier* with
+> zero drops and zero freezes — the compositor is back-pressured by the encoder rather than dropping,
+> so the shortfall is silent. The hint lets the control plane reject such a codec at launch and fall
+> through its rung ladder to one the host can actually sustain. Absent field, absent codec key, or a
+> non-positive value all mean **unknown**, and unknown gates nothing. See §`capacity`.
+
 > **Amendment — image management P2 (ensure images onto hosts), additive, requires sign-off
 > (signed off 2026-08-08).** Adds two downstream (control → node) messages — `image_ensure`
 > (pull a prebuilt catalog image into the host's docker daemon) and `image_remove` (best-effort
@@ -220,6 +233,10 @@ the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
   },
   "effective_settings": { "encoder": "nvenc", "render_node": "/dev/dri/renderD128" },
   "codecs": ["h264", "h265"],
+  "codec_throughput": {
+    "h264": { "max_pixel_rate_mpix_s": 1400 },
+    "h265": { "max_pixel_rate_mpix_s": 395 }
+  },
   "gpus": [
     { "index": 0, "vendor": "amd", "model": "Radeon Pro V520",
       "vram_mb_total": 16384, "encode_slots_total": 2,
@@ -283,6 +300,33 @@ live effective-encoder change is re-probed in place). Absent ⇒ the control pla
 (an old agent that never reports the field is treated as H.264-only; the control plane keeps its
 last-stored value rather than clobbering it when a later report omits the key). H.264 is always
 producible, so the set is never empty in practice.
+
+`codec_throughput` *(NEW, #506, optional, additive)* is the per-codec **sustained encode throughput
+hint**: a map keyed by the same wire codec strings as `codecs`, each value an object carrying
+`max_pixel_rate_mpix_s` — megapixels per second the codec's *effective encoder element on this host*
+can sustain at session settings (CBR, one reference frame, no B-frames — the properties the agent
+actually configures). An entry may be **measured** (an encoder probe on this host) or
+**vendor-estimated** (a compiled-in table keyed by encoder element, which is what the agent ships
+today); the wire does not distinguish the two, because a consumer must treat both the same way — as
+a conservative capability ceiling, not a promise. The object form exists so a future measured probe
+can add fields (a measurement timestamp, a confidence) without a shape change.
+
+Semantics, all of which resolve toward *not* gating:
+
+- **Absent field** ⇒ pre-amendment agent. The control plane keeps its last-stored value (same
+  keep-if-absent discipline as `codecs`/`effective_settings`/`storage`); an explicit `{}` is a real
+  overwrite to "nothing known".
+- **A codec present in `codecs` but absent from `codec_throughput`**, or an entry whose
+  `max_pixel_rate_mpix_s` is missing, non-numeric or ≤ 0 ⇒ **unknown**. Unknown never rejects
+  anything.
+- **A codec present in `codec_throughput` but not in `codecs`** is meaningless and ignored — the
+  advertised set is what `codecs` says.
+
+The agent re-sends `capacity` (and therefore this map) on the same triggers as `codecs`, including a
+`config_update` that flips the effective encoder, since the map is keyed on the elements sessions
+actually build. The hint is **advisory to the codec decision only**: it never blocks registration or
+placement, and it never removes a codec from the host's advertised set. The control plane's use of it
+is `control-api.md` `codec_decision.considered[].rejected_by = "encoder_throughput"`.
 
 `host.cpu_model` *(NEW, host-observability-2, optional, additive)* — the CPU marketing name
 (`/proc/cpuinfo` `model name`). `gpus[].render_node` *(NEW, host-observability-2, optional,
