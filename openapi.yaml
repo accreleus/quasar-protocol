@@ -216,9 +216,9 @@ paths:
       tags: [setup]
       summary: Create the first admin (token-gated); self-disables once any admin exists (#first-run wizard).
       description: |
-        First-run claim. Auth is the per-boot setup token (written to the control
-        plane log at WARN and to /run/quasar/setup-token, 0600) — NOT a bearer
-        token. Wrong or missing token → 401 with no message/timing distinction.
+        First-run claim. Auth is the per-boot setup token (written ONLY to
+        /run/quasar/setup-token, 0600, never to the log; the boot log names the
+        file path) — NOT a bearer token. Wrong or missing token → 401 with no message/timing distinction.
         Refused with 409 setup_already_complete once any admin exists (checked
         under the same advisory lock as BOOTSTRAP_ADMIN_* provisioning, so the two
         paths can never both create an admin). Response is login-shaped so the
