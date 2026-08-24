@@ -2939,8 +2939,13 @@ and echoed on **every** session body.
   Treat the set as **open**: a client must render an unrecognised reason rather than assume the list
   is closed.
 - `encoder_throughput` *(NEW, #506)* means the placed host advertises the codec but reported a
-  sustained encode throughput below what the rung needs — the rung's `width × height × fps` against
-  `capacity.codec_throughput[codec].max_pixel_rate_mpix_s` (agent-api.md). It exists because
+  sustained encode throughput below what the launch needs — the **launch-effective**
+  `width × height × fps` (the rung's own values, with an explicit `stream.*` size override applied)
+  against `capacity.codec_throughput[codec].max_pixel_rate_mpix_s` (agent-api.md). The size is the
+  effective one and not the rung's nominal one because an encoder's budget is spent on the pixels
+  actually encoded: sizing a 1440p120 chain down to 720p60 asks for 55 Mpix/s, not 442, and must not
+  cost the codec. Note this is the one clamp a `stream.*` size override *retargets* rather than
+  bypasses — a `stream.codec` override still skips it outright. It exists because
   throughput is codec-asymmetric on the same silicon (a measured 5090 sustains ~395 Mpix/s on
   `vulkanh265enc` and ~1400 on `vulkanh264enc`), and an encoder that cannot keep up back-pressures
   the compositor rather than dropping — so the session runs below its tier with zero drops and zero

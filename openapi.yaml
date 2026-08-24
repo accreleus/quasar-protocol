@@ -3031,8 +3031,9 @@ components:
         unrecognised value rather than assuming the list is closed. host_encoder=clamp 1,
         client_decode=clamp 2/3 (codec), decode_height=clamp 2/3 (resolution), decode_history=clamp
         4, hardware_encoder=clamp 5, encoder_throughput=clamp 6 (#506: the host's reported sustained
-        encode throughput for this codec cannot carry the rung's width x height x fps - see
-        agent-api.md `capacity.codec_throughput`; a host that reports no hint never rejects this way),
+        encode throughput for this codec cannot carry the LAUNCH-EFFECTIVE width x height x fps - the
+        rung's values with any explicit stream.* size override applied - see agent-api.md
+        `capacity.codec_throughput`; a host that reports no hint never rejects this way),
         unknown_codec=a rung whose catalog codec does not map (hand-edited data; `codec` then carries
         the raw catalog value).
       enum: [host_encoder, client_decode, decode_height, decode_history, hardware_encoder, encoder_throughput, unknown_codec]

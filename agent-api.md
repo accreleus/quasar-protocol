@@ -315,7 +315,12 @@ Semantics, all of which resolve toward *not* gating:
 
 - **Absent field** ⇒ pre-amendment agent. The control plane keeps its last-stored value (same
   keep-if-absent discipline as `codecs`/`effective_settings`/`storage`); an explicit `{}` is a real
-  overwrite to "nothing known".
+  overwrite to "nothing known". **Keep-if-absent means a DOWNGRADE leaves a stale hint in place:** a
+  host rolled back to a pre-amendment agent cannot send `{}`, so whatever it last reported keeps
+  gating that host's codec decisions until a hint-capable agent re-registers. The exposure is
+  bounded — the stored value is a throughput ceiling, so a stale one costs at most a tier and never
+  a failed launch — but an operator debugging an unexpected `encoder_throughput` rejection on a
+  downgraded host should clear `hosts.codec_pixel_rates` rather than look for a live report.
 - **A codec present in `codecs` but absent from `codec_throughput`**, or an entry whose
   `max_pixel_rate_mpix_s` is missing, non-numeric or ≤ 0 ⇒ **unknown**. Unknown never rejects
   anything.
