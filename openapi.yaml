@@ -216,9 +216,9 @@ paths:
       tags: [setup]
       summary: Create the first admin (token-gated); self-disables once any admin exists (#first-run wizard).
       description: |
-        First-run claim. Auth is the per-boot setup token (written to the control
-        plane log at WARN and to /run/quasar/setup-token, 0600) — NOT a bearer
-        token. Wrong or missing token → 401 with no message/timing distinction.
+        First-run claim. Auth is the per-boot setup token (written ONLY to
+        /run/quasar/setup-token, 0600, never to the log; the boot log names the
+        file path) — NOT a bearer token. Wrong or missing token → 401 with no message/timing distinction.
         Refused with 409 setup_already_complete once any admin exists (checked
         under the same advisory lock as BOOTSTRAP_ADMIN_* provisioning, so the two
         paths can never both create an admin). Response is login-shaped so the
@@ -3030,9 +3030,13 @@ components:
         UI-P6: the clamp that rejected a rung during the walk. Treat this set as OPEN - render an
         unrecognised value rather than assuming the list is closed. host_encoder=clamp 1,
         client_decode=clamp 2/3 (codec), decode_height=clamp 2/3 (resolution), decode_history=clamp
-        4, hardware_encoder=clamp 5, unknown_codec=a rung whose catalog codec does not map
-        (hand-edited data; `codec` then carries the raw catalog value).
-      enum: [host_encoder, client_decode, decode_height, decode_history, hardware_encoder, unknown_codec]
+        4, hardware_encoder=clamp 5, encoder_throughput=clamp 6 (#506: the host's reported sustained
+        encode throughput for this codec cannot carry the LAUNCH-EFFECTIVE width x height x fps - the
+        rung's values with any explicit stream.* size override applied - see agent-api.md
+        `capacity.codec_throughput`; a host that reports no hint never rejects this way),
+        unknown_codec=a rung whose catalog codec does not map (hand-edited data; `codec` then carries
+        the raw catalog value).
+      enum: [host_encoder, client_decode, decode_height, decode_history, hardware_encoder, encoder_throughput, unknown_codec]
     CodecDecisionRung:
       type: object
       description: "UI-P6: one rung's verdict in the resolution walk."
@@ -3056,7 +3060,7 @@ components:
           type: boolean
           description: >-
             This rung was dispatched WITHOUT being measured against the full clamp chain - the
-            clamp-0 override path (clamps 2/3/4/5 skipped) or the floor (every clamp skipped).
+            clamp-0 override path (clamps 2/3/4/5/6 skipped) or the floor (every clamp skipped).
             Never set on a rung that won the walk.
     CodecDecision:
       type: object
@@ -3069,7 +3073,7 @@ components:
         because `stream.codec` is identical in all three. Won on merit: selected with
         rejected_by=null, clamps_bypassed=false, floor=false, override=null. Operator override:
         `override` names the forced codec and the selected rung has clamps_bypassed=true with
-        rejected_by=null (it SKIPPED clamps 2/3, 4 and 5 rather than surviving them). Floor:
+        rejected_by=null (it SKIPPED clamps 2/3, 4, 5 and 6 rather than surviving them). Floor:
         floor=true and the selected rung is clamps_bypassed=true WHILE STILL CARRYING the
         rejected_by that killed it - it was dispatched despite being rejected. `floor` and
         `clamps_bypassed` answer different questions ("did anything survive?" vs "was THIS rung

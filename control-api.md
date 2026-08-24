@@ -2878,7 +2878,8 @@ codec: it answers the single video codec the host offers. Resolution is, in orde
 against `h264|h265|av1`; a bad value ⇒ `400 validation_failed`). It is **orthogonal** to the
 `stream.*` resolution envelope: a codec-only override does **not** bypass the profile eligibility
 gate (unlike the other `stream.*` fields). It forces a concrete codec, bypassing clamps 2/3
-(device decode) and 4 (failure history). This is exactly the forced re-test path by which a
+(device decode), 4 (failure history), 5 (hardware encoder) and 6 (encoder throughput). This is
+exactly the forced re-test path by which a
 previously-failed codec on a since-fixed encoder gets a fresh trial, whose sustained smooth run
 records the clearing pass. It does **not** bypass clamp 1: forcing a codec the placed host
 cannot encode returns **`409 conflict`** and no session persists (host encoder capability is
@@ -2933,9 +2934,22 @@ and echoed on **every** session body.
 
 - `rejected_by` is the clamp that killed the rung, `null` when it passed:
   `host_encoder` (1) · `client_decode` (2/3, codec) · `decode_height` (2/3, resolution) ·
-  `decode_history` (4) · `hardware_encoder` (5) · `unknown_codec` (a rung whose catalog codec does
-  not map — hand-edited data; `codec` then carries the raw catalog value). Treat the set as
-  **open**: a client must render an unrecognised reason rather than assume the list is closed.
+  `decode_history` (4) · `hardware_encoder` (5) · `encoder_throughput` (6) · `unknown_codec` (a rung
+  whose catalog codec does not map — hand-edited data; `codec` then carries the raw catalog value).
+  Treat the set as **open**: a client must render an unrecognised reason rather than assume the list
+  is closed.
+- `encoder_throughput` *(NEW, #506)* means the placed host advertises the codec but reported a
+  sustained encode throughput below what the launch needs — the **launch-effective**
+  `width × height × fps` (the rung's own values, with an explicit `stream.*` size override applied)
+  against `capacity.codec_throughput[codec].max_pixel_rate_mpix_s` (agent-api.md). The size is the
+  effective one and not the rung's nominal one because an encoder's budget is spent on the pixels
+  actually encoded: sizing a 1440p120 chain down to 720p60 asks for 55 Mpix/s, not 442, and must not
+  cost the codec. Note this is the one clamp a `stream.*` size override *retargets* rather than
+  bypasses — a `stream.codec` override still skips it outright. It exists because
+  throughput is codec-asymmetric on the same silicon (a measured 5090 sustains ~395 Mpix/s on
+  `vulkanh265enc` and ~1400 on `vulkanh264enc`), and an encoder that cannot keep up back-pressures
+  the compositor rather than dropping — so the session runs below its tier with zero drops and zero
+  freezes, invisibly. A host that reports no hint for the codec never rejects this way.
 - `considered` holds only the rungs actually **walked**. The walk stops at the first survivor, so a
   clean top-rung win lists exactly one entry — that is not a truncated record, it is the whole
   decision.
@@ -2948,7 +2962,7 @@ and echoed on **every** session body.
 | outcome | how it reads |
 |---|---|
 | **won on merit** | `selected: true`, `rejected_by: null`, `clamps_bypassed: false`, `floor: false`, `override: null` — it was measured against every clamp and survived |
-| **operator override** (clamp 0) | `override` names the forced codec and the selected rung has `clamps_bypassed: true` with `rejected_by: null`. It **skipped** clamps 2/3, 4 and 5 rather than surviving them — clamp 1 is the only one an override honours, so a `rejected_by: "host_encoder"` here is the `409` path and no session persists |
+| **operator override** (clamp 0) | `override` names the forced codec and the selected rung has `clamps_bypassed: true` with `rejected_by: null`. It **skipped** clamps 2/3, 4, 5 and 6 rather than surviving them — clamp 1 is the only one an override honours, so a `rejected_by: "host_encoder"` here is the `409` path and no session persists |
 | **the floor** | `floor: true`, and the selected rung is `clamps_bypassed: true` **while still carrying the `rejected_by` that killed it during the walk**. That pairing is the point: the terminal rung was dispatched *despite* being rejected. Recording it as an unqualified pass would misinform an operator about a session that is, for example, running a codec this device has already failed to decode |
 
 `floor` and `clamps_bypassed` answer different questions — "did anything survive?" versus "was
