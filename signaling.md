@@ -210,9 +210,16 @@ Application close codes in the 4000–4999 range so the client can react precise
 | `4401` | token invalid / expired / already used |
 | `4404` | session not found or terminal (`stopped`/`failed`) |
 | `4409` | session not yet assigned to a host (retry shortly) |
+| `4410` | this attachment was taken over by a later attach (terminal for this client: render "session taken over elsewhere"; do NOT mint a replacement token or reconnect) |
 | `4500` | relay to node agent unavailable (host offline) |
 A normal end is code `1000`; the Phase 0 `{type:"bye"}`/`{type:"error"}` diagnostic messages
 still apply in-band before close.
+
+Attach is explicit takeover: signaling tokens are single-use but not single-active, the last
+attach for a session wins, and the displaced connection is closed with `4410` (added 2026-08-25;
+previously this path closed with `1000`, which a client cannot distinguish from an ordinary
+hang-up — auto-recovering from it produced a two-tab displacement loop). A client that does not
+recognise `4410` falls into its unrecognised-code handling, same as before the amendment.
 
 ## Phase 1 simplifications (revisit, not workarounds)
 - One signaling WebSocket per session; the control plane fans messages by `session_id`.
