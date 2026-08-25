@@ -5946,6 +5946,79 @@ already-materialized row being *handed out*.
 > Backed by `openapi.yaml` (the two `409`s + the `AdminApp` field). No `schema.md` change
 > (column 0060 already exists), no new route, `agent-api.md` untouched.
 
+## Provider entitlement mode — the wizard entitlement-mode wire *(#465 amendment, additive)*
+
+> **Amendment (#465, 2026-08-26) — a wire for "who is this provider app for" at enable time.
+> Additive, admin-gated, sign-off granted.** Adds one route,
+> `POST /v1/admin/library-providers/{provider}/entitlement-mode`. No existing shape, status
+> code, endpoint or behaviour changes; a client that has never heard of this route sees `all`
+> forever, exactly like today.
+
+**The gap.** `EnsureProviderApp` (`control-plane/internal/images/provider_app.go`) grants
+`subject_type='all'` unconditionally on create — the setup wizard's Libraries step
+(`web/src/pages/setup/StepLibraries.tsx`) has always rendered that honestly ("Enabling this
+provider makes it available to all users") rather than offering a dead control, because there
+was no wire field to submit. `PATCH /v1/admin/settings` cannot express who a provider app is
+for; it only flips `library_discovery_enabled`, which is a **fleet-wide** switch, not a
+per-app one.
+
+**Why this is not a field on the CREATE path.** `EnsureProviderApp`'s own doc comment records
+that an earlier draft threaded an `EntitlementMode` parameter through it, and Alice review round
+2 (PR #464) rejected the seam: the wizard step runs **after** the settings-enable has already
+created the app — a separate request, a separate transaction, often a separate day — so a
+create-time-only parameter is never what a later wizard step could call through. That review
+named the actual shape: *"a distinct call that CHANGES an existing app's entitlements, not a
+mode threaded through the CREATE path."* This amendment is that call.
+
+**Why a new route rather than the existing generic surface.** Phase 2 already ships
+`POST`/`DELETE /v1/admin/apps/{id}/entitlements` (above) — genuinely general, and unchanged by
+this amendment. It is keyed by **app id**, which the caller does not have: `EnsureLibraryProviders`
+runs off the request thread as a side effect of the settings `PATCH` (it must not block that
+request), so there is no response carrying an `app_id` for the wizard to key against.
+Reconstructing one client-side means listing every admin app, filtering by `library_provider`,
+diffing current entitlements against a desired `all`/`user`/`none` **state**, and issuing
+multiple non-atomic grant/revoke calls to get there — real complexity for what the operator
+experiences as one radio-button choice. This route takes the one thing the caller actually has,
+the **provider name**, and applies the whole desired state atomically, server-side.
+
+**`POST /v1/admin/library-providers/{provider}/entitlement-mode`:**
+```json
+// request
+{ "mode": "user" }
+// 200
+{ "entitlement_mode": {
+    "provider": "steam", "app_id": "<uuid>", "mode": "user",
+    "items": [ { "subject_type": "user", "subject_id": "<uuid>", ... } ] } }
+```
+- `mode` is `"all" | "user" | "none"` (`ProviderEntitlementMode`, `openapi.yaml`), the same
+  vocabulary the server already carries internally (`images.EntitlementMode`). Any other value
+  is `400 validation_failed`.
+- **`{provider}` is a `library_provider` name (e.g. `"steam"`), not an app id** — matched
+  case-insensitively, mirroring `EnsureProviderApp`'s own lower-casing. `404 not_found` when no
+  app exists yet with that `library_provider`: not enabled yet, or `EnsureLibraryProviders`'s
+  async pass has not landed. The caller's answer to a `404` here is "try again shortly" (or
+  point the operator at **Admin → Apps**, where the generic surface already reaches every
+  provider app once it exists) — this route does not retry internally.
+- **This is a MODE, not an incremental grant — it REPLACES the app's entire entitlement set.**
+  `"all"` writes exactly one `('all', NULL)` row; `"user"` writes exactly one `('user', <the
+  acting admin>)` row — **there is no `subject_id` field; "user" always means the caller**,
+  matching the wizard's own "only me" framing, not an arbitrary-user picker (that remains the
+  generic surface's job); `"none"` writes zero rows. Calling this with `"all"` after an admin
+  had hand-granted three specific users **removes those three grants** — the `all` row already
+  subsumes them, and a mode control is a radio button, not a checklist. This is the one
+  surprising thing about this route next to grant/revoke, and it is intentional: it is called
+  "entitlement mode" because it expresses the whole state.
+- Grants are written `granted_by: 'admin'`, `granted_by_user: <acting admin>` — same provenance
+  rule as the generic grant route. Written to `GET /v1/admin/activity` as
+  `app.entitlement.set_mode` (`provider`, `mode`, `item_count` — no subject values, same
+  4096-byte-`details` discipline as every other admin mutation).
+- `app_id` in the response is deliberately included so a caller that wants finer-grained control
+  afterward (add one more specific user) can immediately use the generic entitlements routes
+  without a second lookup.
+
+No `schema.md` change (writes the existing `entitlements` table, same shape as every other
+writer of it), no `agent-api.md` change, no new column.
+
 ---
 
 ## How the client uses this (end-to-end)

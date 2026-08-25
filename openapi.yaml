@@ -889,6 +889,44 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  # ─── provider entitlement mode (#465 amendment, additive) ─────────────────
+  # See the "Provider entitlement mode" amendment note above the "How the
+  # client uses this" section in control-api.md for the full rationale: this
+  # is the seam EnsureProviderApp's own doc comment (control-plane
+  # internal/images/provider_app.go) named as the follow-up when it ruled out
+  # threading an entitlement mode through the app CREATE path.
+  /v1/admin/library-providers/{provider}/entitlement-mode:
+    parameters: [ { $ref: "#/components/parameters/PathProvider" } ]
+    post:
+      tags: [admin, apps]
+      summary: Set the WHOLE entitlement state of a provider app (all|user|none), by provider name.
+      description: >-
+        #465, additive. REPLACES every entitlement row on the provider app named by {provider}
+        with exactly what mode implies - "all" writes one ('all', NULL) row, "user" writes one
+        ('user', <acting admin>) row (this endpoint has no subject_id field - it always means
+        the caller), "none" writes none. This is a MODE control (a radio button expressing one
+        of three exclusive states), not an incremental grant: calling it discards whatever was
+        there, including a hand-picked set of per-user grants made through
+        POST /v1/admin/apps/{id}/entitlements. Use that route instead for anything short of a
+        full state replacement.
+        Exists because the caller (the setup wizard / settings library step) knows the provider
+        name but not the app id - EnsureProviderApp creates the app off the request thread, as a
+        side effect of PATCH /v1/admin/settings library_discovery_enabled false->true, so there
+        is no response carrying an app_id to key the generic entitlements routes against.
+        404 not_found when no app exists yet with this library_provider (not enabled yet, or the
+        async create has not landed) - the wizard's answer is "try again shortly", not a retry
+        loop hidden here. Written to the admin activity log as app.entitlement.set_mode.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ProviderEntitlementModeSet" } } }
+      responses:
+        "200": { description: Mode applied., content: { application/json: { schema: { $ref: "#/components/schemas/ProviderEntitlementModeEnvelope" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   # ─── library discovery, admin surfaces (Steam library discovery Phase 4) ──
   # Purely additive: five admin routes, no existing shape or behaviour changed.
   # (A sixth, POST /v1/admin/library/scan, was added by the force-scan follow-on
@@ -2960,6 +2998,17 @@ components:
         app named by the sibling {id}; a well-formed pair that does not match is 404, never a
         cross-app delete.
       schema: { type: string, format: uuid }
+    PathProvider:
+      name: provider
+      in: path
+      required: true
+      description: >-
+        #465 amendment: the library_provider name (e.g. "steam"), NOT an app id - this route
+        exists precisely because the caller does not have one yet (see the amendment note on
+        POST /v1/admin/library-providers/{provider}/entitlement-mode). Matched
+        case-insensitively against apps.library_provider, mirroring EnsureProviderApp's own
+        lower-casing on write. An empty/whitespace-only value is 400 validation_failed.
+      schema: { type: string, minLength: 1 }
     PathExternalId:
       name: external_id
       in: path
@@ -3849,6 +3898,39 @@ components:
           description: >-
             REQUIRED (a user uuid) when subject_type is 'user'; must be OMITTED, null or "" when
             subject_type is 'all'. Any other combination is 400 validation_failed.
+
+    ProviderEntitlementMode:
+      type: string
+      description: >-
+        #465. Who a provider app is for, as one exclusive state rather than an incremental
+        grant/revoke pair. Mirrors the server-side images.EntitlementMode vocabulary
+        (control-plane internal/images).
+      enum: [all, user, none]
+    ProviderEntitlementModeSet:
+      type: object
+      description: "#465. The request body for POST .../library-providers/{provider}/entitlement-mode."
+      required: [mode]
+      properties:
+        mode: { $ref: "#/components/schemas/ProviderEntitlementMode" }
+    ProviderEntitlementModeEnvelope:
+      type: object
+      description: >-
+        #465. app_id is surfaced READ-ONLY so a caller that wants to keep using the generic
+        entitlements routes afterward (e.g. to add one more specific user) has it without a
+        second lookup; items is the full post-write entitlement list, same shape and ordering
+        as GET /v1/admin/apps/{id}/entitlements.
+      required: [entitlement_mode]
+      properties:
+        entitlement_mode:
+          type: object
+          required: [provider, app_id, mode, items]
+          properties:
+            provider: { type: string, description: "Echoes the path parameter, normalized." }
+            app_id: { type: string, format: uuid }
+            mode: { $ref: "#/components/schemas/ProviderEntitlementMode" }
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/Entitlement" }
 
     Session:
       type: object
