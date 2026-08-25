@@ -568,6 +568,17 @@ paths:
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: >-
+            #534 AMENDMENT (2026-08-25), ADDITIVE: code `library_discovery_disabled` - the
+            request would create a library-provider app (non-empty library_provider) while
+            library_discovery_enabled is false. Refused rather than created-then-suspended:
+            discovery is a fail-closed, fleet-wide, privacy-relevant setting (it walks user
+            homes), so an app create must not flip it as a side effect, and a 201 followed
+            by a silent reconciler suspension reads as data loss. Enable library discovery
+            in Settings first. Mirrors the existing 409 `provider_enabled` refusal on
+            DELETE /v1/admin/images/{id}/install.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/apps/{id}:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     get:
@@ -633,6 +644,15 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >-
+            #534 AMENDMENT (2026-08-25), ADDITIVE: code `library_discovery_disabled` - the
+            edit would set a non-empty library_provider, or enable a reconciler-suspended
+            provider app, while library_discovery_enabled is false (either write would be
+            immediately reverted by the reconciler). The ways out are deliberate: clear
+            library_provider, keep the app disabled, or enable library discovery in
+            Settings. See the POST /v1/apps 409 for the rationale.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
     delete:
       tags: [apps]
       summary: Remove an app from the catalog (refuse-if-in-use, and refuse-if-it-has-derived-tiles).
@@ -4555,7 +4575,7 @@ components:
         - { $ref: "#/components/schemas/App" }
         - type: object
           description: "Admin-visible app shape: includes runtime_spec + resource/storage defaults (P2-08, P5-01)."
-          required: [default_vram_mb, default_encode_slots, runtime_spec, managed_home, home_container_path, runtime_preset_id, launchable_profile_ids, origin, library_provider]
+          required: [default_vram_mb, default_encode_slots, runtime_spec, managed_home, home_container_path, runtime_preset_id, launchable_profile_ids, origin, library_provider, library_discovery_suspended]
           properties:
             origin:
               allOf: [ { $ref: "#/components/schemas/AppOrigin" } ]
@@ -4594,6 +4614,20 @@ components:
                 A derived tile must carry "" - a tile cannot itself be a provider, and the DB
                 CHECK enforces it. Admin-only, like runtime_preset_id: operator configuration,
                 not library presentation.
+            library_discovery_suspended:
+              type: boolean
+              description: >-
+                #534 AMENDMENT (2026-08-25), ADDITIVE. Always serialized; true when the
+                library-discovery reconciler disabled this provider app because
+                library_discovery_enabled is false (apps.library_discovery_suspended,
+                migration 0060 - the column predates this amendment; it was previously
+                invisible on every read shape, which made a suspended provider app
+                indistinguishable from a deleted one). Admin-only, like origin: a suspended
+                app is correctly ABSENT from the user library and 404 at launch (POST
+                /v1/sessions is the authorization boundary and must not distinguish absent
+                from withheld); the admin surface is where the state must be visible so the
+                operator can see WHY the app is dark and that library_discovery_enabled=true
+                reverses it. READ-ONLY: written only by the reconciler, not on AppWrite.
             default_vram_mb:
               type: integer
               deprecated: true

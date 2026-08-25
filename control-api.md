@@ -5924,6 +5924,28 @@ already-materialized row being *handed out*.
   the caller or a `summary` that blew the 4096-byte ceiling: **a summary that is too large fails
   the report, never the run.**
 
+> **Amendment (#534, 2026-08-25) — provider apps refuse creation while library discovery is off,
+> and reconciler suspension becomes admin-visible. Additive, admin-gated, approved.**
+> **(1)** `POST /v1/apps` and `PATCH /v1/apps/{id}` gain a `409` with new code
+> **`library_discovery_disabled`**: a write that would produce an *enabled* app with a non-empty
+> `library_provider` while `library_discovery_enabled` is false is refused, not accepted and then
+> silently suspended by the reconciler (the previous behaviour: `201 enabled:true`, then the app
+> reads as a bare `404 app not found` — indistinguishable from deletion, which is the trap this
+> amendment exists to close). Refusal, not auto-enable, is deliberate: library discovery walks
+> every user's home and is documented fail-closed in both readers, so an app create must never
+> flip it as a side effect; this mirrors the existing `409 provider_enabled` refusal on
+> `DELETE /v1/admin/images/{id}/install`. The ways out are explicit: clear `library_provider`,
+> keep the app disabled (`enabled:false` provider rows are legal and untouched by the
+> reconciler), or enable library discovery in Settings.
+> **(2)** `AdminApp` gains **`library_discovery_suspended`** (boolean, always serialized,
+> read-only — written only by the reconciler; **not** on `App`/`AppListItem`): surfaces
+> migration 0060's column so an operator can see *why* a provider app is dark and what reverses
+> it. The user-facing posture is unchanged — a suspended app stays absent from the library and
+> `404` at launch, because `POST /v1/sessions` is the authorization boundary and must not
+> distinguish absent from withheld.
+> Backed by `openapi.yaml` (the two `409`s + the `AdminApp` field). No `schema.md` change
+> (column 0060 already exists), no new route, `agent-api.md` untouched.
+
 ---
 
 ## How the client uses this (end-to-end)
