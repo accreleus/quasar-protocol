@@ -2780,6 +2780,65 @@ reschedule it, or restart its container.
   produce independent tokens; consuming one does not invalidate another.
 - Normal authenticated API rate limits apply. Plaintext is returned once and never logged.
 
+> **Amendment (#509, 2026-08-26) — operator-configured ICE servers on the signaling coordinates.
+> Additive, requires sign-off.** `SignalingCoords` gains **`ice_servers`**, an array that carries
+> the STUN/TURN servers the client must configure its `RTCPeerConnection` with. Because the field
+> lives on `SignalingCoords`, it reaches the client on **both** paths that mint signaling
+> coordinates — the `POST /v1/sessions` launch response and the
+> `POST /v1/sessions/{id}/signaling-token` reconnect response — with one addition and no second
+> endpoint.
+>
+> **Shape.** Each element is an `ICEServer` object: `urls` (array of one or more strings, required,
+> non-empty) plus optional `username` and `credential`. This is the W3C `RTCIceServer` dictionary
+> as the browser already accepts it, so the client passes the array straight through with no
+> translation step to get wrong, and a future native client reads the same vocabulary. Every URL
+> carries a `stun:`, `stuns:`, `turn:`, or `turns:` scheme. A `turn:`/`turns:` entry carries
+> `username` and `credential`; a `stun:`/`stuns:` entry carries neither, since STUN has no
+> authentication.
+>
+> **Always serialized, empty by default.** The control plane puts the array on every response, and
+> an unconfigured deployment sends `[]`. That is exactly what the client hardcoded before this
+> amendment, so a deployment that configures nothing behaves identically. The field is
+> nevertheless declared **optional** in `openapi.yaml`, not required: a client generated at this
+> pin must still parse a response from an older control plane that has no such key. A missing key
+> and `[]` mean the same thing — connect with host candidates only — so a client reads it as
+> `ice_servers ?? []` and needs no other branch.
+>
+> **Where the value comes from is deliberately not in this contract.** The control plane sources
+> the list from its own configuration. Operators of a LAN deployment configure nothing.
+>
+> **Why the coordinates and not the signaling handshake.** ICE servers are deployment
+> configuration, not a negotiated per-message value, and the web client already talks only to the
+> control plane (architecture invariant #1). Putting them on the coordinates keeps `signaling.md`
+> unchanged — that contract stays a relay of host↔client offer/answer/ICE messages — and gets the
+> list to the client before the peer connection is constructed, which is the only moment it can
+> be applied. It also lets a deployment mint short-lived TURN credentials per launch later
+> without a further contract change, since the coordinates are already minted per launch.
+>
+> **Secrecy note for implementers.** A `credential` here is readable by every authenticated user
+> who launches a session — that is inherent to browser TURN, not a property of this contract.
+> Deployments should issue ephemeral (time-limited) TURN credentials rather than a shared static
+> password. Like `signaling.token`, `ice_servers` is never written to the admin activity log.
+
+**Response `201` with ICE servers configured** (the same shape on both endpoints):
+```json
+{
+  "signaling": {
+    "url": "wss://quasar.example/v1/signal",
+    "token": "<single-use plaintext token>",
+    "expires_at": "2026-07-12T01:02:03Z",
+    "ice_servers": [
+      { "urls": ["stun:stun.example.net:3478"] },
+      {
+        "urls": ["turn:turn.example.net:3478?transport=udp"],
+        "username": "<ephemeral>",
+        "credential": "<ephemeral>"
+      }
+    ]
+  }
+}
+```
+
 ### `GET /v1/admin/activity` — administrative activity log
 
 Admin-only, newest-first, cursor-paginated history of destructive and operational actions. Each

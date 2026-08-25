@@ -19,6 +19,14 @@ client                         host
   | ====== media + DataChannel flowing ======
 ```
 
+> **Note (#509, 2026-08-26) — ICE servers are not signaled here.** The STUN/TURN servers a client
+> configures its `RTCPeerConnection` with arrive on the signaling **coordinates** (`control-api.md`
+> `SignalingCoords.ice_servers`), which the client already holds before it opens this WebSocket.
+> That is the only moment the list can be applied, since the peer connection is constructed from
+> it. **No message in this contract changes**: this file stays a relay of host↔client
+> offer/answer/ICE, and a host with no STUN of its own still offers host candidates exactly as
+> before.
+
 ## Messages
 
 Host -> client:
