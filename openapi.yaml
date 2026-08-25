@@ -4107,6 +4107,22 @@ components:
         url: { type: string, description: "wss://<host>/v1/signal" }
         token: { type: string, description: "Single-use, short-TTL, plaintext this response only." }
         expires_at: { type: string, format: date-time }
+        ice_servers:
+          type: array
+          description: "#509. STUN/TURN servers the client configures its RTCPeerConnection with, sourced from control-plane configuration. Always serialized by the control plane (empty array when nothing is configured, which is the default and reproduces the pre-#509 hardcoded empty list). Declared optional rather than required so a client generated at this pin still parses a response from an older control plane; treat a missing key as an empty list."
+          items: { $ref: "#/components/schemas/ICEServer" }
+    ICEServer:
+      type: object
+      description: "#509. One ICE server, shaped as the W3C RTCIceServer dictionary so a browser client passes it through untranslated."
+      required: [urls]
+      properties:
+        urls:
+          type: array
+          minItems: 1
+          description: "One or more ICE URLs. Every entry carries a stun:, stuns:, turn:, or turns: scheme."
+          items: { type: string }
+        username: { type: string, description: "TURN username. Present for turn:/turns: entries, absent for stun:/stuns: (STUN has no authentication)." }
+        credential: { type: string, description: "TURN credential. Present for turn:/turns: entries. Readable by every authenticated user who launches a session, which is inherent to browser TURN — deployments should issue ephemeral, time-limited credentials rather than a shared static password." }
     SignalingEnvelope:
       type: object
       required: [signaling]
