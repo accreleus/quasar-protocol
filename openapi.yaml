@@ -773,6 +773,49 @@ paths:
       parameters:
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
         - { name: cursor, in: query, schema: { type: integer, minimum: 1 } }
+        # UI v3 amendment (2026-08-28, additive): five OPTIONAL filters. Every one
+        # absent is exactly the pre-amendment query. They AND together, and they
+        # compose with `cursor` - paging a filtered feed keeps the filter.
+        - name: action
+          in: query
+          required: false
+          schema: { type: string, maxLength: 128 }
+          description: >-
+            PREFIX match on `action`, not a substring or a regex, so `user.` selects the
+            whole `user.*` family and `user.deleted` selects one action. Dotted actions
+            are namespaced by design; prefix is the operator's natural query over them.
+        - name: actor_user_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: >-
+            Exact match on `actor_user_id`. A malformed uuid is `400 validation_failed`.
+            Rows with a null actor (server-originated events such as `session.failed`)
+            are never returned by this filter.
+        - name: target_type
+          in: query
+          required: false
+          schema: { type: string, maxLength: 64 }
+          description: "Exact match on `target_type` (`user`, `host`, `session`, `app`, `image`, `invite`, `instance`, …)."
+        - name: since
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+          description: >-
+            Lower bound, inclusive, on `created_at` (RFC 3339). There is deliberately no
+            `until`: this feed is read newest-first from now backwards, and `cursor`
+            already bounds the other end. An unparseable value is `400 validation_failed`.
+        - name: q
+          in: query
+          required: false
+          schema: { type: string, maxLength: 128 }
+          description: >-
+            Case-insensitive substring over `action`, `target_id` and the joined actor
+            username - the three things an operator can actually read off the page.
+            Deliberately NOT over `details`: that column holds operator-supplied free
+            text, and a substring search across it would turn a note into a way to find
+            unrelated rows. Escapes `%` and `_` so a literal underscore matches a literal
+            underscore.
       responses:
         "200": { description: OK., content: { application/json: { schema: { $ref: "#/components/schemas/AdminActivityList" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -2159,6 +2202,18 @@ paths:
       tags: [admin]
       summary: List minted invites (never the plaintext code).
       x-required-role: admin
+      parameters:
+        # UI v3 amendment (2026-08-28, additive). Absent = `all` = today's behaviour.
+        - name: state
+          in: query
+          required: false
+          schema: { type: string, enum: [all, pending], default: all }
+          description: >-
+            `pending` returns only invites that would still redeem right now: not revoked,
+            not expired, and `used_count < max_uses`. The three exclusions are one fact -
+            "this code no longer works" - and the client cannot compute the third for a
+            page it has not loaded. `all` (the default) filters nothing. An unrecognized
+            value is `400 validation_failed` with code `invalid_state`.
       responses:
         "200": { description: OK. , content: { application/json: { schema: { type: object, properties: { invites: { type: array, items: { $ref: "#/components/schemas/Invite" } } } } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -2445,6 +2500,25 @@ paths:
       tags: [admin]
       summary: List all sessions (oversight).
       x-required-role: admin
+      parameters:
+        # UI v3 amendment (2026-08-28, additive): an OPTIONAL server-side state
+        # filter. Absent means `all`, which is byte-for-byte the pre-amendment
+        # behaviour - a client that has never heard of this parameter sees no
+        # change. It exists because "how many sessions are live" is not
+        # answerable client-side once the fleet has more sessions than one page.
+        - name: state
+          in: query
+          required: false
+          schema: { type: string, enum: [all, active, ended, failed], default: all }
+          description: >-
+            `active` = pending, assigned, starting, running, stopping - every NON-TERMINAL
+            state. That is one state wider than the reservation-holding set (`pending` holds
+            no GPU yet), because "live sessions" on an oversight page means "not finished",
+            not "consuming a slot". `ended` = stopped only. `failed` = failed only. `all`
+            (the default) filters nothing. An unrecognized
+            value is `400 validation_failed` with code `invalid_state`, never a silent
+            fallback to `all`: a filter that quietly stops filtering shows an operator
+            sessions they asked not to see.
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/AdminSessionsResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -4130,7 +4204,7 @@ components:
         signaling: { $ref: "#/components/schemas/SignalingCoords" }
     AdminActivity:
       type: object
-      required: [id, actor_user_id, action, target_type, target_id, details, created_at]
+      required: [id, actor_user_id, action, target_type, target_id, details, created_at, actor_username, severity]
       properties:
         id: { type: integer, format: int64 }
         actor_user_id: { type: [string, "null"], format: uuid }
@@ -4139,6 +4213,25 @@ components:
         target_id: { type: [string, "null"] }
         details: { type: object, additionalProperties: true }
         created_at: { type: string, format: date-time }
+        # UI v3 amendment (2026-08-28, additive): two derived read-only fields.
+        actor_username:
+          type: [string, "null"]
+          description: >-
+            `users.username` for `actor_user_id`, resolved by a LEFT JOIN at read time and
+            never stored - the log is append-only, so a later rename must show the current
+            name, not the one at the time. Null when the actor row is gone (the audit table
+            keeps no FK on purpose: a deleted admin must not take their history with them)
+            and null when the event had no actor at all.
+        severity:
+          type: string
+          enum: [info, warn, err]
+          description: >-
+            DERIVED SERVER-SIDE from `action`, never stored and never client-supplied, so
+            one rule governs every consumer: `*.failed` and any action containing `error`
+            are `err`; `*.deleted`, `*.delete`, `*.revoked`, `*.disabled`, plus
+            `host.drain`, `session.stop` and `storage.home.tombstone`, are `warn`;
+            everything else is `info`. A new action needs no schema change - it lands as
+            `info` unless it matches a rule.
     AdminActivityList:
       type: object
       required: [items, next_cursor]
@@ -4149,7 +4242,7 @@ components:
     Host:
       type: object
       # crud/handler.go hostResp — every key is always serialized (nullable ones present-but-null).
-      required: [id, node_name, status, agent_version, cpu_cores, mem_mb, cpu_model, last_registered_at, last_heartbeat_at, storage, capacity_detection, capacity_reason, readiness, readiness_reported_at]
+      required: [id, node_name, status, agent_version, cpu_cores, mem_mb, cpu_model, last_registered_at, last_heartbeat_at, storage, capacity_detection, capacity_reason, readiness, readiness_reported_at, capacity]
       properties:
         id: { type: string, format: uuid }
         node_name: { type: string }
@@ -4184,6 +4277,39 @@ components:
           type: [string, "null"]
           format: date-time
           description: "When the stored readiness value last changed; null until reported."
+        capacity:
+          # UI v3 amendment (2026-08-28, additive): the per-host roll-up of what
+          # GET /v1/hosts/{id}/gpus already serves per GPU. Exists to remove the 1+N
+          # fan-out a fleet KPI otherwise needs; the per-GPU route stays the detail view.
+          allOf: [ { $ref: "#/components/schemas/HostCapacity" } ]
+          description: >-
+            Summed over this host's REPORTED GPUs. Null - not a zeroed object - when the
+            host has no schedulable GPUs to sum: none reported yet, or `capacity_detection`
+            is not `ok`, which is the same condition under which `GET /v1/hosts/{id}/gpus`
+            returns an empty list. "Nothing to say" and "zero capacity" are different facts
+            and a fleet gauge must not draw the first as the second.
+    HostCapacity:
+      type: [object, "null"]
+      description: >-
+        A host's capacity roll-up (UI v3 amendment). Every figure is derived at read time
+        from `gpus` and live session reservations - nothing here is stored, so it cannot
+        drift from the per-GPU view.
+      required: [slots_total, slots_used, vram_mb_total, vram_mb_used, active_sessions, gpu_count]
+      properties:
+        slots_total: { type: integer, description: "Sum of `slots_total` over the host's reported GPUs." }
+        slots_used:
+          type: integer
+          description: "Sum of `slots_reserved`: encode slots held by sessions in a reservation-holding state (assigned, starting, running, stopping)."
+        vram_mb_total: { type: integer, description: "Sum of `vram_mb_total`." }
+        vram_mb_used:
+          type: integer
+          description: >-
+            Sum of the LIVE-SAMPLED per-GPU `vram_mb_used` (the same figure the per-GPU
+            route serves), counting only GPUs that have a sample; 0 when none has. It is
+            deliberately NOT the declared `vram_mb_reserved` accounting, which #383 removed
+            from admission and which is permanently 0 for every session created since.
+        active_sessions: { type: integer, description: "Sessions in a reservation-holding state on this host's GPUs." }
+        gpu_count: { type: integer, description: "How many reported GPUs the figures above are summed over. Never 0 (the object is null instead)." }
     ReadinessCheck:
       type: object
       description: >-
@@ -4476,7 +4602,7 @@ components:
     Invite:
       type: object
       description: "List shape — never carries the plaintext code."
-      required: [id, code_prefix, role, max_uses, used_count, expires_at, revoked_at, note, created_at]
+      required: [id, code_prefix, role, max_uses, used_count, expires_at, revoked_at, note, created_at, created_by_user_id, created_by_username]
       properties:
         id: { type: string, format: uuid }
         code_prefix: { type: string, description: "First 8 hex of code_hash — a stable non-secret handle." }
@@ -4487,6 +4613,20 @@ components:
         revoked_at: { type: [string, "null"], format: date-time }
         note: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
+        # UI v3 amendment (2026-08-28, additive): provenance. The column
+        # (`invites.created_by`, migration 0020) has always been written; it was
+        # simply never served. No migration.
+        created_by_user_id:
+          type: [string, "null"]
+          format: uuid
+          description: >-
+            The admin who minted this invite. Nullable on the wire for the same reason
+            `actor_username` is on AdminActivity - a restore or a repaired row may dangle -
+            though under the current schema `invites.created_by` is NOT NULL and cascades,
+            so an invite never outlives its minter.
+        created_by_username:
+          type: [string, "null"]
+          description: "`users.username` for `created_by_user_id`, resolved by a LEFT JOIN at read time. Null when that row is gone."
     InviteMinted:
       type: object
       description: "POST /v1/admin/invites 201 body's `invite` — the plaintext code + magic link, ONCE. Distinct shape from the Invite list row (no code_prefix/revoked_at/note)."
@@ -4673,8 +4813,17 @@ components:
         - { $ref: "#/components/schemas/App" }
         - type: object
           description: "Admin-visible app shape: includes runtime_spec + resource/storage defaults (P2-08, P5-01)."
-          required: [default_vram_mb, default_encode_slots, runtime_spec, managed_home, home_container_path, runtime_preset_id, launchable_profile_ids, origin, library_provider, library_discovery_suspended]
+          required: [default_vram_mb, default_encode_slots, runtime_spec, managed_home, home_container_path, runtime_preset_id, launchable_profile_ids, origin, library_provider, library_discovery_suspended, sessions_30d]
           properties:
+            sessions_30d:
+              # UI v3 amendment (2026-08-28, additive).
+              type: integer
+              description: >-
+                Sessions created for this app in the last 30 days, counted at read time
+                (`sessions.created_at >= now() - interval '30 days'`), EVERY state included -
+                a launch that failed is still a launch someone attempted, and an admin
+                ranking a catalogue by use wants attempts, not successes. Admin-only: it is
+                fleet-wide across all users, so it never appears on App/AppListItem.
             origin:
               allOf: [ { $ref: "#/components/schemas/AppOrigin" } ]
               description: >-
@@ -5275,7 +5424,13 @@ components:
           additionalProperties: false
         strip_position:
           type: string
-          enum: [top, bottom]
+          # UI v3 amendment (2026-08-28): `left` and `right` join the vocabulary. The v3
+          # session HUD, shipping with that UI pass, renders all four docks; the enum is
+          # widened AHEAD of it so a user who picks a side dock can have the choice
+          # persisted - not a claim that an earlier overlay already drew them. Widening an
+          # accepted-value set is additive - no stored value changes meaning, and a client
+          # that only ever writes top/bottom is unaffected.
+          enum: [top, bottom, left, right]
         strip_auto_hide:
           type: string
           enum: [on_capture, always_visible, never_visible]
@@ -5356,7 +5511,7 @@ components:
     AdminUser:
       type: object
       description: "User record from GET /v1/users (admin)."
-      required: [id, email, username, role, disabled, max_concurrent_sessions, created_at]
+      required: [id, email, username, role, disabled, max_concurrent_sessions, created_at, last_seen_at, active_session_count]
       properties:
         id: { type: string, format: uuid }
         email: { type: string, format: email }
@@ -5365,6 +5520,25 @@ components:
         disabled: { type: boolean }
         max_concurrent_sessions: { type: integer }
         created_at: { type: string, format: date-time }
+        # UI v3 amendment (2026-08-28, additive): two derived read-only fields, both
+        # aggregated in the list query - never a per-row follow-up call.
+        last_seen_at:
+          type: [string, "null"]
+          format: date-time
+          description: >-
+            The most recent `user_devices.last_seen_at` across this user's devices, or null
+            when they have none. This is DEVICE activity (a login or a capability probe),
+            deliberately not "last request": there is no per-request write on the hot path
+            and adding one to answer a dashboard would be the wrong trade.
+        active_session_count:
+          type: integer
+          description: >-
+            This user's sessions in a non-terminal state (pending, assigned, starting,
+            running, stopping) right now. Deliberately ONE STATE WIDER than the quota gate,
+            which counts `('pending','assigned','starting','running')`: a session being torn
+            down is still this user's session on an operator's screen, while the quota
+            releases early on purpose so a relaunch is not blocked by a teardown. Read it as
+            "sessions this user has open", not as "quota consumed".
     AdminUsersResponse:
       type: object
       required: [items, next_cursor]

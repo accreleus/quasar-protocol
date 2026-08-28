@@ -2618,8 +2618,11 @@ the server does not recognise are **preserved verbatim**, so an older control
 plane cannot silently delete a newer client's preferences.
 
 Invalid enum values are a `400 validation_failed`, not a silent clamp: a client
-sending `strip_position: "left"` has a bug, and clamping it to `bottom` would
-hide that bug on every device the user owns.
+sending `strip_position: "middle"` has a bug, and clamping it to `bottom` would
+hide that bug on every device the user owns. *(`strip_position` accepts all four
+docks — `top`, `bottom`, `left`, `right` — since the UI v3 amendment,
+2026-08-28. The v3 session HUD renders all four; the vocabulary was widened
+ahead of it so a user's choice of a side dock can be persisted.)*
 
 `strip_items` mixes two kinds of thing. `signal`, `identity`, `codec`, `metrics`
 and `hint` are **readouts** — turning one off removes information. `capture`,
@@ -2846,6 +2849,22 @@ item contains `id`, `actor_user_id`, `action`, `target_type`, optional `target_i
 non-secret `details`, and `created_at`. Required actions include configuration changes, agent
 restart, host drain/uncordon, console changes, storage GC, and destructive app/host/user/session
 operations. Tokens, passwords, invite codes, and signaling payloads are never recorded.
+
+*(UI v3 amendment, 2026-08-28)* Each item also carries `actor_username` (joined at read time,
+null when the actor row is gone or the event had no actor) and a server-derived
+`severity: info | warn | err`; the feed accepts the optional filters `?action=` (prefix),
+`?actor_user_id=`, `?target_type=`, `?since=` and `?q=`. The **action vocabulary in use** is
+`app.delete` · `app.entitlement.{grant,revoke,set_mode}` · `app.artwork.{set,upload,cleared,reresolve}` ·
+`app.library.rule.{set,delete}` · `library.scan.force` · `runtime_preset.{create,update,delete}` ·
+`stream_profile.*` · `launch_profile.*` · `host.{drain,uncordon,delete,restart}` ·
+`host.settings.update` · `console.config.update` · `storage.home.tombstone` · `storage.gc.confirm` ·
+`session.{stop,capture,launched,failed}` · `job.{run,update}` · `instance.secret.{set,cleared}` ·
+`instance.settings.updated` · `user.{role_changed,disabled,enabled,quota_changed,deleted}` ·
+`invite.{minted,revoked}` · `image.{installed,uninstalled,pinned,unpinned,updated,synced}`.
+That list is **documentation, not an enum** — `action` is a free string in both `schema.md`
+and this contract, and a consumer must render an unrecognized value rather than reject it.
+Filter semantics, the severity derivation table, and the `details` shape of each newly-recorded
+action are in the UI v3 amendment section below.
 
 #### Launch by profile (AS10-03)
 > *Additive amendment — adds an optional `profile_id` request field and an optional
@@ -6077,6 +6096,231 @@ the **provider name**, and applies the whole desired state atomically, server-si
 
 No `schema.md` change (writes the existing `entitlements` table, same shape as every other
 writer of it), no `agent-api.md` change, no new column.
+
+---
+
+## UI v3 console — additive fields and filters *(amendment 2026-08-28, additive)*
+
+> **Amendment (UI v3, 2026-08-28) — seven additive extensions plus one widened enum.
+> Admin-gated, sign-off granted by the operator for the whole set.** No route is added or
+> removed, no existing field changes type or meaning, no status code changes, and every new
+> query parameter defaults to the pre-amendment behaviour. A client that has never heard of
+> any of this sees exactly what it saw yesterday.
+
+**Why these seven.** The v3 console asks five questions the API could not answer without
+either a fan-out or a lie: *how many sessions are live right now* (unanswerable client-side
+past one page), *how full is the fleet* (one call per host), *who did that, and was it bad*
+(no actor name, no severity, and half the destructive routes recorded nothing at all), *who
+is actually using this instance* (no last-seen, no live-session count per user), and *which
+invites still work* (three separate exclusions the client cannot compute for rows it has not
+loaded). Each item below is the smallest addition that answers one of them.
+
+### 1. `GET /v1/admin/sessions?state=`
+
+`state ∈ {all, active, ended, failed}`, default `all`.
+
+- **`active` is the non-terminal set** — `pending`, `assigned`, `starting`, `running`,
+  `stopping`. It is deliberately one state wider than the reservation-holding set
+  (`schema.md`'s availability-sum filter, which excludes `pending` because a queued session
+  holds no GPU yet): on an oversight page "live" means "not finished", not "consuming a
+  slot". Defined server-side against the state machine rather than enumerated by hand in a
+  client, so a future state is covered on the day it exists.
+- `ended` is `stopped` only; `failed` is `failed` only. Terminal-but-different are separate
+  because an operator reading a session list wants the failures on their own.
+- **An unrecognized value is `400 validation_failed` with code `invalid_state`**, never a
+  silent fall back to `all`. A filter that quietly stops filtering shows an operator the
+  sessions they explicitly asked not to see.
+- Absent `state` is byte-for-byte today's response, including ordering, paging and
+  `latest_metrics`. The filter composes with `?limit`/`?cursor`.
+
+```
+GET /v1/admin/sessions?state=active
+{ "items": [ { "id": "…", "state": "running", "username": "devon", … } ], "next_cursor": null }
+```
+
+### 2. `Host.capacity` on `GET /v1/hosts` and `GET /v1/hosts/{id}`
+
+```json
+"capacity": { "slots_total": 5, "slots_used": 1, "vram_mb_total": 24000,
+              "vram_mb_used": 4000, "active_sessions": 1, "gpu_count": 2 }
+```
+
+- Summed over the host's **reported, schedulable** GPUs — the same set
+  `GET /v1/hosts/{id}/gpus` lists (`gpus.reported` and `capacity_detection = 'ok'`), so the
+  roll-up and the detail view can never disagree.
+- `slots_used` is the sum of the per-GPU `slots_reserved`; `active_sessions` is the count of
+  reservation-holding sessions. Both derive from live sessions, never from a stored counter.
+- **`vram_mb_used` is the sum of the LIVE-SAMPLED per-GPU `vram_mb_used`**, over the GPUs
+  that carry a sample, and 0 when none does. It is deliberately not the declared
+  `vram_mb_reserved` accounting: #383 removed declared VRAM from admission, so that figure is
+  permanently 0 for every session created since, and a gauge built on it would read empty on
+  a full host. A host whose agent predates live VRAM sampling therefore reports
+  `vram_mb_used: 0` — "unsampled", not "idle" — which is why `gpu_count` is on the object:
+  a client that wants to distinguish them reads the per-GPU route, where the field is
+  explicitly nullable.
+- **`null`, not a zeroed object, when there is nothing to sum**: no reported GPUs, or
+  `capacity_detection ≠ ok`. "We have no capacity report" and "this host has zero capacity"
+  are different facts and a fleet gauge must not draw the first as the second.
+- One aggregate query per list, merged in the control plane — the point of the field is to
+  delete the 1+N the console would otherwise do.
+
+### 3. Audit coverage — the routes that recorded nothing now do
+
+`admin_activity` gained no columns; these handlers simply take the auditor they were built
+without. New actions, all with the existing bounded-`details` discipline (≤4096 bytes,
+field **names** and identifiers only, never a value that could be a secret):
+
+| Action | Route | `target_type` / `target_id` | `details` |
+|---|---|---|---|
+| `user.role_changed` | `PATCH /v1/users/{id}` | `user` / user id | `{"role": "admin"}` |
+| `user.disabled` / `user.enabled` | `PATCH /v1/users/{id}` | `user` / user id | `{}` |
+| `user.quota_changed` | `PATCH /v1/users/{id}` | `user` / user id | `{"max_concurrent_sessions": 3}` |
+| `user.deleted` | `DELETE /v1/users/{id}` | `user` / user id | `{}` |
+| `invite.minted` | `POST /v1/admin/invites` | `invite` / invite id | `{"role", "max_uses", "expires_at"}` |
+| `invite.revoked` | `DELETE /v1/admin/invites/{id}` | `invite` / invite id | `{}` |
+| `instance.settings.updated` | `PATCH /v1/admin/settings` | `instance` / — | `{"keys": ["registration_mode", "allowed_origins"]}` |
+| `image.installed` | `POST /v1/admin/images/{id}/install` | `image` / image id | `{"version", "lazy"}` |
+| `image.uninstalled` | `DELETE /v1/admin/images/{id}/install` | `image` / image id | `{}` |
+| `image.pinned` / `image.unpinned` | `POST`/`DELETE /v1/admin/images/{id}/pin` | `image` / image id | `{}` |
+| `image.updated` | `POST /v1/admin/images/{id}/update` | `image` / image id | `{"applied", "version"}` |
+| `image.synced` | `POST /v1/admin/images/sync` | `image` / — | `{"images", "sync_error"}` |
+| `session.launched` | `POST /v1/sessions` | `session` / session id | `{"app_id", "host_id"}` |
+| `session.failed` | *(no route — the coordinator's terminal-failure edge)* | `session` / session id | `{"reason_source", "host_id", "state_detail"}`, plus `failure_code` (agent path) or `reason` (control-plane path) |
+
+- **`instance.settings.updated` records the CHANGED KEY NAMES and nothing else.** Not the old
+  value, not the new one. The settings surface carries `allowed_origins` and will carry more;
+  a log that records values is one careless field away from being a place secrets go.
+- **`session.failed` has two paths and says which.** `reason_source` is `agent` when the
+  agent reported the terminal state, `control_plane` when the control plane declared it (a
+  rejected or undeliverable command). **`failure_code` appears on the agent path only** —
+  it is the agent's machine-readable classification and the control plane has none to
+  offer. The control-plane path instead carries **`reason`**, the fault text, because on
+  that path nothing else explains the row; the agent path omits it, since `failure_code`
+  plus the session's own `error_message` already do. Both free-text fields are **bounded
+  before the write**: `state_detail` to 512 bytes and `reason` to 200. `details` has a
+  4096-byte limit, and an over-long string would otherwise cost the feed the one row an
+  operator most needs.
+- **`session.launched` and `session.failed` are the two rows with a non-admin actor.** A
+  launch is recorded against the launching user, admin or not, because "who started this
+  session" is the question an operator asks of a session. A failure has **no actor at all** —
+  `actor_user_id` is null, and that is what the column's nullability has always been for.
+  Neither is a role change: this feed is the instance's operational history, not a list of
+  things admins did.
+- Actions remain **free strings**, not an enum, in both `schema.md` and this contract. The
+  table above is the vocabulary in use as of this amendment, not a closed set; a consumer
+  must render an unrecognized action rather than reject it.
+
+### 4. `GET /v1/admin/activity` — filters, `actor_username`, `severity`
+
+Five optional query parameters, ANDed, all composing with `?cursor` so paging a filtered feed
+keeps the filter:
+
+| Param | Match | Notes |
+|---|---|---|
+| `action` | **prefix** | `?action=user.` selects the whole `user.*` family; `?action=user.deleted` selects one. Dotted actions are namespaced by design, so prefix is the query that fits them. |
+| `actor_user_id` | exact | Malformed uuid → `400 validation_failed`. Never returns null-actor rows. |
+| `target_type` | exact | `user`, `host`, `session`, `app`, `image`, `invite`, `instance`, … |
+| `since` | `created_at >= ` | RFC 3339. Unparseable → `400 validation_failed`. |
+| `q` | case-insensitive substring | Over `action`, `target_id`, and the joined actor username. |
+
+**Over-length is a `400 validation_failed`, not a truncation.** `action`, `target_type` and
+`q` are each capped at **128 characters**; a longer value is refused, naming the parameter.
+Silently cutting a substring search would return rows the caller did not ask for and give
+no clue why.
+
+**`q` is deliberately not searched over `details`.** That column holds operator-supplied free
+text (an invite note, a host name); a substring search across it would let one operator's note
+surface unrelated rows, and would make the search's result set depend on what people happened
+to type. `%` and `_` in `q` are escaped, so a literal underscore matches a literal underscore.
+
+Two new response fields on every item:
+
+- **`actor_username`** — `users.username` for `actor_user_id`, resolved by a `LEFT JOIN` at
+  **read** time, never denormalized into the row. The log is append-only; a later rename must
+  show the current name, and copying the name at write time would make the feed a second,
+  silently-stale copy of the users table. `null` when the actor row is gone (the audit table
+  keeps **no FK** on `actor_user_id` precisely so a deleted admin does not take their history
+  with them) and `null` when the event had no actor.
+- **`severity`: `info | warn | err`** — **derived from `action`, never stored, never
+  client-supplied**, so every consumer colours the same row the same way and a stored value
+  can never contradict its action:
+
+  | Rule (evaluated in order) | Severity |
+  |---|---|
+  | action ends `.failed`, or contains `error` | `err` |
+  | action ends `.deleted`, `.delete`, `.revoked`, `.disabled` | `warn` |
+  | action is `host.drain`, `session.stop`, or `storage.home.tombstone` | `warn` |
+  | anything else | `info` |
+
+  The three named exceptions are the destructive-but-not-suffix-marked actions: draining a
+  host, force-stopping someone's session, and tombstoning a home all take something away from
+  a user. A new action needs no contract change — it lands as `info` unless it matches a rule.
+
+```
+GET /v1/admin/activity?action=user.&since=2026-08-01T00:00:00Z&q=devon
+{ "items": [ { "id": 412, "actor_user_id": "…", "actor_username": "devon",
+               "action": "user.deleted", "target_type": "user", "target_id": "…",
+               "severity": "warn", "details": {}, "created_at": "2026-08-27T…Z" } ],
+  "next_cursor": null }
+```
+
+### 5. `AdminUser.last_seen_at` + `active_session_count`
+
+Both on `GET /v1/users`, both always serialized, both aggregated **in the list query** — a
+users page must not become one call per row.
+
+- `last_seen_at` is `max(user_devices.last_seen_at)` for the user, `null` with no devices.
+  This is **device** activity — a login or a capability probe — not "last request": there is
+  no per-request write on the hot path today, and adding one to answer a dashboard would be
+  the wrong trade. The console's "active users" KPI is defined as `last_seen_at` within 24 h.
+- `active_session_count` counts the user's non-terminal sessions — `pending`, `assigned`,
+  `starting`, `running`, `stopping`. That is one state wider than the quota gate, which
+  counts `('pending','assigned','starting','running')`; the difference is deliberate on both
+  sides. The quota releases at `stopping` so a relaunch is not blocked by a teardown; the
+  console counts it because a session being torn down is still that user's session on an
+  operator's screen. Read the field as "sessions this user has open", not "quota consumed".
+
+### 6. `Invite.created_by_user_id` + `created_by_username`, and `?state=pending`
+
+- **No migration.** `invites.created_by` has existed and been written since migration 0020
+  (LP-SEC-01); it was simply never served. This amendment exposes it as
+  `created_by_user_id` and joins the username, exactly as the activity feed does. Both fields
+  are nullable on the wire for the same defensive reason, though under the current schema
+  `created_by` is `NOT NULL` and `ON DELETE CASCADE`, so an invite never outlives its minter —
+  which is a **security** property, not an accident: deleting an admin must invalidate the
+  codes they minted, and it does.
+- `?state=pending` returns only invites that would still redeem right now: **not revoked, not
+  expired, and `used_count < max_uses`**. Those three exclusions are one operator-facing fact
+  ("this code no longer works"), and the client cannot compute the third for rows it has not
+  loaded. `?state=all` (the default) filters nothing; anything else is `400 validation_failed`
+  with code `invalid_state`.
+
+### 7. `AdminApp.sessions_30d`, and migration `0070_ui_v3_indexes`
+
+On `GET /v1/admin/apps`. Sessions created for the app in the last 30 days
+(`sessions.created_at >= now() - interval '30 days'`), counted at read time in the same query
+as the list. **Every state counts, failures included** — a launch that failed is still a
+launch someone attempted, and an admin ranking a catalogue by use wants attempts. Fleet-wide
+across all users, which is why it is admin-only and absent from `App`/`AppListItem`.
+
+**Migration `0070_ui_v3_indexes` (the only schema change in this amendment) adds two
+read-path indexes and nothing else** — no column, no constraint, no data change:
+`sessions_app_created_idx ON sessions (app_id, created_at DESC)` for this count, and the
+partial `sessions_user_active_idx ON sessions (user_id) WHERE state IN
+('pending','assigned','starting','running','stopping')` for `AdminUser.active_session_count`
+(§5). The partial index's predicate is load-bearing text: Postgres only chooses it when the
+query repeats the predicate literally. See `schema.md`'s migration ledger. Both counts are
+aggregated inside their list query — neither field ever costs a round trip per row.
+
+### 8. `session_overlay.strip_position` gains `left` and `right`
+
+The **v3 session HUD, shipping with this UI pass, renders all four docks**; the enum listed
+two, so a user who picked a side dock could not have the choice persisted. The vocabulary is
+widened **ahead of** that client so the preference is storable the day the HUD lands —
+this is not a claim that some earlier overlay already drew them. Widening an accepted-value
+set is additive: no stored value changes meaning, and a client that only ever writes
+`top`/`bottom` is unaffected. Out-of-vocabulary values are still a `400`, and still not
+clamped (see `GET`/`PATCH /v1/me/ui-preferences`).
 
 ---
 
