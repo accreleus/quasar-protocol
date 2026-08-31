@@ -1633,6 +1633,37 @@ instead of an in-process variable — the wire shape is **unchanged**, only the 
 so a control-plane restart no longer forgets the last sync's outcome. Closes the P1
 "in-memory sync-state" note (invariant #5 cleanup deferred from P1/P2).
 
+### Manifest provenance
+
+> **Amendment — #548, additive, admin-gated, operator-approved.** Adds one property to
+> `ImageCatalogEnvelope`; changes no existing shape.
+
+`GET /v1/admin/images` / `POST /v1/admin/images/sync` carry `manifest_provenance`: where the
+served catalog came from. The manifest is fetched unauthenticated over HTTPS at a **mutable**
+ref, so a force-push upstream silently changes what every host installs. This does not prevent
+that; it makes it impossible to miss. Backed by `instance_settings.image_manifest_*`
+(`schema.md`, migration `0070`).
+
+`null` until the first successful sync has recorded one. Otherwise:
+
+- `sha256` — SHA-256 of the **fetched manifest bytes** the served catalog was parsed from. Never
+  empty; the envelope carries `null` instead when there is nothing to report.
+- `previous_sha256` — the digest recorded before `sha256`; `null` until a change has ever been
+  observed.
+- `commit_sha` — the **resolved upstream commit** the manifest was fetched at; `null` when ref
+  resolution failed and the fetch fell back to the mutable ref.
+- `ref` / `url` — the configured `instance_settings.image_catalog_ref` and the URL the bytes came
+  from.
+- `changed` / `changed_at` — together they express *the digest moved at the last sync*. `changed`
+  is about the LAST sync only and self-clears on the next unchanged one; `changed_at` and
+  `previous_sha256` are the durable record. A first-ever sync is **not** a change: there is
+  nothing it could have changed from.
+
+Provenance is recorded only on a **successful** sync, in the same transaction as the catalog rows
+it describes, so it can never name a manifest other than the one whose rows are stored. Change
+detection is done in SQL against the existing row, so a concurrent sync from another replica
+cannot straddle the compare and the write.
+
 ---
 
 ## Account security — invites + device management (LP-SEC-01)
@@ -4314,7 +4345,7 @@ hold in real time.
 
 **As-built (SPT-06): script-orchestrated, not control-plane-autonomous** — a
 bench session needs a real WebRTC peer to drive frame flow, so the harness
-(`deploy/run-spt06-certify.sh`) supplies a Chrome-for-Testing peer and drives the loop: open a run
+(`scripts/harness/run-spt06-certify.sh`) supplies a Chrome-for-Testing peer and drives the loop: open a run
 → per-cell (launch → CFT peer drives → finalize) → complete. The control plane still owns the
 measurement-to-verdict logic (read `session_metrics` → derive verdict → upsert); it does not spawn
 a browser itself.

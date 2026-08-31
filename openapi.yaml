@@ -15,7 +15,7 @@
 # the prose (control-api.md §Stream profiles and launch profiles). Their bodies here were
 # transcribed from
 # the web client's typed contract (web/src/api/types.ts) and validated live by the
-# conformance harness (deploy/run-apitest.sh) — but the prose contract still needs the
+# conformance harness (scripts/harness/run-apitest.sh) — but the prose contract still needs the
 # amendment + sign-off (see docs/design/plans/openapi-contract-drift-report.md). A few
 # admin trace/storage/cert routes remain loosely typed (type: object) pending shapes.
 openapi: 3.1.0
@@ -3462,9 +3462,28 @@ components:
         catalog_ref: { type: string, description: "The pinned quasar-images ref the catalog was fetched at (instance_settings.image_catalog_ref)." }
         fetched_at: { type: [string, "null"], format: date-time, description: "When the cached catalog was last successfully refreshed. P3: backed by instance_settings.image_synced_at, so this survives a control-plane restart." }
         sync_error: { type: [string, "null"], description: "Non-null when the last sync failed; the cached catalog is still served. P3: backed by instance_settings.image_sync_error, so this survives a control-plane restart." }
+        manifest_provenance:
+          oneOf: [ { $ref: "#/components/schemas/ManifestProvenance" }, { type: "null" } ]
+          description: "Where the served catalog came from (#548). Null until the first successful sync has recorded one."
         images:
           type: array
           items: { $ref: "#/components/schemas/CatalogImage" }
+    ManifestProvenance:
+      type: object
+      required: [sha256, previous_sha256, commit_sha, ref, url, changed, changed_at]
+      description: >-
+        Provenance of the manifest the served catalog was parsed from (#548). Recorded only
+        on a successful sync, in the same transaction as the catalog rows, so it can never
+        describe a manifest other than the one whose rows are stored. Backed by
+        instance_settings.image_manifest_* (schema.md, migration 0070).
+      properties:
+        sha256: { type: string, description: "SHA-256 of the fetched manifest bytes the served catalog was parsed from. Never empty - the envelope carries null instead when nothing has been recorded." }
+        previous_sha256: { type: [string, "null"], description: "The digest recorded before sha256; null until a change has ever been observed." }
+        commit_sha: { type: [string, "null"], description: "The resolved upstream commit the manifest was fetched at; null when ref resolution failed and the fetch fell back to the mutable ref." }
+        ref: { type: string, description: "The configured quasar-images ref the catalog is pinned to (instance_settings.image_catalog_ref)." }
+        url: { type: string, description: "The URL the manifest bytes were retrieved from." }
+        changed: { type: boolean, description: "The digest moved at the LAST sync. Self-clears on the next unchanged sync; false on a first-ever sync, which has nothing to have changed from." }
+        changed_at: { type: [string, "null"], format: date-time, description: "When the digest last moved. Durable - unlike changed, it does not self-clear." }
     CatalogImage:
       type: object
       required: [id, display_name, kind, version, installed]
