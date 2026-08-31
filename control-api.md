@@ -6099,6 +6099,49 @@ writer of it), no `agent-api.md` change, no new column.
 
 ---
 
+> **Comment-relocation amendment (2026-08-27): consolidated error-code semantics.
+> Doc-only, additive, operator-approved.** No request/response shape, status code, or
+> endpoint changes. These four facts were only ever written down in control-plane source
+> comments (`internal/httpx/respond.go`) and web client source (`web/src/api/client.ts`),
+> where a client author does not look. They are restated here, verbatim in meaning, and the
+> source now points at this section instead of carrying the prose. Codes already defined
+> above (`home_not_provisioned`, `parent_app_disabled`, `library_discovery_disabled`, the
+> capture and jobs codes, `capacity_unavailable`, and the rest) are unchanged and are not
+> repeated.
+>
+> **(1) `provider_enabled` (409)** — referenced above under the `#534` amendment but never
+> defined. `DELETE /v1/admin/images/{id}/install` refuses when the target is a
+> library-provider image and library discovery is currently **enabled**: the uninstall would
+> be silently undone by the next successful catalog sync's provider auto-ensure. Not
+> retryable as-is; the remedy is named in the message — disable library discovery in
+> Settings first, then uninstall. It is the exact mirror of `library_discovery_disabled` on
+> the app surface, and the pair is deliberate: each refuses the write whose effect the other
+> setting would immediately reverse.
+>
+> **(2) `context_unresolved` (409)** — `digest_unresolved`'s template analogue, on the
+> template build/install paths. The catalog holds no resolved commit sha for this template's
+> build context (`image_catalog.context_sha` empty, because the last sync could not resolve
+> it). Same remedy shape as `digest_unresolved`: re-sync the catalog, then retry.
+>
+> **(3) `managed_preset_image_invalid` (422)** — `PATCH /v1/admin/runtime-presets/{id}`
+> refusing an `image` value on a **managed** preset (one with `managed_image_id` set) that
+> the adoption pipeline could not itself have produced. `422` rather than `400`/`409`: the
+> request is well-formed and the row exists; it is the combination of this value on this
+> managed row that is unprocessable. Not retryable — edit a scratch preset instead, or move
+> the managed row through adoption. Without this guard an admin can hand-edit a managed row
+> and silently repoint a live catalog app at a stale local tag.
+>
+> **(4) `Retry-After` on `503 capacity_exhausted`** — the launch path MAY send a
+> `Retry-After` response **header** (RFC 9110 §10.2.3, delta-seconds form only; the control
+> plane never sends the HTTP-date form) so a client can poll on the server's own teardown
+> timing instead of guessing. It is a plain HTTP header and is **not** part of the JSON error
+> envelope. Absent on every other `503`, including `no_host_available`, which is not on a
+> teardown timer. A client must treat a missing, blank, non-numeric, or negative value as
+> absent and fall back to its own default delay — note that `Number("")` is `0`, which would
+> otherwise read as a valid "retry immediately".
+
+---
+
 ## UI v3 console — additive fields and filters *(amendment 2026-08-28, additive)*
 
 > **Amendment (UI v3, 2026-08-28) — seven additive extensions plus one widened enum.
@@ -6295,7 +6338,7 @@ users page must not become one call per row.
   loaded. `?state=all` (the default) filters nothing; anything else is `400 validation_failed`
   with code `invalid_state`.
 
-### 7. `AdminApp.sessions_30d`, and migration `0070_ui_v3_indexes`
+### 7. `AdminApp.sessions_30d`, and migration `0071_ui_v3_indexes`
 
 On `GET /v1/admin/apps`. Sessions created for the app in the last 30 days
 (`sessions.created_at >= now() - interval '30 days'`), counted at read time in the same query
@@ -6303,7 +6346,7 @@ as the list. **Every state counts, failures included** — a launch that failed 
 launch someone attempted, and an admin ranking a catalogue by use wants attempts. Fleet-wide
 across all users, which is why it is admin-only and absent from `App`/`AppListItem`.
 
-**Migration `0070_ui_v3_indexes` (the only schema change in this amendment) adds two
+**Migration `0071_ui_v3_indexes` (the only schema change in this amendment) adds two
 read-path indexes and nothing else** — no column, no constraint, no data change:
 `sessions_app_created_idx ON sessions (app_id, created_at DESC)` for this count, and the
 partial `sessions_user_active_idx ON sessions (user_id) WHERE state IN
