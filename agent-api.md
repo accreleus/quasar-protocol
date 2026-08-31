@@ -1283,7 +1283,7 @@ does the pull asynchronously and reports progress via `image_state`.
   "type": "image_ensure",
   "id": "<command-id>",
   "image_id": "steam",
-  "registry_ref": "ghcr.io/accretion-io/quasar-steam:sha-969cc14ea168",
+  "registry_ref": "ghcr.io/accreleus/quasar-steam:sha-969cc14ea168",
   "version": "2026.08.07"
 }
 ```
@@ -1323,7 +1323,7 @@ reserved.
   "type": "image_build",
   "id": "<command-id>",
   "image_id": "xfce-desktop",
-  "context_url": "https://codeload.github.com/accretion-io/quasar-images/tar.gz/<commit-sha>",
+  "context_url": "https://codeload.github.com/accreleus/quasar-images/tar.gz/<commit-sha>",
   "context_subdir": "xfce-desktop",
   "dockerfile": "Dockerfile",
   "build_args": { "BASE": "..." },

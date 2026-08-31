@@ -1473,7 +1473,7 @@ resume rather than being written here.
 
 ## App-image catalog + management (amendment — image management, additive — signed off 2026-08-07)
 
-> The catalog mirrors the `accretion-io/quasar-images` **manifest** (Quasar-owned, versioned;
+> The catalog mirrors the `accreleus/quasar-images` **manifest** (Quasar-owned, versioned;
 > Quasar refuses an unknown `manifest_version`). Installing an image also lands its **runtime
 > preset** (the `runtime_presets` object, `schema.md`). This section documents the **P1 surface
 > only** — read + sync; install/update/remove/pin land in later phases with their own routes.
@@ -1512,8 +1512,8 @@ variable — the wire shape is unchanged.
 { "lazy": false }
 // 201 — the now-installed catalog entry
 { "id": "steam", "display_name": "Steam", "kind": "prebuilt", "version": "1.4.0",
-  "registry_ref": "ghcr.io/accretion-io/quasar-steam:1.4.0",
-  "registry_digest": "ghcr.io/accretion-io/quasar-steam@sha256:<64hex>",
+  "registry_ref": "ghcr.io/accreleus/quasar-steam:1.4.0",
+  "registry_digest": "ghcr.io/accreleus/quasar-steam@sha256:<64hex>",
   "installed": true, "installed_version": "1.4.0", "pinned": false, "lazy": false,
   "update_available": false, "hosts": [] }
 ```

@@ -89,7 +89,7 @@ tags:
       every TLS handshake already transmits. The admin diagnostics route carries the `admin`
       tag and the normal server-enforced gate.
   - name: images
-    description: App-image catalog + management (admin). The catalog mirrors the accretion-io/quasar-images manifest; installing an image also lands its runtime preset. P1 = read + sync; P3 adds install/uninstall/pin/update + digest pinning (#440).
+    description: App-image catalog + management (admin). The catalog mirrors the accreleus/quasar-images manifest; installing an image also lands its runtime preset. P1 = read + sync; P3 adds install/uninstall/pin/update + digest pinning (#440).
 
 paths:
   # ─── auth ────────────────────────────────────────────────────────────────
