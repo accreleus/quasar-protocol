@@ -2268,6 +2268,7 @@ paths:
             `400 validation_failed` with code `invalid_state`.
       responses:
         "200": { description: OK. , content: { application/json: { schema: { type: object, properties: { enrollments: { type: array, items: { $ref: "#/components/schemas/HostEnrollment" } } } } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
@@ -2280,13 +2281,15 @@ paths:
           application/json:
             schema:
               type: object
+              additionalProperties: false
               properties:
-                node_name: { type: string, description: "Bind the token to exactly this node_name. Absent = any node_name." }
-                max_uses: { type: integer, default: 1 }
-                expires_at: { type: string, format: date-time, description: "Absent = one hour from mint." }
+                node_name: { type: string, minLength: 1, description: "Bind the token to exactly this node_name. Absent = any node_name; empty string is 400 (it would silently mint an any-node token)." }
+                max_uses: { type: integer, default: 1, minimum: 1, maximum: 100 }
+                expires_at: { type: string, format: date-time, description: "Absent = one hour from mint. Must be in the future and at most 30 days out." }
                 note: { type: string }
       responses:
         "201": { description: Token minted. , content: { application/json: { schema: { type: object, properties: { enrollment: { $ref: "#/components/schemas/HostEnrollmentMinted" } } } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /v1/admin/hosts/enrollments/{id}:
@@ -2297,6 +2300,7 @@ paths:
       x-required-role: admin
       responses:
         "204": { description: Revoked. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
@@ -4715,7 +4719,7 @@ components:
     HostEnrollment:
       type: object
       description: "List shape for a per-host enrollment token (#12/#96) — never carries the plaintext token."
-      required: [id, token_prefix, node_name, max_uses, used_count, expires_at, revoked_at, last_used_at, note, created_at, created_by_user_id, created_by_username]
+      required: [id, token_prefix, node_name, max_uses, used_count, expires_at, revoked_at, last_used_at, used_by_node_name, note, created_at, created_by_user_id, created_by_username]
       properties:
         id: { type: string, format: uuid }
         token_prefix: { type: string, description: "First 8 hex of token_hash — a stable non-secret handle." }
@@ -4725,9 +4729,10 @@ components:
         expires_at: { type: [string, "null"], format: date-time }
         revoked_at: { type: [string, "null"], format: date-time }
         last_used_at: { type: [string, "null"], format: date-time }
+        used_by_node_name: { type: [string, "null"], description: "node_name presented at the most recent redemption; null until first redeemed." }
         note: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
-        created_by_user_id: { type: [string, "null"], format: uuid }
+        created_by_user_id: { type: [string, "null"], format: uuid, description: "Null once the minting admin has been deleted — the token outlives its minter." }
         created_by_username: { type: [string, "null"] }
     HostEnrollmentMinted:
       type: object

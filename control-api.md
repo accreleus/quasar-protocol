@@ -1818,6 +1818,11 @@ break a feature; `DELETE` is how you clear one.
 > matching — a minted token (hash lookup) is tried first, then the static `ENROLLMENT_TOKEN`
 > (constant-time compare), so an existing deployment upgrades untouched.
 
+**`ENROLLMENT_TOKEN` is optional.** A deployment that enrolls only with minted tokens sets no
+static value; the control plane logs one `WARN` at boot and matches nothing against it (empty
+never matches, so this closes the static path rather than opening it). Requiring it would
+force every operator to keep the fleet-wide credential minted tokens exist to replace.
+
 Why: the static `ENROLLMENT_TOKEN` is shared by the whole fleet, never expires, cannot be
 rotated without a control-plane restart, and — because enrollment upserts on `node_name` —
 carries the authority to **become** an already-enrolled host, not merely to add one (#96).
@@ -1835,9 +1840,14 @@ bound to one `node_name`. Same custody model as invites (LP-SEC-01).
 ```
 - `token` is generated server-side (32 random bytes, base64url), returned plaintext **once**,
   stored **hashed** (`host_enrollments.token_hash`).
-- `node_name` binds the token: it redeems only for that `node_name`. Absent = any.
+- `node_name` binds the token: it redeems only for that `node_name`. Absent = any; **`""` is
+  `400 validation_failed`**, because an empty string would silently mint an any-node token —
+  the opposite of what a caller sending the field asked for.
 - `expires_at` defaults to one hour. An enrollment token is used within minutes of minting —
-  the operator is at the machine — so a short default is the honest one.
+  the operator is at the machine — so a short default is the honest one. It must be in the
+  future and **at most 30 days out**; `max_uses` is **at most 100**. Both are `400
+  validation_failed` past the cap: the two ways to make a fleet-join credential dangerous are
+  "usable by many machines" and "usable for a long time".
 - **The one-paste enrollment string is composed by the admin UI, not this endpoint:**
   `qenr1.<FINGERPRINT>.<base64url-nopad(wss-url)>.<token>` — fingerprint first and verbatim
   (uppercase colon-separated SHA-256, exactly as the control plane logs it) so the operator
@@ -1850,14 +1860,27 @@ bound to one `node_name`. Same custody model as invites (LP-SEC-01).
 
 ### `GET /v1/admin/hosts/enrollments` · `DELETE /v1/admin/hosts/enrollments/{id}` (admin)
 - `GET` — `?state=all|pending`; **never** the plaintext (`token_prefix` is the handle).
-- `DELETE {id}` — revoke (`revoked_at = now()`), `204`, idempotent.
+  `used_by_node_name` names the machine that most recently redeemed the token (null until
+  first redeemed) — `last_used_at` alone says a redemption happened without saying by whom.
+- `DELETE {id}` — revoke (`revoked_at = COALESCE(revoked_at, now())`, so re-revoking keeps the
+  first timestamp), `204`, idempotent.
 
 ### Redemption (agent side, `agent-api.md` §Auth / enrollment)
 Atomic single-use consume inside the enrollment transaction, so a failed enrollment gives
 the use back. Zero rows ⇒ `auth_failed`, identical for unknown / expired / exhausted /
-revoked / wrong-node — no oracle on the pre-auth `/agent/ws` surface. **Re-enrollment onto a
-`node_name` whose agent is currently connected is refused** (#96) with `auth_failed` and a
-message naming the live agent — the credential was fine, the request was not.
+revoked / wrong-node — no oracle on the pre-auth `/agent/ws` surface.
+
+**The credential is validated first, before anything about the presented `node_name` is
+checked.** An invalid credential is a plain `auth_failed` whether or not that `node_name`
+exists and whether or not it has a live agent — otherwise the refusal below would be an
+existence oracle on a pre-auth surface. Only once the credential is good is **re-enrollment
+onto a `node_name` whose agent is live refused** (#96), with `auth_failed` and a message
+naming the live agent: the credential was fine, the request was not. That refusal rolls the
+transaction back, so it never consumes the token's use. "Live" means the host row reads
+`status = online` with no recorded disconnect, or the node holds an agent websocket on the
+receiving replica — the second alone would miss a host connected to a sibling replica. A
+control-plane crash can leave a row stuck `online` (nothing sweeps them); re-enroll under a
+different `node_name`, or delete the host row first.
 
 ### Device management — owner-self surface
 `RequireAuth`; owner is the **bearer identity**, never a body field. `403` (not `404`) if the

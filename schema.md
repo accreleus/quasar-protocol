@@ -716,7 +716,7 @@ One row per minted invite code. Redemption is atomic single-use (or bounded mult
 |---|---|---|
 | `id` | `UUID` PK | `gen_random_uuid()` |
 | `code_hash` | `TEXT` NOT NULL UNIQUE | SHA-256 (hex) of the opaque code (≥128-bit entropy). Lookup key. **Plaintext is shown to the admin exactly once at mint, never stored** — same custody model as `auth_tokens.token_hash`. |
-| `created_by` | `UUID` NOT NULL → `users(id)` ON DELETE CASCADE | the admin who minted it. |
+| `created_by` | `UUID` NULL → `users(id)` **ON DELETE SET NULL** | the admin who minted it; NULL once that account is gone. *(0073 — it was NOT NULL / CASCADE in 0072.)* **The row must outlive its minter:** a token minted by an ephemeral DX admin identity (`users.ephemeral_expires_at`, #399) was cascaded away mid-enrollment when the reaper deleted that identity, destroying a credential a host was in the middle of using. The admin list already `LEFT JOIN`s `users` and `control-api.md` already models `created_by_user_id` as nullable, so nothing above the database changed. |
 | `role` | `TEXT` NOT NULL DEFAULT `'user'` | `CHECK (role IN ('user','admin'))`. The role the redeemed account is created with. **Admin-minted only** — the role is *never* claimable from the register wire; it rides the (admin-created) invite. |
 | `max_uses` | `INT` NOT NULL DEFAULT `1` | `CHECK (max_uses >= 1)`. `1` = single-use (the magic-link default). |
 | `used_count` | `INT` NOT NULL DEFAULT `0` | `CHECK (used_count >= 0 AND used_count <= max_uses)`. Bumped atomically on redemption. |
@@ -735,8 +735,8 @@ rolled back if the subsequent account create hits a `409` duplicate (so a `409` 
 single-use invite). Index: `(created_by)` for the admin list view.
 
 ## `host_enrollments` (#12/#96)
-> *Additive amendment (migration 0072), signed off 2026-09-03. A new table; it changes no
-> existing table. Per-host enrollment tokens stored **hashed**, admin-minted, single-use by
+> *Additive amendment (migrations 0072 + 0073), signed off 2026-09-03. A new table; it changes
+> no existing table. Per-host enrollment tokens stored **hashed**, admin-minted, single-use by
 > default, expiring, optionally bound to one `node_name`. Replaces the fleet-wide static
 > `ENROLLMENT_TOKEN` as the primary join path; the static value keeps working as a fallback.
 > Same custody model as `invites`.*
@@ -745,7 +745,7 @@ single-use invite). Index: `(created_by)` for the admin list view.
 |---|---|---|
 | `id` | `UUID` PK | `gen_random_uuid()` |
 | `token_hash` | `TEXT` NOT NULL UNIQUE | SHA-256 (hex) of the opaque token (256-bit entropy). Lookup key. Plaintext shown to the admin exactly once at mint, never stored. |
-| `created_by` | `UUID` NOT NULL → `users(id)` ON DELETE CASCADE | the admin who minted it. |
+| `created_by` | `UUID` NULL → `users(id)` **ON DELETE SET NULL** | the admin who minted it; NULL once that account is gone. *(0073 — it was NOT NULL / CASCADE in 0072.)* **The row must outlive its minter:** a token minted by an ephemeral DX admin identity (`users.ephemeral_expires_at`, #399) was cascaded away mid-enrollment when the reaper deleted that identity, destroying a credential a host was in the middle of using. The admin list already `LEFT JOIN`s `users` and `control-api.md` already models `created_by_user_id` as nullable, so nothing above the database changed. |
 | `node_name` | `TEXT` NULL | NULL = usable by any `node_name`; set = usable only by exactly this one — what stops a leaked token becoming a host it was not minted for. |
 | `max_uses` | `INT` NOT NULL DEFAULT `1` | `CHECK (max_uses >= 1)`. |
 | `used_count` | `INT` NOT NULL DEFAULT `0` | `CHECK (used_count >= 0 AND used_count <= max_uses)`. Bumped atomically on redemption. |
@@ -753,12 +753,15 @@ single-use invite). Index: `(created_by)` for the admin list view.
 | `revoked_at` | `TIMESTAMPTZ` NULL | admin-revoked; non-null = unusable. |
 | `note` | `TEXT` NULL | admin free-text. |
 | `last_used_at` | `TIMESTAMPTZ` NULL | stamped on each redemption. |
+| `used_by_node_name` | `TEXT` NULL | *(0073)* the `node_name` presented at the most recent redemption; NULL until first redeemed. `last_used_at` records **that** a token was redeemed without recording by whom, which is the fact an operator needs when a token turns out to have been used by a machine they did not expect. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
 A token is **redeemable** iff `revoked_at IS NULL AND used_count < max_uses AND (expires_at
 IS NULL OR expires_at > now()) AND (node_name IS NULL OR node_name = <presented>)`. Consumed
 by a single `UPDATE … RETURNING` under the row lock, **inside the enrollment transaction**,
-so a failed host upsert rolls the use back. Index: `(created_by)` for the admin list view.
+so a failed host upsert — or a refused takeover (`control-api.md` §Redemption) — rolls the use
+back. Index: `(created_by)` for provenance lookups by minter; the admin list itself is
+instance-wide, newest first.
 
 ## `apps`
 The library. **Replaces Wolf's per-app TOML.** An app is a launchable container plus the

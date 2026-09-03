@@ -188,11 +188,14 @@ A node must prove it's allowed to join before it can register.
   (`control-api.md` §Host enrollment tokens — hashed, single-use by default, expiring,
   optionally bound to this `node_name`; the primary path since 2026-09-03) **or** the
   fleet-wide static value from control-plane config (delivered out of band; kept as a
-  fallback so existing deployments upgrade untouched). The wire shape is identical for
-  both. The control plane creates the `hosts` row, mints a per-node `node_secret`, returns it
-  in `registered`, and stores `node_secret_hash`. The agent persists the secret locally.
-  **Enrollment onto a `node_name` whose agent is currently connected is refused** (#96):
+  fallback so existing deployments upgrade untouched, and itself optional — a deployment may
+  run with minted tokens only). The wire shape is identical for both. The control plane
+  creates the `hosts` row, mints a per-node `node_secret`, returns it in `registered`, and
+  stores `node_secret_hash`. The agent persists the secret locally.
+  **Enrollment onto a `node_name` whose agent is currently live is refused** (#96):
   enrollment rotates `node_secret`, so allowing it against a live host is identity takeover.
+  The credential is checked FIRST — this surface is pre-auth, so a bad token gets a plain
+  `auth_failed` that says nothing about whether the `node_name` exists or is live.
 - **Reconnect:** the agent presents `node_name` + `node_secret`; the control plane checks it
   against `node_secret_hash`. No new row is created.
 - End state (Phase 3/4) replaces the shared enrollment token with mTLS / SPIFFE identities;
