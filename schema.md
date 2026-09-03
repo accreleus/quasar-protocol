@@ -734,6 +734,32 @@ the caller (`control-api.md` generic `400 invalid_invite`, no oracle). The `used
 rolled back if the subsequent account create hits a `409` duplicate (so a `409` never burns a
 single-use invite). Index: `(created_by)` for the admin list view.
 
+## `host_enrollments` (#12/#96)
+> *Additive amendment (migration 0072), signed off 2026-09-03. A new table; it changes no
+> existing table. Per-host enrollment tokens stored **hashed**, admin-minted, single-use by
+> default, expiring, optionally bound to one `node_name`. Replaces the fleet-wide static
+> `ENROLLMENT_TOKEN` as the primary join path; the static value keeps working as a fallback.
+> Same custody model as `invites`.*
+
+| column | type | notes |
+|---|---|---|
+| `id` | `UUID` PK | `gen_random_uuid()` |
+| `token_hash` | `TEXT` NOT NULL UNIQUE | SHA-256 (hex) of the opaque token (256-bit entropy). Lookup key. Plaintext shown to the admin exactly once at mint, never stored. |
+| `created_by` | `UUID` NOT NULL → `users(id)` ON DELETE CASCADE | the admin who minted it. |
+| `node_name` | `TEXT` NULL | NULL = usable by any `node_name`; set = usable only by exactly this one — what stops a leaked token becoming a host it was not minted for. |
+| `max_uses` | `INT` NOT NULL DEFAULT `1` | `CHECK (max_uses >= 1)`. |
+| `used_count` | `INT` NOT NULL DEFAULT `0` | `CHECK (used_count >= 0 AND used_count <= max_uses)`. Bumped atomically on redemption. |
+| `expires_at` | `TIMESTAMPTZ` NULL | NULL = no expiry; the mint endpoint defaults it to one hour. |
+| `revoked_at` | `TIMESTAMPTZ` NULL | admin-revoked; non-null = unusable. |
+| `note` | `TEXT` NULL | admin free-text. |
+| `last_used_at` | `TIMESTAMPTZ` NULL | stamped on each redemption. |
+| `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
+
+A token is **redeemable** iff `revoked_at IS NULL AND used_count < max_uses AND (expires_at
+IS NULL OR expires_at > now()) AND (node_name IS NULL OR node_name = <presented>)`. Consumed
+by a single `UPDATE … RETURNING` under the row lock, **inside the enrollment transaction**,
+so a failed host upsert rolls the use back. Index: `(created_by)` for the admin list view.
+
 ## `apps`
 The library. **Replaces Wolf's per-app TOML.** An app is a launchable container plus the
 defaults the scheduler and pipeline need.

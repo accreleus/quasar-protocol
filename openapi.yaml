@@ -2248,6 +2248,58 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /v1/admin/hosts/enrollments:
+    # #12/#96 amendment (2026-09-03, additive, admin-gated, signed off). Per-host enrollment
+    # tokens replacing the fleet-wide static ENROLLMENT_TOKEN as the primary join path.
+    # The `register` wire shape is unchanged: `auth.enrollment_token` stays a string and the
+    # server matches a minted token (hash lookup) before the static one (config compare).
+    get:
+      tags: [admin]
+      summary: List minted host-enrollment tokens (never the plaintext token).
+      x-required-role: admin
+      parameters:
+        - name: state
+          in: query
+          required: false
+          schema: { type: string, enum: [all, pending], default: all }
+          description: >-
+            `pending` returns only tokens that would still redeem right now: not revoked,
+            not expired, and `used_count < max_uses`. An unrecognized value is
+            `400 validation_failed` with code `invalid_state`.
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { type: object, properties: { enrollments: { type: array, items: { $ref: "#/components/schemas/HostEnrollment" } } } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [admin]
+      summary: Mint a host-enrollment token (plaintext returned once).
+      x-required-role: admin
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                node_name: { type: string, description: "Bind the token to exactly this node_name. Absent = any node_name." }
+                max_uses: { type: integer, default: 1 }
+                expires_at: { type: string, format: date-time, description: "Absent = one hour from mint." }
+                note: { type: string }
+      responses:
+        "201": { description: Token minted. , content: { application/json: { schema: { type: object, properties: { enrollment: { $ref: "#/components/schemas/HostEnrollmentMinted" } } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/hosts/enrollments/{id}:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    delete:
+      tags: [admin]
+      summary: Revoke a host-enrollment token (idempotent).
+      x-required-role: admin
+      responses:
+        "204": { description: Revoked. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   # ─── admin: storage ──────────────────────────────────────────────────────
   /v1/admin/storage/homes:
     get:
@@ -4655,6 +4707,41 @@ components:
         code: { type: string, description: "Plaintext, returned once, never retrievable again." }
         invite_url: { type: string, description: "Present only when the server has a configured public base URL." }
         role: { $ref: "#/components/schemas/Role" }
+        max_uses: { type: integer }
+        used_count: { type: integer }
+        expires_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+
+    HostEnrollment:
+      type: object
+      description: "List shape for a per-host enrollment token (#12/#96) — never carries the plaintext token."
+      required: [id, token_prefix, node_name, max_uses, used_count, expires_at, revoked_at, last_used_at, note, created_at, created_by_user_id, created_by_username]
+      properties:
+        id: { type: string, format: uuid }
+        token_prefix: { type: string, description: "First 8 hex of token_hash — a stable non-secret handle." }
+        node_name: { type: [string, "null"], description: "Bound node_name, or null for any." }
+        max_uses: { type: integer }
+        used_count: { type: integer }
+        expires_at: { type: [string, "null"], format: date-time }
+        revoked_at: { type: [string, "null"], format: date-time }
+        last_used_at: { type: [string, "null"], format: date-time }
+        note: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        created_by_user_id: { type: [string, "null"], format: uuid }
+        created_by_username: { type: [string, "null"] }
+    HostEnrollmentMinted:
+      type: object
+      description: >-
+        POST /v1/admin/hosts/enrollments 201 body's `enrollment` — the plaintext token, ONCE.
+        The admin UI composes the one-paste enrollment string
+        (`qenr1.<FINGERPRINT>.<base64url(wss-url)>.<token>`) from this plus the page origin and
+        the certificate fingerprint from /v1/admin/access-check; the server never composes it,
+        because it does not know its own reachable address.
+      required: [id, token, node_name, max_uses, used_count, expires_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        token: { type: string, description: "Plaintext, returned once, never retrievable again." }
+        node_name: { type: [string, "null"] }
         max_uses: { type: integer }
         used_count: { type: integer }
         expires_at: { type: [string, "null"], format: date-time }

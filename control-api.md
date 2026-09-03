@@ -1140,6 +1140,9 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `POST /v1/admin/invites` | **admin** | *(LP-SEC-01)* mint an invite; plaintext code + magic link returned once |
 | `GET /v1/admin/invites` | **admin** | *(LP-SEC-01)* list minted invites (never plaintext) |
 | `DELETE /v1/admin/invites/{id}` | **admin** | *(LP-SEC-01)* revoke an invite |
+| `POST /v1/admin/hosts/enrollments` | **admin** | *(#12/#96)* mint a per-host enrollment token; plaintext returned once |
+| `GET /v1/admin/hosts/enrollments` | **admin** | *(#12/#96)* list minted enrollment tokens (never plaintext) |
+| `DELETE /v1/admin/hosts/enrollments/{id}` | **admin** | *(#12/#96)* revoke an enrollment token |
 | `PATCH /v1/me/devices/{id}` | user (self) | *(LP-SEC-01)* rename / set trust; owner-scoped, `403` on others' |
 | `DELETE /v1/me/devices/{id}` | user (self) | *(LP-SEC-01)* revoke — expires that device's tokens; owner-scoped |
 | `GET /v1/admin/config/catalog` | **admin** | *(host-runtime-settings)* read the knob catalog |
@@ -1805,6 +1808,56 @@ break a feature; `DELETE` is how you clear one.
 - `GET` — list minted invites; **never** the plaintext code (show `id`, `role`, `max_uses`,
   `used_count`, `expires_at`, `revoked_at`, `note`, `created_at`).
 - `DELETE {id}` — revoke (`revoked_at = now()`), `204`, idempotent; stops redeeming immediately.
+
+## Host enrollment tokens (#12/#96)
+
+> **Amendment — host-enrollment-tokens (2026-09-03), additive, admin-gated, signed off.** Adds
+> `POST/GET /v1/admin/hosts/enrollments` and `DELETE /v1/admin/hosts/enrollments/{id}` and the
+> `host_enrollments` table (`schema.md`). **The `register` wire shape is unchanged**
+> (`agent-api.md`): `auth.enrollment_token` stays a string; what changes is server-side
+> matching — a minted token (hash lookup) is tried first, then the static `ENROLLMENT_TOKEN`
+> (constant-time compare), so an existing deployment upgrades untouched.
+
+Why: the static `ENROLLMENT_TOKEN` is shared by the whole fleet, never expires, cannot be
+rotated without a control-plane restart, and — because enrollment upserts on `node_name` —
+carries the authority to **become** an already-enrolled host, not merely to add one (#96).
+A minted token is per-host, hashed at rest, single-use by default, expiring, and optionally
+bound to one `node_name`. Same custody model as invites (LP-SEC-01).
+
+### `POST /v1/admin/hosts/enrollments` — mint (admin)
+`RequireAuth → RequireAdmin`.
+```json
+// request — all fields optional; a bare {} mints a single-use, one-hour, any-node token
+{ "node_name": "gpu-host-01", "max_uses": 1, "expires_at": "2026-09-03T13:00:00Z", "note": "rack 2" }
+// 201 — plaintext token, returned EXACTLY ONCE (never retrievable again)
+{ "enrollment": { "id": "<uuid>", "token": "<opaque, 256-bit>", "node_name": "gpu-host-01",
+                  "max_uses": 1, "used_count": 0, "expires_at": "...", "created_at": "..." } }
+```
+- `token` is generated server-side (32 random bytes, base64url), returned plaintext **once**,
+  stored **hashed** (`host_enrollments.token_hash`).
+- `node_name` binds the token: it redeems only for that `node_name`. Absent = any.
+- `expires_at` defaults to one hour. An enrollment token is used within minutes of minting —
+  the operator is at the machine — so a short default is the honest one.
+- **The one-paste enrollment string is composed by the admin UI, not this endpoint:**
+  `qenr1.<FINGERPRINT>.<base64url-nopad(wss-url)>.<token>` — fingerprint first and verbatim
+  (uppercase colon-separated SHA-256, exactly as the control plane logs it) so the operator
+  can compare it by eye; the URL from the page origin (scheme swapped `https → wss`); the
+  fingerprint from `GET /v1/admin/access-check`. The server does not know its own reachable
+  address (`tlsx.GatherSANs` documents why), so composing server-side would only launder the
+  UI's input through an endpoint. A UI on a plain-`http` origin must refuse to compose one:
+  it would encode `ws://`, recreating the cleartext exposure this exists to close.
+- `403` for non-admin.
+
+### `GET /v1/admin/hosts/enrollments` · `DELETE /v1/admin/hosts/enrollments/{id}` (admin)
+- `GET` — `?state=all|pending`; **never** the plaintext (`token_prefix` is the handle).
+- `DELETE {id}` — revoke (`revoked_at = now()`), `204`, idempotent.
+
+### Redemption (agent side, `agent-api.md` §Auth / enrollment)
+Atomic single-use consume inside the enrollment transaction, so a failed enrollment gives
+the use back. Zero rows ⇒ `auth_failed`, identical for unknown / expired / exhausted /
+revoked / wrong-node — no oracle on the pre-auth `/agent/ws` surface. **Re-enrollment onto a
+`node_name` whose agent is currently connected is refused** (#96) with `auth_failed` and a
+message naming the live agent — the credential was fine, the request was not.
 
 ### Device management — owner-self surface
 `RequireAuth`; owner is the **bearer identity**, never a body field. `403` (not `404`) if the
