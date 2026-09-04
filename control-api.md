@@ -3733,7 +3733,10 @@ Returns a `draining` host to `online` so the scheduler may place on it again.
 // 200 — host is back online
 { "host": { "id": "<uuid>", "node_name": "gpu-host-01", "status": "online", "...": "..." } }
 ```
-- Requires the host's **agent to be connected** (only a live, heartbeating host can accept work).
+- Requires the host's **agent to be connected** to return to `online` (only a live, heartbeating
+  host can accept work). *(Amendment #11, 2026-09-04:)* if it is not connected — a `draining`
+  row left behind by a control-plane restart — the cordon is still lifted but the `200` body
+  reports the host as `offline`; it comes back `online` on its own when its agent reconnects.
   Idempotent on an already-`online` host (`200` no-op).
 - **Errors:** `404 not_found`; `409 conflict` (host is `offline` — its agent is not connected, so
   there is nothing to return to service; the host comes back `online` on its own when its agent

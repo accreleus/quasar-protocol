@@ -973,6 +973,7 @@ WebSocket + heartbeats, `agent-api.md`); **`draining`** is an administrative cor
 | `offline → online` | system | agent (re)connects and heartbeats — **unless** the host was `draining` before the drop (see the limitation note) |
 | `online → draining` | **admin** | `POST /v1/hosts/{id}/drain` |
 | `draining → online` | **admin** | `POST /v1/hosts/{id}/uncordon` (requires the agent connected) |
+| `draining → offline` | **admin** | `POST /v1/hosts/{id}/uncordon` while the agent is **not** connected (#11): the cordon is lifted but the host is not schedulable, so it lands where the missed disconnect would have put it and returns `online` on the agent's reconnect |
 | `{online, draining} → offline` | system | agent disconnect or heartbeat-miss past threshold (`agent-api.md`) |
 
 - **`draining` is stable, not transient.** A drained host stays `draining` (reachable, still
