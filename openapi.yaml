@@ -2061,12 +2061,13 @@ paths:
   # Decisions: ADR 0001 (a release is trusted by its pinned digest, never a tag)
   # and ADR 0002 (control plane first, no downgrade).
   #
-  # BOTH OPERATIONS CARRY x-unimplemented: true. This contract is authored ahead
-  # of the server (#106); the routes are registered by the detection/read tickets
-  # (#107/#110). REMOVE THE MARKER IN THE SAME CHANGE THAT REGISTERS THE ROUTE —
-  # the drift test's reviewed allowlist (allowedUnimplemented in
-  # control-plane/cmd/quasar-control/openapi_drift_test.go) carries a matching
-  # entry that is removed with it.
+  # /identity IS SERVED as of #107, which removed its x-unimplemented marker and
+  # the matching allowlist entry in the same change. /releases still carries the
+  # marker: this contract was authored ahead of the server (#106) and the release
+  # view is registered by #110. REMOVE THE MARKER IN THE SAME CHANGE THAT
+  # REGISTERS THE ROUTE — the drift test's reviewed allowlist
+  # (allowedUnimplemented in control-plane/cmd/quasar-control/openapi_drift_test.go)
+  # carries a matching entry that is removed with it.
   #
   # The channel and the edge branch deliberately have NO route here: they are
   # instance settings and ride GET/PATCH /v1/admin/settings above.
@@ -2074,11 +2075,9 @@ paths:
     get:
       tags: [admin]
       x-required-role: admin
-      x-unimplemented: true
-      summary: This control plane's own build identity (admin). NOT CURRENTLY SERVED — see x-unimplemented.
+      summary: This control plane's own build identity (admin).
       description: >-
-        NOT IMPLEMENTED AS OF 2026-09-04 — registered by #107/#110, which removes this
-        marker. What THIS control plane is: the stamped semver, the source commit and
+        What THIS control plane is: the stamped semver, the source commit and
         build time it was built from, and schema_version, the highest migration version
         its binary embeds. schema_version is the ORDERING KEY for the whole release
         surface because it is the only one with a consequence: boot runs migrations
