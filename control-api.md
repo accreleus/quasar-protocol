@@ -1988,6 +1988,15 @@ covered by the served certificate's SANs, the fingerprint and days-to-expiry, wh
 origin would pass the `/v1/signal` allow-list, and whether that allow-list is configured at
 all. Shape: `AccessCheck` in `openapi.yaml`.
 
+*Amendment (#100, additive):* `certificate.info.spki_sha256` carries the same key as
+`fingerprint_sha256` in curl's `--pinnedpubkey` form (base64 SHA-256 of the DER
+SubjectPublicKeyInfo). The admin console composes the second-host installer command with it:
+`curl -k --pinnedpubkey 'sha256//<spki_sha256>' https://<this origin>/enroll-host.sh`, so a
+self-signed control plane is trusted by its key, never by `-k` alone; a real-CA certificate gets
+neither flag. `/enroll-host.sh` is a static file the SPA build copies from `deploy/enroll-host.sh`
+and the SPA handler serves from the web root — not an API route, and not part of this contract
+beyond this note.
+
 Admin-gated by the existing `RequireAuth → RequireAdmin`. It reflects `Host` and `Origin`, so
 both are **length-capped at 256 characters** and are only ever rendered as JSON string values —
 a client **MUST NOT** put them through `dangerouslySetInnerHTML`. It discloses configuration an
