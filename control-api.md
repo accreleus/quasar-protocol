@@ -1173,9 +1173,24 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `GET /v1/admin/jobs/{job_id}/runs` | **admin** | *(jobs framework)* that job's bounded run history, newest first; optional `host_id` narrows to one target |
 | `GET /v1/admin/platform/identity` | **admin** | *(platform-release amendment 1, #104/#106)* what **this** control plane is — stamped version, source commit, build time, and the highest migration version its own binary embeds (`schema_version`, the ADR 0002 ordering key). A read of the running binary; it touches no row |
 | `GET /v1/admin/platform/releases` | **admin** | *(platform-release amendment 1, #104/#106)* the release view — installed identities (control plane + every host), available releases newest first with their notes, per-target eligibility carrying a **stable reason identifier**, and faults. Read-only: it applies nothing and **never triggers detection** ("Check now" is `POST /v1/admin/jobs/{job_id}/run`) |
+| `POST /v1/admin/platform/apply` | **admin** | *(platform-release apply, amendment 2, #104/#114)* **fleet apply** of one release — the control plane first, then every eligible host in sequence (ADR 0002). `202` with the run. `404 not_found` (no such release); `422 release_below_schema_version`; `409 release_not_offered` / `409 run_active`. Audited as `platform.apply.run` |
+| `GET /v1/admin/platform/apply/runs` | **admin** | *(amendment 2)* fleet runs, newest first, with a summary of each run's per-target attempts |
+| `GET /v1/admin/platform/apply/runs/{id}` | **admin** | *(amendment 2)* one run with its full per-target attempts. `404 not_found` |
+| `POST /v1/admin/platform/apply/runs/{id}/cancel` | **admin** | *(amendment 2)* stop the run **before its next target**; it **never interrupts an in-flight attempt**. Idempotent; `409 run_not_active` on a terminal run; `404 not_found`. Audited as `platform.apply.cancel` |
+| `POST /v1/admin/platform/hosts/{id}/apply` | **admin** | *(amendment 2)* **per-host apply** of one release. Body: `release_id`, optional `force` (skip the zero-sessions wait and kill the N sessions running). `202` with the attempt. `404 not_found`; `422 release_below_schema_version`; `409 release_not_offered` / `409 host_not_eligible` (carrying the amendment-1 `EligibilityReason`) / `409 attempt_in_flight` / `409 run_active`; `501 apply_unsupported` when the agent never acks. Audited as `platform.apply.host` |
+| `POST /v1/admin/platform/hosts/{id}/revert` | **admin** | *(amendment 2)* **per-host revert** to the previous digests recorded on that host's last succeeded attempt — an apply with an older digest set, not a new wire message, and bounded by ADR 0002 (never above the control plane's release). Optional `force`. `202` with the attempt. `409 nothing_to_revert` / `409 host_not_eligible` / `409 attempt_in_flight` / `409 run_active`; `404 not_found`. Audited as `platform.revert.host` |
+| `GET /v1/admin/platform/attempts` | **admin** | *(amendment 2)* apply history, newest first — **including control-plane attempts and reverts**. Optional `host_id` narrows to one host; `limit` 1–200, default 50 |
 | everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account. *(UI-P5: `POST /v1/sessions` additionally refuses a `profile_id` outside the app's allow-list with `409 profile_not_launchable_for_app` — a per-app configuration rule, not a role check, which is why it is `409` and not the `403` this table's admin rows produce. It is refused for **every** non-admin caller, including one supplying an explicit `stream` override, which carries no role gate here.* ***Phase 2:** `POST /v1/sessions` additionally refuses an app the caller holds no entitlement for with `403 forbidden`. That one **is** `403` and not `409`, because unlike the allow-list it is a statement about the **caller** rather than about the request — and unlike this table's admin rows it is refused for **every** role, admin included)* |
 
 > *(Platform-release amendment 1 adds **no rows** for the release channel or the edge branch. `release_channel` and `release_edge_branch` are instance settings and ride the existing `GET`/`PATCH /v1/admin/settings` rows above — the same reasoning that kept `allowed_origins` off a route of its own. The admin gate they inherit is those rows', not a new one.)*
+
+> *(Platform-release apply, amendment 2 (#104/#114), adds the seven rows above and **nothing
+> outside this table**: every apply, revert, cancel and history read is **admin-only and
+> server-enforced** by the same `auth.RequireAuth → RequireAdmin` middleware wired per-endpoint at
+> route registration that every other admin row here uses. `403` precedes any lookup, so a
+> non-admin cannot learn whether a host, a run or a release exists. There is deliberately **no**
+> non-admin view of any of it — applying a platform release is an operator action, and the `/admin`
+> route gating in the SPA is UX, never the access control.)*
 
 ### First-admin bootstrap (decision)
 A fresh database has no admin, and `/v1/auth/register` deliberately mints **only**
@@ -6730,6 +6745,11 @@ is reported. Evaluate in this order and report the first that holds:
 7. `release_above_control_plane`
 8. `control_plane_not_first`
 
+*(Platform-release apply, amendment 2 (#104/#114), **appends** `attempt_in_flight` (9) and
+`run_active` (10) to this list and inserts nothing into it — see §"Platform-release apply". They
+come last because they are the most transient facts on it, which is exactly the rule stated
+below.)*
+
 The durable facts outrank the transient ones deliberately: an offline source-built host reports
 `install_mode_source`, because reconnecting would not change the answer.
 
@@ -6838,6 +6858,366 @@ verbatim as `PlatformRelease.manifest`. Its shape is exactly:
   **different file** — the release-preflight input set — and predates this. The asset is named
   `platform-release-manifest.json` precisely so the two never collide in a directory, a log line,
   or a conversation.
+
+---
+
+## Platform-release apply (amendment 2, #104/#114, additive, admin-gated)
+
+> **Amendment — platform-release apply (amendment 2, #104/#114), additive, requires sign-off
+> (pre-authorised by the operator 2026-09-05).** The write half of the platform-release feature.
+> Adds **seven admin endpoints** — fleet apply, its runs, its cancel, per-host apply, per-host
+> revert, and apply history — and **one optional field on `PlatformReleaseView`** (`active_apply`).
+> **Additive throughout:** no existing shape, status code, route, or behaviour changes; amendment
+> 1's two reads are untouched; `EligibilityReason` gains two values at the **end** of its
+> precedence order (which amendment 1 already told clients to expect by requiring that an
+> unrecognised identifier be rendered verbatim). Persisted in `schema.md`
+> `platform_apply_runs` / `platform_apply_attempts` (migration 0075, **provisional**). The wire to
+> a host is `agent-api.md` §`release_apply` / §`release_state`.
+>
+> **Every operation below is `RequireAuth → RequireAdmin`, server-enforced**, and enumerated in
+> §Authorization. **Every one is authored ahead of the server** and carries
+> `x-unimplemented: true` in `openapi.yaml` until #116 (per-host apply), #117 (fleet apply) and
+> #118 (revert) register it.
+>
+> **Why one extra field on the view rather than a new one per target.** The Releases page must be
+> able to show an apply that is in flight, including a **standalone** per-host apply that belongs
+> to no fleet run. A per-target `waiting_on_sessions` field would cover only half of that and would
+> put the same attempt in two places in one response, where the two can disagree. One nullable
+> `active_apply` object — the active run, if any, plus **every open attempt** — covers both cases,
+> is a single field, and lets a client join attempts to `targets` by `host_id` (`null` = the
+> control plane). That is the smaller change, and it is the one made.
+
+### The shape of an apply, once, before the endpoints
+
+**A target is the control plane or one host, and an attempt is one target's move to one digest
+set.** `POST /v1/admin/platform/apply` starts a **fleet run** over every target in ADR 0002 order;
+`POST /v1/admin/platform/hosts/{id}/apply` starts a **standalone attempt** with no run. Both
+produce `platform_apply_attempts` rows and both appear in the history; a run is fleet ordering, not
+a different kind of work.
+
+**The control-plane target does not use `agent-api.md`.** The control plane is applied by the
+**updater** sitting beside it on its own host, over that host's local socket — not over an agent
+WebSocket, and never by asking a node agent (`agent-api.md` §`release_apply` states the same rule
+from the other side). Consequences a client must know:
+
+- The control plane **cannot report its own success**: applying it kills the process holding the
+  request. It persists `platform_apply_attempts.updater_request_id` **before** calling the updater,
+  and on boot it **polls that id until terminal**. Reading the result once at boot is wrong — the
+  new container is up while the executor is still in `recreating` (#113 prototype finding 2) — and
+  the binary's own liveness on the new build is the real evidence. An attempt whose requested
+  control-plane digest matches the release the booted binary reports (`GET
+  /v1/admin/platform/identity`) is `succeeded`, whatever a late result file says.
+- **A fleet run survives the restart it causes.** The run row, its state, its `current_target` and
+  its `cancel_requested` flag are all in Postgres, so the control plane that boots on the new image
+  resumes the run at the next target. This is why cancel is a persisted flag and not an in-memory
+  signal.
+- **One automatic restore exists, and only one.** If the new control-plane container **never
+  started** (`State.StartedAt` zero — `agent-api.md` reason `never_started`), the updater restores
+  the previous digests **itself**, because no migration can have run (ADR 0002 holds) and there is
+  no console left for an operator to press Revert in. If it started and then failed, it is left
+  failed: it ran, so assume it did whatever it does, and the attempt's `previous_digests` plus
+  `output` are the copy-paste manual recipe. **There is no automatic restore for a host** — a
+  failed agent apply is reverted by an operator, through `POST
+  /v1/admin/platform/hosts/{id}/revert`.
+
+**A host attempt drains first, and the agent never does session logic.** Before sending
+`release_apply` the control plane cordons the host and waits for zero non-terminal sessions,
+reporting `state:"waiting_sessions"` with `sessions_remaining` while it waits. `force: true` skips
+the wait and stops the sessions that are running — **and the UI must say how many**, because that
+count is exactly what the operator is agreeing to lose. Either way, **recreating the agent kills
+every session on the host** (#113 prototype finding 3); the agent is told which decision was made
+and acts identically on both, and the drain exists so the usual case loses nothing.
+
+**Success for a host attempt is the new agent's `register`.** As with the control plane, the
+process that would have reported `succeeded` is the process being replaced. The control plane
+resolves a host attempt `succeeded` when that host registers, after the attempt started, reporting
+the requested release's `source_commit` in amendment 1's identity fields. A `release_state`
+carrying `succeeded` is corroboration, not the gate.
+
+**Deadlines and the silent old agent.** The `release_apply` **ack timeout is 10 s**; a silent agent
+predates the amendment, so the attempt is recorded `failed` with reason `unsupported`, is **not**
+retried, and the endpoint answers `501 apply_unsupported`. The host is treated as not supporting
+apply **until its next `register`** — a `register` is the only evidence the build changed. After an
+accepted ack, an attempt that has not reached a terminal state within the **apply deadline of 15
+minutes** is recorded `failed` with reason `timeout`; the deadline is generous because a cold pull
+of a platform image on a slow link legitimately takes minutes, and it exists so a run can never
+wedge forever on one target.
+
+### States and reasons — one vocabulary, shared with the wire
+
+**`ApplyRunState`** — `pending` | `running` | `succeeded` | `failed` | `cancelled`. A run
+`succeeded` only when **every** target succeeded. **A run stops at its first failed target**: past
+a failed control plane, continuing would move agents onto a release the control plane is not on
+(ADR 0002), and past a failed host, continuing would be marching a known-bad digest set across the
+fleet. So there is deliberately **no `partial` state** — a `failed` run may well have succeeded
+targets behind it, and the per-target `attempts` are where that is read.
+
+**`ApplyAttemptState`** — `queued` | `waiting_sessions` | `pending` | `pulling` | `recreating` |
+`verifying` | `succeeded` | `failed` | `cancelled`. The six middle values are exactly
+`agent-api.md` `release_state.state`, relayed unchanged. The two before them are control-plane-only
+and precede the wire: `queued` (a run target not yet reached; the command has not been sent) and
+`waiting_sessions` (draining, with `sessions_remaining`). `cancelled` applies **only** to an
+attempt a cancel caught in one of those two states — **cancel never interrupts an attempt that has
+been sent.**
+
+**`ApplyFailureReason`** — the closed vocabulary is `agent-api.md` §`release_state`'s, verbatim, so
+one client-side mapping serves the wire, this API and the history: `updater_absent`, `busy`,
+`invalid`, `namespace_rejected`, `digest_malformed`, `pull_failed`, `recreate_failed`,
+`never_started`, `unhealthy`, `updater_unreachable`, `timeout`, plus the control-plane-only
+**`unsupported`** (no ack within the ack timeout). `reason` is non-null exactly when the state is
+`failed`.
+
+**`EligibilityReason` gains two values, appended to amendment 1's fixed precedence.** They are
+appended rather than inserted, so no existing evaluation changes:
+
+| reason | produced when |
+|---|---|
+| `attempt_in_flight` | this target already has an open `platform_apply_attempts` row. More specific than `run_active` — it is about *this* target — so it is evaluated first. |
+| `run_active` | a fleet run is `pending` or `running` on this instance, so no standalone apply may start. Applies to every target kind. |
+
+Full precedence, evaluate in order and report the first that holds:
+`no_release` → `identity_unknown` → `up_to_date` → `install_mode_source` → `updater_absent` →
+`host_offline` → `release_above_control_plane` → `control_plane_not_first` →
+**`attempt_in_flight`** → **`run_active`**. The two new ones come last because they are the most
+transient facts on the list, and amendment 1's rule that durable reasons outrank transient ones is
+what fixes their position.
+
+### `POST /v1/admin/platform/apply` — fleet apply of one release (admin)
+
+`RequireAuth → RequireAdmin`. Applies one release across the instance: **the control plane first,
+then every eligible host, in sequence** (ADR 0002). Returns immediately with the run; the work is
+asynchronous and is watched through the run endpoints or through `active_apply` on the release
+view.
+
+```json
+// request
+{ "release_id": "<uuid>", "force": false }
+// 202 Accepted
+{ "run": { "id": "<uuid>", "release_id": "<uuid>", "state": "pending", "force": false,
+           "requested_by": "<uuid>", "cancel_requested": false,
+           "current_target": null, "current_host_id": null, "error": null,
+           "skipped": [],
+           "created_at": "...", "started_at": null, "finished_at": null,
+           "attempts": [] } }
+```
+
+- **`release_id`** *(uuid, required)* — a `platform_releases` row id, as served in
+  `GET /v1/admin/platform/releases` `available[].id`.
+- **`force`** *(boolean, optional, default `false`)* — applies to **every host target in this run**:
+  skip the zero-sessions wait and stop whatever is running. It exists on the fleet body, and not
+  only on the per-host one, because a fleet run whose every host target waits for a natural drain
+  can otherwise stall indefinitely with no way to say "go now" short of cancelling and applying
+  host by host. The control plane never uses it on itself — the control plane holds no sessions.
+- **Which hosts are targets** is decided **when each target is reached**, not when the run is
+  created, and by exactly amendment 1's eligibility rule (`identity_known`, `install_mode` is
+  `registry`, `updater_present`, not above the control plane's release, host not offline). A host
+  that is ineligible at its turn is **skipped and produces no attempt row** — an ineligibility is
+  not a failure, and a run must not go `failed` because a host happened to be offline. Skips are
+  reported on the run as `skipped: [{host_id, node_name, reason}]`, carrying amendment 1's
+  `EligibilityReason`, so "why did my host not move" is answered by the run itself rather than only
+  by a later re-read of the release view. A run over a fleet in which nothing is eligible is a
+  `202` whose run reaches `succeeded` with an empty `attempts` list — "there was nothing to do" is
+  a legitimate outcome, not a refusal.
+- **Errors.** `404 not_found` — no such release. **`422 release_below_schema_version`** — the
+  release's `schema_version` is below the installed control plane's; this can never become true, so
+  it is unprocessable rather than a conflict (ADR 0002). **`409 release_not_offered`** — the
+  release is not in the current release view's `available` for any other reason (it is on the other
+  channel, it is a prerelease while the channel is `stable`, or its manifest is missing or invalid
+  and there is nothing to pin it by — ADR 0001); a channel switch or a re-detection can change
+  this, which is why it is a conflict. **`409 run_active`** — a fleet run is already `pending` or
+  `running`; the refusal is the database's (`platform_apply_runs_active_uk`), not a code check, so
+  two simultaneous requests cannot both win. **`409 attempt_in_flight`** — a standalone attempt is
+  open on some target. `401` / `403` as everywhere.
+- Audited as **`platform.apply.run`**, target type `platform`, with the release id, its
+  `source_commit` and `force` — identifiers only, no digests-as-prose and no notes.
+
+### `GET /v1/admin/platform/apply/runs` — fleet runs (admin)
+
+`RequireAuth → RequireAdmin`. Newest first (`created_at DESC, id DESC`). `limit` 1–200, default 20.
+Each run carries its attempts; an active run is first by construction, and there is at most one.
+
+```json
+// 200
+{ "runs": [ { "id": "<uuid>", "release_id": "<uuid>", "state": "running", "...": "...",
+              "attempts": [ { "...": "one ApplyAttempt per target reached" } ] } ] }
+```
+
+### `GET /v1/admin/platform/apply/runs/{id}` — one run (admin)
+
+`RequireAuth → RequireAdmin`. The run with its **full** per-target attempts, in the order the run
+reached them (control plane first). `404 not_found`.
+
+### `POST /v1/admin/platform/apply/runs/{id}/cancel` — stop before the next target (admin)
+
+`RequireAuth → RequireAdmin`. Sets the run's cancel flag.
+
+```json
+// 200 — the run as it stands; state is still "running" if an attempt is in flight
+{ "run": { "id": "<uuid>", "state": "running", "cancel_requested": true,
+           "cancel_requested_at": "...", "...": "..." } }
+```
+
+- **It stops the run before its next target and never interrupts an in-flight attempt.** A pull or
+  a recreate that is already running finishes; the run goes `cancelled` when that attempt
+  terminates. Interrupting a recreate is how a stack is left with no container at all (#113
+  prototype finding 5), so this endpoint deliberately cannot do it.
+- An attempt still `queued` or `waiting_sessions` becomes `cancelled` at once — nothing was sent.
+- **Idempotent.** Cancelling an already-cancelling run is a `200` no-op.
+- **The flag is persisted**, so a cancel issued while the run's control-plane target is restarting
+  the control plane is still honoured by the binary that boots.
+- **Errors:** `404 not_found`; **`409 run_not_active`** — the run is already terminal, and there is
+  nothing to stop. Audited as **`platform.apply.cancel`**.
+
+### `POST /v1/admin/platform/hosts/{id}/apply` — apply one release to one host (admin)
+
+`RequireAuth → RequireAdmin`. A **standalone attempt**: no run, no fleet ordering. This is the
+operator fixing or moving one box, and it is refused while a fleet run is active.
+
+```json
+// request
+{ "release_id": "<uuid>", "force": false }
+// 202 Accepted
+{ "attempt": { "id": "<uuid>", "run_id": null, "kind": "apply", "target": "host",
+               "host_id": "<uuid>", "node_name": "gpu-host-01", "release_id": "<uuid>",
+               "requested_digests": [ { "name": "node-agent",
+                                        "image": "ghcr.io/accreleus/quasar/quasar-node-agent",
+                                        "digest": "sha256:<64 hex>" } ],
+               "previous_digests": [], "state": "waiting_sessions",
+               "reason": null, "sessions_remaining": 2, "force": false,
+               "output": "", "requested_by": "<uuid>",
+               "created_at": "...", "started_at": null, "finished_at": null } }
+```
+
+- **`release_id`** *(uuid, required)*. **`force`** *(boolean, optional, default `false`)* —
+  **skip the zero-sessions wait and stop the N sessions running on this host.** The count is
+  reported as `sessions_remaining` on the attempt before the apply is sent, and a client MUST show
+  it in the confirmation: `force` is the operator agreeing to end N live sessions, and a
+  confirmation that does not name N is not informed consent. With `force: false` the host is
+  cordoned and the attempt sits in `waiting_sessions` until the count reaches zero (or the apply
+  deadline expires, giving `failed` / `timeout`).
+- **Only the node-agent image is sent.** `requested_digests` is the release manifest's `node-agent`
+  component and nothing else; the control-plane component is never sent to a host
+  (`agent-api.md` §`release_apply`).
+- **The host is cordoned for the duration and uncordoned afterwards**, whatever the outcome — a
+  host left `draining` by a failed apply would silently drop out of scheduling. A host an admin had
+  **already** cordoned stays cordoned: the apply restores the cordon state it found, it does not
+  impose one.
+- **Errors.** `404 not_found` (no such host, or no such release). `422
+  release_below_schema_version`. `409 release_not_offered`. **`409 host_not_eligible`** — the host
+  is not eligible for this release; the body carries `reason`, one amendment-1 `EligibilityReason`
+  (`identity_unknown`, `install_mode_source`, `updater_absent`, `host_offline`,
+  `release_above_control_plane`, `control_plane_not_first`, `up_to_date`). Reusing that closed
+  vocabulary rather than minting refusal identifiers means the button's absence and the endpoint's
+  refusal are explained by the same string. **`409 attempt_in_flight`** (this host already has an
+  open attempt — the database's `platform_apply_attempts_open_target_uk`, not a code check).
+  **`409 run_active`** (a fleet run owns the fleet right now). **`501 apply_unsupported`** — the
+  agent never acked within 10 s, so it predates the amendment; the attempt is recorded `failed` /
+  `unsupported` and is not retried until that host registers again. Audited as
+  **`platform.apply.host`**.
+
+### `POST /v1/admin/platform/hosts/{id}/revert` — put a host back on its previous digests (admin)
+
+`RequireAuth → RequireAdmin`. **A revert is an apply with an older digest set.** It uses the same
+`agent-api.md` `release_apply` message, the same states and the same reasons; the only thing that
+distinguishes it is `kind: "revert"` on the attempt, which exists so the history can say which
+button was pressed. There is deliberately **no revert message on the wire** — a second message
+that did the same thing would be a second implementation of it.
+
+```json
+// request — force is optional, exactly as for apply
+{ "force": false }
+// 202 Accepted
+{ "attempt": { "id": "<uuid>", "run_id": null, "kind": "revert", "target": "host",
+               "host_id": "<uuid>", "release_id": "<uuid|null>",
+               "requested_digests": [ { "name": "node-agent", "image": "...", "digest": "sha256:<64 hex>" } ],
+               "state": "waiting_sessions", "...": "..." } }
+```
+
+- **The target digests are the `previous_digests` recorded on that host's last `succeeded`
+  attempt**, and nothing else. Not "the previous release", not a version the admin picks: a digest
+  set that was observed running on **this** host. `release_id` on the resulting attempt is the
+  `platform_releases` row those digests belong to **when one is still known**, and `null` otherwise
+  — the digests are the authority, the release row is provenance (`schema.md`).
+- **There is no revert to an arbitrary release, and no version picker.** ADR 0002: the UI never
+  offers a downgrade, and the one exception is this — going back to the digests a host was
+  demonstrably on a moment ago. Reverting the **control plane** is not offered at all, at any
+  depth: it carries migrations, and rolling it below the database's applied version is the
+  crash-loop this whole design is shaped to prevent. Revert exists for agents, which carry no
+  migrations.
+- **Bounded by ADR 0002 all the same.** If the previous digest set orders **above** the control
+  plane's current release, the revert is refused with `409 host_not_eligible` and
+  `reason: "release_above_control_plane"`. That is only reachable when the control plane itself was
+  moved backwards by hand, and it is refused rather than performed because "put the agent back" is
+  never worth creating an agent-ahead-of-control-plane fault.
+- **Errors.** `404 not_found`. **`409 nothing_to_revert`** — this host has no succeeded attempt, or
+  its last succeeded attempt recorded no previous digests (`previous_digests` is `[]`, e.g. the
+  updater could not determine them). `409 host_not_eligible` (with `reason`), `409
+  attempt_in_flight`, `409 run_active`, `501 apply_unsupported` — all exactly as for apply. Audited
+  as **`platform.revert.host`**.
+
+### `GET /v1/admin/platform/attempts` — apply history (admin)
+
+`RequireAuth → RequireAdmin`. Every attempt this instance has made, **newest first**
+(`created_at DESC, id DESC`), **including control-plane attempts and reverts** — the one place an
+operator can read "what has this instance done to itself".
+
+```
+GET /v1/admin/platform/attempts?host_id=<uuid>&limit=50
+```
+
+- **`host_id`** *(uuid, optional)* — narrow to one host. Omitted, the response spans the whole
+  instance, control-plane attempts included (those have `host_id: null`). There is deliberately no
+  `target=control_plane` filter: `host_id` absent already means "everything", and a second, partly
+  overlapping filter is how two clients come to disagree about what a list contains.
+- **`limit`** *(integer, optional)* — 1–200, default 50. Out of range is `400 validation_failed`.
+- Every attempt carries its `kind` (`apply` | `revert`), `target` (`control_plane` | `host`),
+  `run_id` (`null` for a standalone action), the digests it requested and the digests it replaced,
+  its state, its `reason` if it failed, and its bounded `output`.
+
+```json
+// 200
+{ "attempts": [ { "id": "<uuid>", "run_id": null, "kind": "revert", "target": "host",
+                  "host_id": "<uuid>", "node_name": "gpu-host-01", "release_id": null,
+                  "requested_digests": [ { "name": "node-agent", "image": "...", "digest": "sha256:<64 hex>" } ],
+                  "previous_digests": [ { "name": "node-agent", "digest": "sha256:<64 hex>" } ],
+                  "state": "succeeded", "reason": null, "sessions_remaining": null,
+                  "force": true, "output": "", "requested_by": "<uuid>",
+                  "created_at": "...", "started_at": "...", "finished_at": "..." } ] }
+```
+
+- `404` is not a shape here — an unknown `host_id` yields an empty list, since "this host has no
+  history" and "this host is gone" are the same answer to the question being asked.
+- Errors: `400 validation_failed` (a `limit` out of range, a `host_id` that is not a uuid), `401`,
+  `403`.
+
+### `GET /v1/admin/platform/releases` gains `active_apply` (additive)
+
+The release view (amendment 1) gains **one optional field**, `active_apply`. Everything else in
+that response is unchanged, and a server that predates this amendment simply does not send it.
+
+```json
+{
+  "channel": "stable", "...": "every amendment-1 field, unchanged",
+  "active_apply": {
+    "run": { "id": "<uuid>", "release_id": "<uuid>", "state": "running", "...": "..." },
+    "attempts": [
+      { "id": "<uuid>", "target": "host", "host_id": "<uuid>", "kind": "apply",
+        "state": "waiting_sessions", "sessions_remaining": 2, "...": "..." }
+    ]
+  }
+}
+```
+
+- **`active_apply`** is `null` when nothing is in flight, and is **always serialized** by a server
+  implementing this amendment (`null` is the answer, not the absence of one).
+- **`run`** is the active fleet run or `null` — there is at most one
+  (`platform_apply_runs_active_uk`).
+- **`attempts`** is **every open attempt on the instance**, whether it belongs to that run or is a
+  standalone per-host apply or revert. A client renders "waiting on N sessions" for a target by
+  finding the attempt whose `host_id` matches the `targets` entry (`null` = the control plane) and
+  reading `state` and `sessions_remaining`.
+- **`targets` gains no field.** The same attempt in two places in one response is a way for the two
+  to disagree; the join by `host_id` costs a client one line and cannot.
 
 ---
 

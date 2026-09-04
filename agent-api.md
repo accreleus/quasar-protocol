@@ -153,6 +153,27 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > `hosts` (`schema.md`, migration 0074) and served on the admin surface
 > (`control-api.md` §Platform releases, §Hosts).
 
+> **Amendment — platform-release apply (amendment 2, #104/#114), additive, requires sign-off
+> (pre-authorised by the operator 2026-09-05).** The apply half of the platform-release feature,
+> and the other half of amendment 1's read surface. Adds **one downstream (control → node)
+> command, `release_apply`** (move this host's **node-agent** image to a release's pinned digest)
+> and **one upstream message, `release_state`** (the relayed progress and terminal outcome of one
+> apply). **Additive** — two new `type` values and nothing else: no existing message, field, ack,
+> or timeout contract changes, and **`register` gains nothing** (amendment 1's `updater_present`
+> is already the field that says whether this host can be applied to). An older agent silently
+> ignores the unknown downstream `type` (existing discipline) and never sends `release_state`; an
+> older control plane ignores the unknown upstream shape. See §`release_apply`, §`release_state`,
+> §`register`, `control-api.md` §"Platform-release apply", and `schema.md`
+> `platform_apply_runs` / `platform_apply_attempts` (migration 0075, provisional).
+>
+> The two load-bearing decisions are **ADR 0001** (a release is trusted by its **pinned digest**,
+> never a tag or a signature — so every image on this wire is a repository name plus a
+> `sha256:` digest, and never a tag) and **ADR 0002** (releases apply **control plane first**, and
+> no surface offers a downgrade — so the control plane is never a target of this command, and a
+> host is never moved past the control plane). Vocabulary is `CONTEXT.md` §"Platform releases"
+> — **platform release**, **channel**, **release manifest**, **updater**, **install mode** — and
+> this contract uses those words and no synonyms.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -270,6 +291,13 @@ carry a stale commit that describes nothing running. A host with **any** of the 
 identity-unknown and is **never eligible for a platform-release apply**
 (`control-api.md` §Platform releases). An older agent sends none of them and registers exactly as
 before; the control plane never refuses a registration over these fields.
+
+**Platform-release apply (amendment 2) adds nothing here.** `register` is unchanged by the apply
+half: `updater_present` above is already the field that says whether this host has an actor
+capable of recreating its containers, and `source_commit` is already how a completed apply is
+recognised — the **new** agent's `register`, reporting the release's commit, is the success
+evidence for a node-agent apply (§`release_state`). A second "I am mid-apply" field would be a
+second source of truth for something the `platform_apply_attempts` row already owns.
 
 ### `capacity` — full capacity report
 Sent immediately after `registered`, and again whenever hardware/topology changes. Replaces
@@ -850,6 +878,126 @@ event).
 - The control plane upserts `host_images(host_id, image_id)` from this message. Unknown
   `image_id` (not in `image_catalog`) is dropped, not stored.
 
+### `release_state` — platform-release apply progress (amendment 2, #104/#114)
+> *Additive amendment. A new upstream message; an older control plane ignores the unknown
+> `type`. **Fire-and-forget (no `ack`)**, exactly like `image_state`. It carries **no session
+> authority** and no image-catalog authority — it says only what one apply on this host is
+> doing.*
+
+Sent on every state transition of an in-flight `release_apply` on this host, and **at most once
+every 2 s** while a state persists (a pull produces many docker layer events and none of them is
+a state change). Correlated by `request_id` — **the id the control plane minted and sent**, never
+one the agent invents, so a state message maps to exactly one
+`platform_apply_attempts` row (`schema.md`) even across an agent reconnect.
+
+```json
+{
+  "type": "release_state",
+  "request_id": "7a1f6f1e-2c33-4a58-9a5e-0b6b0f7a1c22",
+  "state": "recreating",
+  "reason": null,
+  "components": [
+    { "name": "node-agent",
+      "image": "ghcr.io/accreleus/quasar/quasar-node-agent",
+      "digest": "sha256:9f2c...<64 lowercase hex>" }
+  ],
+  "previous": [
+    { "name": "node-agent", "digest": "sha256:1b7e...<64 lowercase hex>" }
+  ],
+  "output": "",
+  "started_at": "2026-09-05T11:04:02Z",
+  "updated_at": "2026-09-05T11:04:31Z",
+  "finished_at": null
+}
+```
+
+- **`request_id`** *(uuid, required)* — the `release_apply` this describes. A `request_id` the
+  control plane does not recognise is **dropped, not stored** (same posture as an unknown
+  `image_id` on `image_state`).
+- **`state`** *(string, required)* — one of **`pending` | `pulling` | `recreating` | `verifying` |
+  `succeeded` | `failed`**. Exactly the states the updater's result file carries (#113 prototype
+  finding 2). **Monotonic**: a state never goes backwards, and `succeeded` / `failed` are
+  terminal. `pending` = the updater accepted the request and has not started; `pulling` = fetching
+  the component digests; `recreating` = the compose `up -d --force-recreate --no-deps` is running;
+  `verifying` = the container is up and the updater is checking post-state (running, and healthy
+  or health-less) rather than trusting an exit code.
+- **`reason`** *(string or null, required)* — **non-null exactly when `state` is `"failed"`**, and
+  then exactly one identifier from the closed vocabulary below. It is a **stable identifier the
+  admin UI maps to text**, never a sentence, for the same reason amendment 1's
+  `EligibilityReason` is: wording improves in the client without a contract change. A control
+  plane meeting an unrecognised identifier stores and renders it verbatim rather than dropping the
+  message.
+- **`components`** *(array, required)* — what was requested, echoed back so a state message is
+  self-describing: `name` (`"node-agent"`), `image` (repository reference, **no tag and no
+  digest**) and `digest` (`sha256:` + 64 lowercase hex). Same shape and same order as the
+  `release_apply` command's `components`.
+- **`previous`** *(array, required)* — the digest each component was on **before** this apply:
+  `{name, digest}`, `digest` **`null`** when the updater could not determine it (never omitted).
+  **Present in every `release_state`, in every state — not only on failure.** It is what makes the
+  manual restore recipe copy-paste from any observation, and it is what a later
+  `POST /v1/admin/platform/hosts/{id}/revert` reads back (`control-api.md`). This is prototype
+  finding 5 made a contract: the previous digests do restore a half-failed stack, but something
+  has to drive the restore, so the digests must already be recorded when the restore is needed.
+- **`output`** *(string, required)* — the **last 8192 bytes** of the failing step's combined
+  stdout/stderr, truncated from the **front** at a line boundary (the error is at the end), `""`
+  when there is nothing to report. Non-empty only for `failed` in practice. **It never contains a
+  credential or an environment value**: the updater rewrites two variables in the stack's `.env`
+  and reports their **names** only, never their values, and it never echoes the environment
+  wholesale.
+- **`started_at` / `updated_at` / `finished_at`** *(RFC3339 UTC)* — when the updater accepted the
+  request, when this state was written, and when it became terminal (`null` until then).
+
+**`reason` — the closed vocabulary.** These are the same identifiers the `release_apply` `ack`
+uses when it rejects (§`release_apply`), deliberately: an attempt that failed at the ack and one
+that failed inside the updater are the same row on the admin surface, and one vocabulary means
+they can be rendered by one mapping.
+
+| reason | meaning |
+|---|---|
+| `updater_absent` | there is no **updater** on this host's stack — no socket to hand the request to. Nothing here can recreate a container, so the apply has no actor. (Ack rejection; also emitted if the socket is proven gone mid-apply.) |
+| `busy` | an apply is already in flight on this host. **Single-flight per host: refuse, never queue.** (Ack rejection.) |
+| `invalid` | the command was un-actionable on its face — an empty `components` list, an unknown component `name`, a component naming **`control-plane`** (see §`release_apply`), a `request_id` that is not a uuid, an `image` carrying a tag or a digest. (Ack rejection.) |
+| `namespace_rejected` | a component `image` is outside the registry namespace this host will pull platform images from. Reported specifically rather than as `invalid`, because it is the one rejection an operator can fix by configuration. (Ack rejection, or the updater's own allowlist.) |
+| `digest_malformed` | a `digest` is not a well-formed `sha256:` + 64 lowercase hex. (Ack rejection, or the updater's own check.) |
+| `pull_failed` | at least one component digest could not be pulled (registry unreachable, auth denied, manifest not found, or the "mismatched image rootfs and manifest layers" that a digest published without a tag behind it produces). |
+| `recreate_failed` | the compose recreate exited non-zero. The old container is already gone at this point — compose removes it before starting the replacement — so this state is a **stopped service**, and `previous` is the restore recipe. |
+| `never_started` | the recreate produced a container that **never started** (`State.StartedAt` is zero). Distinguished from `unhealthy` because it is the one failure in which nothing the new image would have done can have happened — for the control-plane target that is what makes an automatic restore safe (`control-api.md`; ADR 0002 holds because no migration can have run). A node-agent apply is **never** auto-restored. |
+| `unhealthy` | the new container started and then did not reach running-and-healthy within the updater's wait timeout. It ran; assume it did whatever it does. |
+| `updater_unreachable` | the updater's socket could not be reached, or its result file for this `request_id` stopped advancing or disappeared. "I cannot see the actor", as distinct from `updater_absent`'s "there is no actor". |
+| `timeout` | the apply did not reach a terminal state within the deadline. Emitted by whichever side observes it first; the control plane writes it on the attempt when no terminal `release_state` arrives (`control-api.md`). |
+| `unsupported` | **written by the control plane, never sent on this wire** — no `ack` arrived within the ack timeout, so this agent build predates this amendment. Listed here because it shares the attempt's `reason` column and one client-side mapping. |
+
+**The agent relays; it does not author.** Every field above except the message framing comes from
+the **updater's result file** for this `request_id`. The agent polls that file and emits a
+`release_state` on change; it runs no compose command itself, keeps no apply state of its own, and
+performs **no session logic** at any point. That is why an agent restart mid-apply loses nothing:
+the result file is on disk beside the updater, and the reconnecting agent re-reads it. The shape
+of that file and of the local socket carrying it is **deliberately not frozen** — see `schema.md`
+§"Not frozen: the updater's local socket".
+
+**On reconnect, the agent re-emits the current state for every request id whose result file is
+still present**, immediately after `register` — the same reconciliation posture `register`'s
+`images` snapshot has. A control plane that missed frames catches up without asking.
+
+**A successful node-agent apply is usually never reported by the agent that started it, and the
+control plane must not wait for one.** The recreate kills the process that was sending these
+messages; the `succeeded` state is written to the result file by an updater whose reader has just
+been replaced. **The real success evidence is the NEW agent's `register`** carrying the requested
+release's `source_commit` in amendment 1's identity fields. The control plane therefore treats a
+`register` from that host, arriving after the attempt started and reporting the requested
+`source_commit`, as the attempt's success — exactly as prototype finding 2 established for the
+control-plane target, where the same thing is true of the control plane's own boot. A late
+`release_state{state:"succeeded"}` for an attempt already resolved that way is a no-op, not a
+conflict.
+
+**Session consequence, stated on the wire because it is not obvious:** recreating the agent
+**kills every session on the host** (prototype finding 3). The `quasar-sess-*` / `quasar-pulse-*`
+siblings survive the recreate untouched and are then force-removed by the new agent's startup
+orphan sweep, so nothing is orphaned and the apply is safe to retry at any time — but the sessions
+are gone. Draining to zero sessions first is the **control plane's** job, done before it sends
+`release_apply` at all (`control-api.md`); the agent never checks, waits, or refuses on this
+basis.
+
 ---
 
 ## Messages — control → node (downstream)
@@ -1414,6 +1562,110 @@ reserved.
   (zip-slip) so an entry cannot escape the scratch context dir. A build with insufficient free
   disk fails fast with a readable `image_state` error (a build needs more headroom than a pull),
   and the scratch dir is always cleaned.
+
+### `release_apply` — move this host's agent image to a release's pinned digest (amendment 2, #104/#114)
+> *Additive amendment. A new downstream command; an older agent silently ignores the unknown
+> `type` (existing discipline) and so is **wire-silent** — see "No ack at all" below, which is the
+> whole of how the control plane times it out.*
+
+Reserve/prepare semantics like `image_ensure`: the agent acks **acceptance** immediately, hands
+the request to this host's **updater**, and then relays progress via `release_state`. The agent
+runs no compose command itself and never recreates itself directly — a container cannot recreate
+itself, which is the entire reason the updater exists (`CONTEXT.md` "Updater").
+
+```json
+{
+  "type": "release_apply",
+  "id": "<command-id>",
+  "request_id": "7a1f6f1e-2c33-4a58-9a5e-0b6b0f7a1c22",
+  "release": {
+    "id": "<uuid>",
+    "version": "0.2.0",
+    "source_commit": "1f0c1e0e0c5a9d1b7a2f3e4d5c6b7a8901234567"
+  },
+  "components": [
+    { "name": "node-agent",
+      "image": "ghcr.io/accreleus/quasar/quasar-node-agent",
+      "digest": "sha256:9f2c...<64 lowercase hex>" }
+  ],
+  "force": false
+}
+```
+
+- **`id`** *(required)* — the ordinary command id the `ack` echoes. **Not** the apply's identity:
+  it lives as long as the ack does.
+- **`request_id`** *(uuid, required)* — the apply's identity, **minted by the control plane and
+  persisted before this message is sent**, and the correlation key of every `release_state` that
+  follows. It is control-plane-minted rather than agent-minted deliberately: the agent that
+  receives this command is normally destroyed by carrying it out, so an id it invented would die
+  with it, and neither a reconnecting agent nor a restarted control plane could name the apply
+  afterwards. (Prototype finding 2 established the same rule for the control-plane target, where
+  the requester's boot is the only reader left.)
+- **`release`** *(object, required)* — provenance, so the agent's logs and the updater's result
+  file name the thing a human is looking at: the `platform_releases` row `id`
+  (`control-api.md` `PlatformRelease.id`), the release's `version` (**`null` on the edge channel**
+  — an edge build is a commit, not a version) and its full 40-character `source_commit`.
+  **`source_commit` is what the control plane will match the post-apply `register` against**
+  (§`release_state`), so it is required and never null. The agent must **not** resolve anything
+  from these fields; they are not an alternative identity for the images. ADR 0001: what is
+  applied is the digest below and only the digest.
+- **`components`** *(array, required, non-empty)* — the target component set **for this host**:
+  `name`, `image` (a registry repository reference — **no tag, no digest**) and `digest`
+  (`sha256:` + 64 lowercase hex), composed by the agent as `image@digest`. Same shape and order as
+  the release manifest's `components` (`control-api.md` `ReleaseManifestComponent`).
+  **Today it is always exactly one entry, `"node-agent"`.** It is an array rather than a flat pair
+  so that a host stack that later gains a second agent-side component needs no new message; it is
+  **not** an invitation to send more than the agent knows.
+- **The control plane NEVER asks an agent to update the control plane.** A `components` entry
+  named **`control-plane`** — or any name this agent build does not know — is rejected
+  `ack{ok:false, error:"invalid"}`, unconditionally and without contacting the updater. The
+  control plane is applied through the updater that sits beside *it*, over that host's local
+  socket, and never over this WebSocket; a control plane asking an agent to replace the control
+  plane is the shape of a confused-deputy bug and this contract makes it unrepresentable.
+  (Related, and enforced on the other side: **the updater never accepts a request naming itself** —
+  prototype finding 2.)
+- **`force`** *(boolean, optional, default `false`)* — **"the control plane has decided sessions
+  may be killed."** It is a statement of a decision already taken, not an instruction, and **the
+  agent does no session logic on it or on anything else**: with `force` true or false the agent
+  hands the same request to the updater. Draining to zero sessions, counting what is left, and
+  choosing to kill N of them are entirely control-plane responsibilities, performed **before** this
+  message is sent (`control-api.md` `POST /v1/admin/platform/hosts/{id}/apply`). The field is on
+  the wire so the agent's log line and the updater's result record which decision was made — and
+  so an agent-side interlock, if one is ever wanted, has the input it would need without a contract
+  change. **Recreating the agent kills every session on the host regardless** (§`release_state`).
+
+**Ack semantics — mirroring `image_ensure`.** The agent replies `ack{ id, ok, error? }`, and a
+rejected apply **never fails a session and never changes host status**:
+
+- **`ack{ok:true}`** — **accepted, not done.** The updater answered with this `request_id` and the
+  work is now detached from this connection. Progress and the outcome arrive later as
+  `release_state`; the ack is not the result.
+- **`ack{ok:false, error:"<reason>"}`** — rejected on its face. `error` is **one identifier from
+  the `release_state` `reason` vocabulary** (§`release_state`), and at the ack it is one of
+  **`updater_absent`** (no updater on this stack), **`busy`** (an apply is already in flight —
+  single-flight per host: refuse, never queue), **`invalid`** (malformed, empty, or a component
+  this agent must not apply, including `control-plane`), **`namespace_rejected`** (an `image`
+  outside this host's platform-image namespace) or **`digest_malformed`**. Runtime failures — pull,
+  recreate, health — are **not** ack failures: they follow an `ok:true` ack as
+  `release_state{state:"failed", reason}`, exactly as `image_ensure`'s runtime failures follow via
+  `image_state`.
+- **An apply for a `request_id` already in flight or already terminal is idempotent**: ack
+  `ok:true`, no second apply, current state re-emitted as `release_state`. Same rule as an
+  `image_ensure` for an image already `ready`.
+- **No ack at all ⇒ this agent predates the amendment.** An unknown downstream `type` is
+  wire-silent (it produces no `error` reply), so the control plane's **ack timeout is the only
+  signal** — this is the `image_ensure` "unsupported until next register" logic, made explicit:
+  - The ack timeout is **10 s**.
+  - On timeout the control plane records the attempt `failed` with reason **`unsupported`** and
+    **does not retry** — a silent host is an old build, and the remedy is "update this host's agent
+    another way", not "try again". The admin surface answers `501 apply_unsupported`
+    (`control-api.md`).
+  - The host is then treated as **not supporting apply until its next `register`**, at which point
+    the flag is cleared and an apply may be attempted again. A `register` is the only thing that
+    clears it, because a `register` is the only evidence that the build changed.
+  - Contrast with `session_display_update`, where a timeout reads as a rejection: an apply that was
+    never received changed nothing, so attributing silence to an old build costs nothing and names
+    the actual remedy — the same call `session_capture` makes.
 
 ---
 
