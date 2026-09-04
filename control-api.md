@@ -4627,8 +4627,12 @@ and reap homes pinned to its own host. Any failure (missing/empty headers, unkno
 secret) → `401 unauthorized`; the response never distinguishes which.
 
 #### `GET /v1/agent/storage/gc-pending`
-Returns up to 100 homes pinned to the calling agent's host that are past the 24h GC grace
-period (`gc_after IS NOT NULL AND gc_after + interval '24 hours' < now()`). Host-unpinned
+Returns up to 100 homes pinned to the calling agent's host that are ready for backing-store
+reaping: `gc_after IS NOT NULL AND (user_id IS NULL OR gc_after + interval '24 hours' < now())`.
+*(Amendment #92, 2026-09-04:)* the 24h grace exists so a launch can revive a tombstoned home
+(`EnsureHome` clears `gc_after`); an **orphaned** home — `user_id IS NULL`, its `users` row
+deleted (`ON DELETE SET NULL`, migration 0009) — can never be revived, so it is reapable at
+once. The same predicate guards `gc-confirm`, so a row is never offered and then refused. Host-unpinned
 (`host_id IS NULL`) tombstones are never returned here — no agent owns them; the control-plane
 janitor row-deletes those directly.
 ```json
@@ -4643,7 +4647,7 @@ if it is still a past-grace tombstone on the calling host:
 ```sql
 DELETE FROM user_homes
 WHERE id = $1 AND host_id = $callingHost
-  AND gc_after IS NOT NULL AND gc_after + interval '24 hours' < now()
+  AND gc_after IS NOT NULL AND (user_id IS NULL OR gc_after + interval '24 hours' < now())
 ```
 This guard makes a confirm a **no-op** for a home that was *revived* (a launch cleared
 `gc_after` between the agent's pull and its confirm) or *relocated* to another host — the
