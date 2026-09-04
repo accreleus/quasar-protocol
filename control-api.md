@@ -1171,7 +1171,11 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `PATCH /v1/admin/jobs/{job_id}` | **admin** | *(jobs framework)* edit the **admin-owned** half of the schedule (`enabled`, interval, window, timezone, history limit) — code-owned identity is never writable here. **`409 job_unmanaged`** for an unadopted job, **`409 schedule_locked`** when an env override is authoritative, `422 validation_failed` for a value the schedule model refuses, `400 validation_failed` for an **unknown key**. Audited as `job.update` |
 | `POST /v1/admin/jobs/{job_id}/run` | **admin** | *(jobs framework)* queue a manual run (`202`) — **bypasses the window, never the job's own gates**. `409 job_already_running` / `409 job_disabled` / `409 job_unmanaged`. `host_id` required for a host-scoped job, refused for an instance-scoped one. Audited as `job.run` |
 | `GET /v1/admin/jobs/{job_id}/runs` | **admin** | *(jobs framework)* that job's bounded run history, newest first; optional `host_id` narrows to one target |
+| `GET /v1/admin/platform/identity` | **admin** | *(platform-release amendment 1, #104/#106)* what **this** control plane is — stamped version, source commit, build time, and the highest migration version its own binary embeds (`schema_version`, the ADR 0002 ordering key). A read of the running binary; it touches no row |
+| `GET /v1/admin/platform/releases` | **admin** | *(platform-release amendment 1, #104/#106)* the release view — installed identities (control plane + every host), available releases newest first with their notes, per-target eligibility carrying a **stable reason identifier**, and faults. Read-only: it applies nothing and **never triggers detection** ("Check now" is `POST /v1/admin/jobs/{job_id}/run`) |
 | everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account. *(UI-P5: `POST /v1/sessions` additionally refuses a `profile_id` outside the app's allow-list with `409 profile_not_launchable_for_app` — a per-app configuration rule, not a role check, which is why it is `409` and not the `403` this table's admin rows produce. It is refused for **every** non-admin caller, including one supplying an explicit `stream` override, which carries no role gate here.* ***Phase 2:** `POST /v1/sessions` additionally refuses an app the caller holds no entitlement for with `403 forbidden`. That one **is** `403` and not `409`, because unlike the allow-list it is a statement about the **caller** rather than about the request — and unlike this table's admin rows it is refused for **every** role, admin included)* |
+
+> *(Platform-release amendment 1 adds **no rows** for the release channel or the edge branch. `release_channel` and `release_edge_branch` are instance settings and ride the existing `GET`/`PATCH /v1/admin/settings` rows above — the same reasoning that kept `allowed_origins` off a route of its own. The admin gate they inherit is those rows', not a new one.)*
 
 ### First-admin bootstrap (decision)
 A fresh database has no admin, and `/v1/auth/register` deliberately mints **only**
@@ -1696,6 +1700,8 @@ cannot straddle the compare and the write.
 `registration_mode` validated against `{closed, invite_only, open}` (`400 validation_failed`
 otherwise); persisted to the `instance_settings` singleton (`schema.md`). Takes effect
 immediately — no redeploy. `403` for non-admin (precedes any lookup).
+
+*(This envelope and PATCH body have since grown, additively, beyond the invitation switch this section was written for: `storage_provider`, the discovery switches, `mic_capture_enabled`, `image_update_policy`, `allowed_origins`, and — platform-release amendment 1 — `release_channel` / `release_edge_branch` (§Platform releases). Every one of them is an **optional pointer** on PATCH: absent means unchanged.)*
 
 ## Encrypted secrets — the reusable operator-credential facility (2026-07-28)
 
@@ -3706,6 +3712,21 @@ bearer is `403`, before any host lookup, per §Authorization) and both return th
 > guidance; it never gates registration, admission, or scheduling, and no endpoint anywhere
 > refuses a request because a check failed. Canonical schema: `openapi.yaml` `Host` /
 > `ReadinessCheck`.
+
+> **Amendment — platform-release identity, additive (amendment 1, #104/#106).** The host body
+> (`GET /v1/hosts`, `GET /v1/hosts/{id}`, and the host list) gains four fields, **all always
+> serialized**: `source_commit` (the git commit the running agent binary was built from, 7–40
+> lowercase hex as reported), `built_at` (RFC3339), `install_mode` (`"registry"` | `"source"`) and
+> `updater_present` (bool). Each is `null` until an amendment-aware agent reports it. Sourced from
+> the agent's `register` message (`agent-api.md` §`register`, four OPTIONAL fields), stored on
+> `hosts` (`schema.md`, migration 0074).
+> **Identity is per-connection truth: the four are replaced WHOLESALE on every `register`, and an
+> absent field is stored NULL** — deliberately unlike `images`/`storage`/`readiness`, which are
+> keep-if-absent. Those describe hardware an older agent merely fails to re-report; these describe
+> the binary that is connected right now, so an agent downgraded to a pre-amendment build must read
+> as identity-unknown again rather than keep a commit nothing is running.
+> A host with **any** of the four null is "identity unknown" and is **never eligible for an apply**
+> (§Platform releases). Canonical schema: `openapi.yaml` `Host`.
 
 ### `POST /v1/hosts/{id}/drain` — cordon a host
 Marks an `online` host `draining`: the scheduler places **no new sessions** on it, while its
@@ -6487,6 +6508,336 @@ this is not a claim that some earlier overlay already drew them. Widening an acc
 set is additive: no stored value changes meaning, and a client that only ever writes
 `top`/`bottom` is unaffected. Out-of-vocabulary values are still a `400`, and still not
 clamped (see `GET`/`PATCH /v1/me/ui-preferences`).
+
+---
+
+## Platform releases — identity and the release read surface (amendment 1, #104/#106, additive, admin-gated)
+
+> **Amendment — platform-release identity + release read surface (amendment 1, #104/#106),
+> additive, admin-gated, requires sign-off.** Adds two admin **read** endpoints —
+> `GET /v1/admin/platform/identity` (what this control plane itself is) and
+> `GET /v1/admin/platform/releases` (the release view: installed identities, available releases,
+> per-target eligibility, faults) — two fields on the **existing** instance-settings envelope and
+> PATCH body (`release_channel`, `release_edge_branch`), four always-serialized identity fields on
+> the host body (§Hosts), and the `ReleaseManifest` shape the release asset carries. In
+> `agent-api.md`, `register` gains **four OPTIONAL fields** (`source_commit`, `built_at`,
+> `install_mode`, `updater_present`), so an older agent registers **byte-identically** and simply
+> reads as identity-unknown. **No existing shape, status code, route, or behaviour changes.** The
+> channel and the edge branch earn **no route of their own** — they ride `GET`/`PATCH
+> /v1/admin/settings`, for the same reason `allowed_origins` does, which is why §Authorization
+> gains a note about them rather than rows. Storage: `schema.md` (`hosts` identity columns, the
+> `platform_releases` table, `instance_settings.release_channel` / `release_edge_branch`,
+> migration 0074).
+>
+> **This is the READ half, deliberately split off first.** Amendment 2 adds the apply half — the
+> downstream apply command, its ack, the upstream apply-state message, fleet apply, per-host
+> apply, revert, and apply history. **Nothing here presumes its shape:** every endpoint below is a
+> read, no field below is a handle to a future apply, and an eligibility a target reports is a
+> statement of fact ("this host could be given a release") that stays true whatever the apply wire
+> turns out to look like. Detection ships on this amendment alone; the updater does not gate it.
+>
+> Vocabulary is `CONTEXT.md` §"Platform releases" — **platform release**, **channel**, **release
+> manifest**, **updater**, **install mode** — and this contract uses those words and no synonyms.
+> The two load-bearing decisions are **ADR 0001** (a release is trusted by its pinned digest, never
+> by a tag or a signature) and **ADR 0002** (releases apply control plane first, and no surface
+> ever offers a downgrade).
+
+### Identity, and why `schema_version` is the ordering key
+
+Every Quasar component stamps its identity at build time: a semver `version`, the `source_commit`
+it was built from, and `built_at`. The control plane additionally knows **`schema_version`** — the
+highest migration version embedded in the running binary (the `0NNN` file number as an integer).
+
+`schema_version` is the ordering key for the whole release surface, not `version` and not
+`built_at`, because it is the only one with a **consequence**: the control plane runs its
+migrations forward at boot and crash-loops against a database that is ahead of it (ADR 0002,
+`docs/upgrading.md`). Semver can be re-cut, a build time can go backwards across a rebuild, and an
+edge build has no version at all — but a binary either embeds migration N or it does not.
+Everything below that refuses a move, orders a list, or reports a fault does it on
+`schema_version` first.
+
+### `GET /v1/admin/platform/identity` — what this control plane is (admin)
+
+`RequireAuth → RequireAdmin`. A pure read of the running binary's own stamps; it touches no
+database row and never varies with the channel.
+
+```json
+// 200
+{ "identity": {
+    "version": "0.2.0",
+    "source_commit": "1f0c1e0e0c5a9d1b7a2f3e4d5c6b7a8901234567",
+    "built_at": "2026-09-04T12:00:00Z",
+    "schema_version": 74
+} }
+```
+
+- **`version`** — the stamped semver, without a leading `v`. **`"dev"`** when the binary was built
+  unstamped (a developer `go build`, a source deploy that skipped the linker flags). Never null:
+  a build always has *some* answer to "what are you", and `"dev"` is the honest one.
+- **`source_commit`** — full 40-character lowercase hex, or **`null`** on an unstamped build.
+- **`built_at`** — RFC3339 UTC, or **`null`** on an unstamped build.
+- **`schema_version`** — integer, **always known**, because it is derived from the embedded
+  migration set rather than from a build flag. An unstamped control plane still orders correctly
+  against a release; that is the point of keying on this field.
+- Errors: `401`, `403` (before any work, as everywhere in §Authorization). There is no `404` shape
+  here — a control plane always has an identity to report.
+
+### `GET /v1/admin/platform/releases` — the release view (admin)
+
+`RequireAuth → RequireAdmin`. One read that answers the whole Releases page: what is installed
+across the fleet, what is available on the configured channel, what each target may be moved to,
+and what is wrong. **It is a read and only a read** — it applies nothing, writes nothing, and
+**never triggers detection**. Detection is a background job on the existing framework
+(§Background jobs); "Check now" is `POST /v1/admin/jobs/{job_id}/run`, not this endpoint.
+
+```json
+// 200
+{
+  "channel": "stable",
+  "edge_branch": "develop",
+  "checked_at": "2026-09-04T02:07:11Z",
+  "last_error": null,
+  "installed": {
+    "control_plane": {
+      "version": "0.1.0",
+      "source_commit": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+      "built_at": "2026-08-19T09:14:02Z",
+      "schema_version": 73
+    },
+    "hosts": [
+      { "host_id": "<uuid>", "node_name": "gpu-host-01", "status": "online",
+        "agent_version": "0.1.0",
+        "source_commit": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+        "built_at": "2026-08-19T09:14:02Z",
+        "install_mode": "registry", "updater_present": true, "identity_known": true },
+      { "host_id": "<uuid>", "node_name": "gpu-host-02", "status": "online",
+        "agent_version": "0.1.0",
+        "source_commit": null, "built_at": null,
+        "install_mode": null, "updater_present": null, "identity_known": false }
+    ]
+  },
+  "available": [
+    { "id": "<uuid>", "channel": "stable", "version": "0.2.0",
+      "source_commit": "1f0c1e0e0c5a9d1b7a2f3e4d5c6b7a8901234567",
+      "built_at": "2026-09-04T12:00:00Z", "schema_version": 74, "prerelease": false,
+      "notes": "### Fixed\n- Boot race in the node agent (#98)\n",
+      "compare_url": null,
+      "manifest": { "format_version": 1, "...": "the asset, verbatim" },
+      "discovered_at": "2026-09-04T02:07:11Z" }
+  ],
+  "targets": [
+    { "kind": "control_plane", "host_id": null, "node_name": null,
+      "eligible": true, "reason": null },
+    { "kind": "host", "host_id": "<uuid>", "node_name": "gpu-host-01",
+      "eligible": false, "reason": "control_plane_not_first" },
+    { "kind": "host", "host_id": "<uuid>", "node_name": "gpu-host-02",
+      "eligible": false, "reason": "identity_unknown" }
+  ],
+  "faults": [
+    { "kind": "identity_unknown", "host_id": "<uuid>", "node_name": "gpu-host-02",
+      "detail": "agent predates the platform-release identity amendment" }
+  ]
+}
+```
+
+**Top level.**
+- `channel` — the instance's channel (`stable` | `edge`), read from `instance_settings`. Everything
+  in `available` is on it; a release on the other channel is never mixed in.
+- `edge_branch` — the branch the edge channel follows. Reported on both channels (so the UI can
+  render the control without a second read); it selects nothing while `channel` is `stable`.
+- `checked_at` — when detection **last succeeded**, RFC3339, or `null` before the first success.
+  It is not "when this response was computed": a view served from a week-old list must say so.
+- `last_error` — the last detection failure as operator prose, or `null`. Prose, never parsed —
+  the machine-readable run record is the job's (`GET /v1/admin/jobs/{job_id}/runs`). It is cleared
+  on the next successful detection, and it is orthogonal to `checked_at`: a stale `checked_at`
+  with a non-null `last_error` is the normal shape of "the check has been failing since then".
+
+**`installed`.** `control_plane` is exactly the `GET /v1/admin/platform/identity` body's
+`identity` object. `hosts` is one entry per registered host, in the same order the host list uses,
+carrying the host's identity as last reported on `register` (§Hosts, `agent-api.md`).
+`identity_known` is the derived convenience the whole eligibility model turns on: **true only when
+all four of `source_commit`, `built_at`, `install_mode`, `updater_present` are non-null.** A client
+must read this field rather than re-deriving it, so "what counts as known" can never disagree
+between the server and a client.
+
+**`available`.** Every release the detector has seen on the configured channel that is still
+offerable, **newest first: `schema_version` DESC, then `built_at` DESC.** The tiebreak matters
+because an edge channel produces many builds at one `schema_version`.
+
+- **A release whose `schema_version` is below the installed control plane's is NEVER listed**, on
+  either channel (ADR 0002). This is the rule that makes a downgrade unrepresentable rather than
+  merely discouraged: the console cannot offer what the wire does not carry.
+- **A prerelease is never listed while `channel` is `stable`.** Prerelease images are published so
+  release candidates can be exercised; the stable channel ignores them.
+- **The channel switch is the case this rule exists for.** An instance that ran `edge` for a while
+  is on a build whose schema may be ahead of every tagged release; switching back to `stable`
+  therefore shows only stable releases at or above it, which is frequently **none**, and an empty
+  `available` is the correct answer rather than an offer to move backwards.
+- **A stable release whose manifest is missing or invalid is not listed either** — it cannot be
+  applied by digest (ADR 0001), so offering it would be offering something unfollowable. It
+  surfaces as a `manifest_invalid` fault instead, which is how a broken publish stops being silent.
+
+Per release:
+
+| field | meaning |
+|---|---|
+| `id` | the `platform_releases` row id (uuid). Stable across detections; the handle amendment 2's apply will name. |
+| `channel` | `stable` \| `edge`. Always equal to the top-level `channel` in this response — carried per row because the table holds both. |
+| `version` | stable semver without a leading `v` (`"0.2.0"`, `"0.2.0-rc.1"`). **`null` on edge**: an edge build is a commit, not a version, and inventing one would be a lie the UI would then render. |
+| `source_commit` | full 40-character lowercase hex. The identity, on both channels. |
+| `built_at` | RFC3339 UTC. The second ordering key. |
+| `schema_version` | integer — the highest migration the release's control-plane image embeds. The first ordering key, and the ADR 0002 gate. |
+| `prerelease` | true for a prerelease tag. A `stable` read never lists one (above); on `edge` it is reported as found. |
+| `notes` | the release notes, **markdown**, verbatim from the GitHub Release's `body` field (which the publish workflow fills from the changelog section). **`""` on edge** — an edge build has no notes, and `compare_url` is what stands in for them. Never null, so a client renders one type. A client MUST sanitize before rendering: this is upstream text. |
+| `compare_url` | on `edge`, the GitHub compare link from the installed control plane's `source_commit` to this release's — the diff a human reads when there are no notes. `null` on `stable` (the notes are that), and `null` on edge when the installed commit is unknown, since there is nothing to compare from. |
+| `manifest` | the **release manifest** asset verbatim (`ReleaseManifest`, below), as discovered. **`null` on edge**, which publishes no asset. |
+| `discovered_at` | when this instance first saw the release. Provenance, not ordering — two instances can legitimately disagree about it. |
+
+**`targets` — eligibility, evaluated for the newest listed release.** One entry per target: the
+control plane, then every registered host. **Every entry is evaluated against `available[0]`, the
+newest listed release, and against nothing else.** That is stated flatly because it is the one
+thing a reader could otherwise assume per-release: this amendment does not carry a per-release
+eligibility matrix, and a client must not present one. When `available` is empty, every target is
+`eligible: false` with `reason: "no_release"`.
+
+`eligible: true` always carries `reason: null`; `eligible: false` always carries exactly one
+non-null `EligibilityReason`. Reasons are **stable identifiers the UI maps to text** — the server
+never sends the sentence, so wording can be improved in the client without a contract change, and
+a client that meets an unrecognized identifier must render it verbatim rather than drop the row.
+
+The vocabulary is **closed** (`openapi.yaml` `EligibilityReason`):
+
+| reason | produced when |
+|---|---|
+| `no_release` | `available` is empty — nothing has been detected on this channel, or everything detected is below the control plane's `schema_version`. Applies to every target kind. |
+| `identity_unknown` | the target cannot be compared to a release at all: for a **host**, `identity_known` is false (any of the four fields null — an agent predating this amendment, or one that could not determine its own install); for the **control plane**, its `source_commit` is null (an unstamped build). |
+| `up_to_date` | the target's `source_commit` already equals the newest listed release's. Not an error, and the UI says so; it is the common case on a current fleet. |
+| `install_mode_source` | **host only** — `install_mode` is `"source"`. A source-built host is *told* about the release and shown the manual commands, and is never offered an apply: the images it runs were never pulled, so there is nothing to re-pin (`CONTEXT.md` "Install mode"). |
+| `updater_absent` | **host only** — a registry install whose `updater_present` is false. Nothing on that host can recreate its containers, so an apply would have no actor. Every install predating the updater is in this state until an operator adds one once. |
+| `host_offline` | **host only** — the host's agent is not connected (`status` is `offline`). There is nobody to tell. A `draining` host is **not** in this state: a cordon is exactly the condition an apply wants. |
+| `release_above_control_plane` | **host only** — the newest listed release's `schema_version` is strictly **above** the installed control plane's. An agent may never be moved past the control plane (ADR 0002), so this is a ceiling, not a queueing position: it stands until the control plane itself moves. |
+| `control_plane_not_first` | **host only** — the release is *not* above the control plane's schema version, but the control plane is not running it yet (equal `schema_version`, different `source_commit` — the ordinary shape of consecutive edge builds, and of a stable release carrying no migration). Ordering, not a ceiling: apply the control plane and this clears (ADR 0002). |
+
+**Precedence is fixed**, so two implementations cannot disagree about which of several true reasons
+is reported. Evaluate in this order and report the first that holds:
+
+1. `no_release`
+2. `identity_unknown`
+3. `up_to_date`
+4. `install_mode_source`
+5. `updater_absent`
+6. `host_offline`
+7. `release_above_control_plane`
+8. `control_plane_not_first`
+
+The durable facts outrank the transient ones deliberately: an offline source-built host reports
+`install_mode_source`, because reconnecting would not change the answer.
+
+The rule set this table implements, stated once as prose (from the #104 spec): **a host is eligible
+when its install mode is registry, its updater is present, its identity is known, and the target
+release is not above the control plane's release. An agent above the control plane is a fault. A
+release below the installed control plane's schema version is never offered. Switching from edge
+back to stable hides any stable release whose schema is behind the running edge build.**
+
+**`faults`.** Everything wrong that is not an ineligibility. A fault never gates this read and never
+gates anything else: it is reported so a wrong state is visible instead of silent. `host_id` and
+`node_name` are null on an instance-scoped fault. `detail` is operator prose — never parsed, never
+branched on. The vocabulary is **closed** (`openapi.yaml` `PlatformReleaseFaultKind`):
+
+| kind | produced when |
+|---|---|
+| `agent_ahead_of_control_plane` | a host's reported `source_commit` matches a **known release** that orders **above** the installed control plane's release (`schema_version` DESC, then `built_at` DESC — the ordering `available` uses). ADR 0002 says this surface can never *create* that state; this is how it **reports** one an operator produced by hand. An agent on a commit matching no known release cannot be ordered and raises nothing — unrecognized is not ahead. |
+| `identity_unknown` | a registered host whose `identity_known` is false, one fault per host. It is both an ineligibility (above) and a fault, deliberately: the target row explains why the button is absent, the fault is what a fleet-level "something needs attention" count reads. |
+| `manifest_invalid` | a discovered stable release whose `platform-release-manifest.json` asset is missing, unparseable, or fails validation (an unknown `format_version`, an unknown key at either level — the object or a component — a missing component, the two components out of order, an `image` carrying a tag or a digest, an absent or malformed `digest`, a non-positive `schema_version`). Instance-scoped; `detail` names the release. The release is **not** listed in `available` — ADR 0001 leaves nothing to pin it by. |
+
+Errors: `401`, `403`. A fleet with no hosts, no releases, and a failing detector is still a `200` —
+this endpoint reports posture, and "nothing to report" is posture.
+
+### Channel and edge branch — on `/v1/admin/settings`, not routes of their own
+
+The channel and the edge branch are **instance-wide singleton settings**, exactly like
+`registration_mode`, `storage_provider` and `allowed_origins`. They ride the existing settings
+envelope and PATCH body; **this amendment adds no new route for them**, which is why §Authorization
+gains a note rather than two rows. A separate route would fork the admin settings surface,
+duplicate its auth and audit wiring, and make a UI issue two calls to render one form.
+
+```json
+// GET /v1/admin/settings — 200 (excerpt; every existing field is unchanged)
+{ "settings": { "registration_mode": "closed", "release_channel": "stable",
+                "release_edge_branch": "develop", "updated_by": "<uuid|null>", "updated_at": "..." } }
+// PATCH /v1/admin/settings — request (partial, as always)
+{ "release_channel": "edge", "release_edge_branch": "develop" }
+```
+
+- **`release_channel`** — `stable` | `edge`, **default `stable`**. Anything else is `400
+  validation_failed`. Takes effect immediately, with no redeploy: the next
+  `GET /v1/admin/platform/releases` reads the other channel's rows.
+- **`release_edge_branch`** — **default `develop`**. Validation: non-empty, at most **255**
+  characters, and a valid git ref name component — **no whitespace, no `..`, no leading `-`, no
+  control characters**. Anything else is `400 validation_failed`. It is validated (and stored)
+  whatever the channel is, and it selects nothing while the channel is `stable`; it is never
+  cleared by a channel switch, so switching to edge and back does not lose an operator's branch.
+- **Optional-pointer PATCH semantics, exactly like every other settings field: absent = unchanged.**
+  This is not a stylistic note. A plain non-pointer decode of an absent `release_channel` would
+  read `""` (and of `release_edge_branch`, likewise), so an admin changing the registration mode
+  would silently reset the instance's channel — the identical bug the `library_discovery_enabled`
+  note above exists to prevent.
+- **Neither field triggers detection.** Changing the channel or the branch changes what the next
+  read *selects*, not what has been fetched; the detector runs on its schedule, and "check now"
+  stays the jobs run-now action. A UI that wants an immediate answer after a channel switch issues
+  that run explicitly.
+- Audited by the existing `instance.settings.updated` event, whose `keys` array names whichever of
+  the two changed. No new audit action.
+
+**Detection's schedule is not part of this amendment.** It rides the existing jobs framework
+(§Background jobs) as an ordinary job definition with an admin-editable schedule and a run history;
+nothing about it needs a contract change here, and this surface deliberately exposes no schedule
+field that would then have two owners.
+
+### The release manifest asset
+
+A stable release carries one machine-readable asset, **`platform-release-manifest.json`**, attached
+to the GitHub Release and produced by the publish workflow from the same tag as the notes, so the
+digests and the prose cannot disagree. Detection reads it; the admin surface serves it back
+verbatim as `PlatformRelease.manifest`. Its shape is exactly:
+
+```json
+{
+  "format_version": 1,
+  "version": "0.2.0-rc.1",
+  "prerelease": true,
+  "source_commit": "<40 lowercase hex>",
+  "built_at": "2026-09-04T12:00:00Z",
+  "schema_version": 74,
+  "components": [
+    { "name": "control-plane", "image": "ghcr.io/accreleus/quasar/quasar-control-plane", "digest": "sha256:<64 lowercase hex>" },
+    { "name": "node-agent",    "image": "ghcr.io/accreleus/quasar/quasar-node-agent",    "digest": "sha256:<64 lowercase hex>" }
+  ]
+}
+```
+
+- **`format_version` and `schema_version` are different things, and the names are worth reading
+  twice.** `format_version` is the version of *this document's format* (`1` today; a consumer that
+  meets a `format_version` it does not know treats the manifest as invalid and raises
+  `manifest_invalid` rather than guessing). `schema_version` is the **database migration version**
+  the release's control-plane image embeds — the ADR 0002 ordering key used everywhere above.
+- **`image` is a registry reference with no tag and no digest** — the repository name alone —
+  and `digest` is the `sha256:…` form beside it. Consumers compose `image@digest`. **A tag is
+  never an identity** (ADR 0001): the manifest names the only form that cannot be moved under a
+  running fleet, and it names it in exactly one place, so an `image` that already carried a tag
+  or a digest could only disagree with the field that is authoritative.
+- **Exactly two components, in this order: `control-plane`, then `node-agent`.** The order is
+  **normative, not presentational** — the publish workflow's validator (#108) emits and checks
+  exactly this sequence, so a consumer validates positionally rather than searching by name, and
+  a reordered manifest is invalid rather than quietly accepted. They are the platform release
+  (`CONTEXT.md` "Platform release"): the control plane, which carries the web client, and the node
+  agent. App catalog images have their own version and push machinery and never appear here.
+- `version` is the semver without a leading `v`; `prerelease` mirrors the tag's prerelease status,
+  and is what keeps a release candidate off the stable channel.
+- **Naming note:** `scripts/release/release-manifest.json` in the `quasar` superproject is a
+  **different file** — the release-preflight input set — and predates this. The asset is named
+  `platform-release-manifest.json` precisely so the two never collide in a directory, a log line,
+  or a conversation.
 
 ---
 

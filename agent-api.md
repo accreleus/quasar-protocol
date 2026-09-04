@@ -140,6 +140,19 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > it removes a pulled `registry_ref`. See §`image_build`, §`image_remove`, §`image_state`, and
 > `docs/design/plans/2026-08-08-image-management-p4-spec.md` in the quasar repo.
 
+> **Amendment — platform-release identity (amendment 1, #104/#106), additive, requires sign-off.**
+> Adds **four OPTIONAL flat fields to `register`** — `source_commit`, `built_at`, `install_mode`
+> (`"registry"` | `"source"`) and `updater_present` — so the control plane can say which build each
+> host actually runs, which is the precondition for detecting and later applying **platform
+> releases** (`CONTEXT.md` §"Platform releases"). **Additive** — new optional fields on one existing
+> upstream message; no existing message, field, or ack contract changes, and an older agent that
+> sends none of them registers **byte-identically** and reads as identity-unknown. **This is the
+> READ half only:** nothing here moves a host, and the apply command / its ack / the upstream
+> apply-state message are **amendment 2**, whose shape nothing here presumes. Unlike `images`, the
+> four are **replaced wholesale on every `register`** (absent ⇒ NULL) — see §`register`. Stored on
+> `hosts` (`schema.md`, migration 0074) and served on the admin surface
+> (`control-api.md` §Platform releases, §Hosts).
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -225,6 +238,38 @@ rows for this host **wholesale for the reported ids**, and any id the control pl
 `ready` on this host but absent from the report is flipped to `absent` (a reconnected agent
 that lost an image must not read as ready). Absent field ⇒ the control plane keeps its stored
 rows unchanged (older agent).
+
+**Optional identity fields (platform-release amendment 1).** The agent may include four flat
+fields beside `agent_version`, describing the build it is:
+```json
+{
+  "source_commit": "1f0c1e0e0c5a9d1b7a2f3e4d5c6b7a8901234567",
+  "built_at": "2026-09-04T12:00:00Z",
+  "install_mode": "registry",
+  "updater_present": true
+}
+```
+- **`source_commit`** — the git commit the running agent binary was built from, stamped at build
+  time. **7–40 lowercase hex** is accepted and **stored exactly as sent** (a short commit is a real
+  identity, only a less specific one); anything else is treated as **absent**.
+- **`built_at`** — RFC3339, UTC.
+- **`install_mode`** — `"registry"` (this host runs published platform images) or `"source"` (its
+  images were built on the host). Any other value is treated as **absent**. A `source` host can be
+  *told* about a platform release but is never given one (`CONTEXT.md` "Install mode").
+- **`updater_present`** — whether an **updater** is present on this host's stack. `false` is a real
+  answer ("I looked, there is none") and is not the same as the field being absent ("nobody has
+  said"); the control plane stores the difference.
+- The agent learns `install_mode` and `updater_present` from its own container and stack through the
+  docker CLI it already uses. **How** it determines them is agent-side detail and deliberately not
+  fixed here; this wire fixes only the answer it reports.
+
+**Unlike `images`, identity is replaced WHOLESALE on every `register`.** Each of the four is written
+from this message, and an **absent** field is stored **NULL** — absent means *identity unknown*, not
+"keep what you had". An agent downgraded to a pre-amendment build must read as unknown rather than
+carry a stale commit that describes nothing running. A host with **any** of the four NULL is
+identity-unknown and is **never eligible for a platform-release apply**
+(`control-api.md` §Platform releases). An older agent sends none of them and registers exactly as
+before; the control plane never refuses a registration over these fields.
 
 ### `capacity` — full capacity report
 Sent immediately after `registered`, and again whenever hardware/topology changes. Replaces
