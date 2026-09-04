@@ -2061,13 +2061,12 @@ paths:
   # Decisions: ADR 0001 (a release is trusted by its pinned digest, never a tag)
   # and ADR 0002 (control plane first, no downgrade).
   #
-  # /identity IS SERVED as of #107, which removed its x-unimplemented marker and
-  # the matching allowlist entry in the same change. /releases still carries the
-  # marker: this contract was authored ahead of the server (#106) and the release
-  # view is registered by #110. REMOVE THE MARKER IN THE SAME CHANGE THAT
-  # REGISTERS THE ROUTE — the drift test's reviewed allowlist
-  # (allowedUnimplemented in control-plane/cmd/quasar-control/openapi_drift_test.go)
-  # carries a matching entry that is removed with it.
+  # BOTH OPERATIONS ARE SERVED: /identity as of #107 and /releases as of #110,
+  # each of which removed its x-unimplemented marker and the matching entry in
+  # the drift test's reviewed allowlist (allowedUnimplemented in
+  # control-plane/cmd/quasar-control/openapi_drift_test.go) in the same change
+  # that registered the route. Amendment 2's apply operations further down still
+  # carry the marker; #116/#117/#118 own those.
   #
   # The channel and the edge branch deliberately have NO route here: they are
   # instance settings and ride GET/PATCH /v1/admin/settings above.
@@ -2100,11 +2099,9 @@ paths:
     get:
       tags: [admin]
       x-required-role: admin
-      x-unimplemented: true
-      summary: The platform-release view — installed, available, eligibility, faults (admin). NOT CURRENTLY SERVED — see x-unimplemented.
+      summary: The platform-release view — installed, available, eligibility, faults (admin).
       description: >-
-        NOT IMPLEMENTED AS OF 2026-09-04 — registered by #107/#110, which removes this
-        marker. One read that answers the whole admin Releases page: the installed
+        One read that answers the whole admin Releases page: the installed
         identities (this control plane plus every host), the releases available on the
         configured channel newest first with their notes, the per-target eligibility
         FOR THE NEWEST LISTED RELEASE with a stable reason identifier, and the faults.
