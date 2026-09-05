@@ -1039,10 +1039,14 @@ vram_mb_free - (in-flight sessions on this GPU) * <inflight estimate> < <min fre
 ```
 
 In-flight means `state IN ('assigned','starting','running','stopping')` with `started_at` null
-or newer than the sample minus one freshness window. Note this state set intentionally differs
-from the reservation set above: a `stopping` pipeline still holds Vulkan image refs, so it holds
-memory even though it no longer holds a reservation. Residency and reservation are different
-questions.
+or newer than the sample minus one freshness window. The state list is the same
+reservation-holding set used for GPU availability above — a `stopping` pipeline still holds
+Vulkan image refs *and* still holds its reservation until the terminal transition (see the
+Failure & reservation-release invariants). Where the two sets differ is the `started_at` debit
+condition: residency asks whether the sampled `vram_mb_free` can already *see* a session's
+allocation (so only sessions the sample predates are debited), while the reservation sum has
+no such freshness qualifier. Residency and reservation are different questions, but they cover
+the same states.
 
 The declared-VRAM availability formula that used to live here (`vram_mb_total − Σ
 reserved_vram_mb`) is **removed** — see the deprecation notes on `apps.default_vram_mb` and
