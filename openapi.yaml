@@ -2066,8 +2066,8 @@ paths:
   # the drift test's reviewed allowlist (allowedUnimplemented in
   # control-plane/cmd/quasar-control/openapi_drift_test.go) in the same change
   # that registered the route. Amendment 2's apply operations further down are
-  # served for the per-host apply and the attempt history (#116); the fleet
-  # operations and the revert still carry the marker, and #117/#118 own those.
+  # served for the per-host apply, the attempt history (#116) and the per-host
+  # revert (#118); the fleet operations still carry the marker, and #117 owns those.
   #
   # The channel and the edge branch deliberately have NO route here: they are
   # instance settings and ride GET/PATCH /v1/admin/settings above.
@@ -2133,9 +2133,10 @@ paths:
   # (control plane first, no downgrade).
   #
   # This contract was authored ahead of the server (#114). #116 registered the
-  # per-host apply and the attempt history, and removed their markers; the
-  # remaining operations still carry x-unimplemented: true and are registered by
-  # #117 (fleet apply, its runs and cancel) and #118 (revert). REMOVE THE MARKER
+  # per-host apply and the attempt history and #118 the per-host revert, each
+  # removing its marker; the remaining operations still carry
+  # x-unimplemented: true and are registered by #117 (fleet apply, its runs and
+  # cancel). REMOVE THE MARKER
   # IN THE SAME CHANGE THAT REGISTERS THE ROUTE — the drift test's reviewed
   # allowlist (allowedUnimplemented in
   # control-plane/cmd/quasar-control/openapi_drift_test.go) carries a matching
@@ -2308,10 +2309,8 @@ paths:
     post:
       tags: [admin]
       x-required-role: admin
-      x-unimplemented: true
-      summary: Put one host back on its previous digests (admin). NOT CURRENTLY SERVED — see x-unimplemented.
+      summary: Put one host back on its previous digests (admin).
       description: >-
-        NOT IMPLEMENTED AS OF 2026-09-05 — registered by #118, which removes this marker.
         A REVERT IS AN APPLY WITH AN OLDER DIGEST SET - the same agent-api.md
         release_apply message, the same states, the same reasons; only kind "revert" on
         the attempt distinguishes it, so history can say which button was pressed. THERE
