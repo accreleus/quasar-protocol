@@ -2132,15 +2132,11 @@ paths:
   # Decisions: ADR 0001 (trusted by pinned digest, never a tag) and ADR 0002
   # (control plane first, no downgrade).
   #
-  # This contract was authored ahead of the server (#114). #116 registered the
-  # per-host apply and the attempt history and #118 the per-host revert, each
-  # removing its marker; the remaining operations still carry
-  # x-unimplemented: true and are registered by #117 (fleet apply, its runs and
-  # cancel). REMOVE THE MARKER
-  # IN THE SAME CHANGE THAT REGISTERS THE ROUTE — the drift test's reviewed
-  # allowlist (allowedUnimplemented in
-  # control-plane/cmd/quasar-control/openapi_drift_test.go) carries a matching
-  # entry that is removed with it.
+  # This contract was authored ahead of the server (#114) and is now fully
+  # served: #116 registered the per-host apply and the attempt history, #118 the
+  # per-host revert, #117 the fleet apply, its runs and its cancel. Every marker
+  # and every matching allowedUnimplemented entry
+  # (control-plane/cmd/quasar-control/openapi_drift_test.go) is gone.
   #
   # There is deliberately NO control-plane revert route and NO arbitrary-version
   # picker: the control plane carries migrations and cannot go below the
@@ -2150,10 +2146,8 @@ paths:
     post:
       tags: [admin]
       x-required-role: admin
-      x-unimplemented: true
-      summary: Fleet apply of one platform release (admin). NOT CURRENTLY SERVED — see x-unimplemented.
+      summary: Fleet apply of one platform release (admin).
       description: >-
-        NOT IMPLEMENTED AS OF 2026-09-05 — registered by #117, which removes this marker.
         Applies one release across the instance: THE CONTROL PLANE FIRST, then every
         eligible host in sequence (ADR 0002). Returns immediately with the run; the work
         is asynchronous and is watched through the run endpoints or through active_apply
@@ -2191,10 +2185,8 @@ paths:
     get:
       tags: [admin]
       x-required-role: admin
-      x-unimplemented: true
-      summary: Fleet apply runs, newest first (admin). NOT CURRENTLY SERVED — see x-unimplemented.
+      summary: Fleet apply runs, newest first (admin).
       description: >-
-        NOT IMPLEMENTED AS OF 2026-09-05 — registered by #117, which removes this marker.
         Fleet runs newest first (created_at DESC, id DESC), each with its per-target
         attempts. An active run is first by construction and there is at most one.
       parameters:
@@ -2212,10 +2204,8 @@ paths:
     get:
       tags: [admin]
       x-required-role: admin
-      x-unimplemented: true
-      summary: One fleet apply run with its per-target attempts (admin). NOT CURRENTLY SERVED — see x-unimplemented.
+      summary: One fleet apply run with its per-target attempts (admin).
       description: >-
-        NOT IMPLEMENTED AS OF 2026-09-05 — registered by #117, which removes this marker.
         The run with its FULL per-target attempts, in the order the run reached them
         (control plane first).
       parameters:
@@ -2232,10 +2222,8 @@ paths:
     post:
       tags: [admin]
       x-required-role: admin
-      x-unimplemented: true
-      summary: Stop a fleet run before its next target (admin). NOT CURRENTLY SERVED — see x-unimplemented.
+      summary: Stop a fleet run before its next target (admin).
       description: >-
-        NOT IMPLEMENTED AS OF 2026-09-05 — registered by #117, which removes this marker.
         Sets the run's PERSISTED cancel flag. IT STOPS THE RUN BEFORE ITS NEXT TARGET AND
         NEVER INTERRUPTS AN IN-FLIGHT ATTEMPT - a pull or a recreate already running
         finishes, and the run goes cancelled when that attempt terminates. Interrupting a
