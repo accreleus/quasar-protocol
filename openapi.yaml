@@ -2065,8 +2065,9 @@ paths:
   # each of which removed its x-unimplemented marker and the matching entry in
   # the drift test's reviewed allowlist (allowedUnimplemented in
   # control-plane/cmd/quasar-control/openapi_drift_test.go) in the same change
-  # that registered the route. Amendment 2's apply operations further down still
-  # carry the marker; #116/#117/#118 own those.
+  # that registered the route. Amendment 2's apply operations further down are
+  # served for the per-host apply and the attempt history (#116); the fleet
+  # operations and the revert still carry the marker, and #117/#118 own those.
   #
   # The channel and the edge branch deliberately have NO route here: they are
   # instance settings and ride GET/PATCH /v1/admin/settings above.
@@ -2131,10 +2132,11 @@ paths:
   # Decisions: ADR 0001 (trusted by pinned digest, never a tag) and ADR 0002
   # (control plane first, no downgrade).
   #
-  # EVERY OPERATION BELOW CARRIES x-unimplemented: true. This contract is
-  # authored ahead of the server (#114); the routes are registered by #116
-  # (per-host apply), #117 (fleet apply) and #118 (revert). REMOVE THE MARKER IN
-  # THE SAME CHANGE THAT REGISTERS THE ROUTE — the drift test's reviewed
+  # This contract was authored ahead of the server (#114). #116 registered the
+  # per-host apply and the attempt history, and removed their markers; the
+  # remaining operations still carry x-unimplemented: true and are registered by
+  # #117 (fleet apply, its runs and cancel) and #118 (revert). REMOVE THE MARKER
+  # IN THE SAME CHANGE THAT REGISTERS THE ROUTE — the drift test's reviewed
   # allowlist (allowedUnimplemented in
   # control-plane/cmd/quasar-control/openapi_drift_test.go) carries a matching
   # entry that is removed with it.
@@ -2258,10 +2260,8 @@ paths:
     post:
       tags: [admin]
       x-required-role: admin
-      x-unimplemented: true
-      summary: Apply one platform release to one host (admin). NOT CURRENTLY SERVED — see x-unimplemented.
+      summary: Apply one platform release to one host (admin).
       description: >-
-        NOT IMPLEMENTED AS OF 2026-09-05 — registered by #116, which removes this marker.
         A STANDALONE attempt - no run, no fleet ordering - refused while a fleet run is
         active. ONLY THE NODE-AGENT IMAGE IS SENT; the control-plane component is never
         sent to a host. With force false the host is cordoned and the attempt sits in
@@ -2350,10 +2350,8 @@ paths:
     get:
       tags: [admin]
       x-required-role: admin
-      x-unimplemented: true
-      summary: Platform-release apply history, newest first (admin). NOT CURRENTLY SERVED — see x-unimplemented.
+      summary: Platform-release apply history, newest first (admin).
       description: >-
-        NOT IMPLEMENTED AS OF 2026-09-05 — registered by #116, which removes this marker.
         Every attempt this instance has made, newest first (created_at DESC, id DESC),
         INCLUDING CONTROL-PLANE ATTEMPTS AND REVERTS - the one place an operator reads
         "what has this instance done to itself". An unknown host_id yields an EMPTY LIST
