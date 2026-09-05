@@ -6609,6 +6609,7 @@ and what is wrong. **It is a read and only a read** — it applies nothing, writ
 // 200
 {
   "channel": "stable",
+  "source_repo": "accreleus/quasar",
   "edge_branch": "develop",
   "checked_at": "2026-09-04T02:07:11Z",
   "last_error": null,
@@ -6658,6 +6659,10 @@ and what is wrong. **It is a read and only a read** — it applies nothing, writ
 **Top level.**
 - `channel` — the instance's channel (`stable` | `edge`), read from `instance_settings`. Everything
   in `available` is on it; a release on the other channel is never mixed in.
+- `source_repo` — **additive (#104)**: the configured release repository as `owner/name`
+  (default `accreleus/quasar`), so a client composes the release, commit and issue links from
+  the repository detection actually reads rather than a hard-coded one; `""` when detection is
+  switched off, which a client renders as no links rather than falling back to the default.
 - `edge_branch` — the branch the edge channel follows. Reported on both channels (so the UI can
   render the control without a second read); it selects nothing while `channel` is `stable`.
 - `checked_at` — when detection **last succeeded**, RFC3339, or `null` before the first success.

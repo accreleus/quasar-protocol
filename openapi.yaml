@@ -5091,6 +5091,16 @@ components:
           type: string
           enum: [stable, edge]
           description: "The instance's channel. Everything in `available` is on it; the other channel's releases are never mixed in."
+        source_repo:
+          type: string
+          description: >-
+            ADDITIVE (#104). The configured release repository as `owner/name`
+            (QUASAR_PLATFORM_RELEASE_REPO, default `accreleus/quasar`), so a client can compose
+            the GitHub links a release view needs - the release page, the commit, and the issues
+            the notes reference - instead of hard-coding a repository the operator may have
+            re-pointed. "" when detection is switched off, which a client reads as "render no
+            links", never as the default. Optional in the schema so a pre-#104 server stays
+            conformant; a client must read absent as "".
         edge_branch:
           type: string
           description: >-
