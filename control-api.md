@@ -6920,6 +6920,15 @@ from the other side). Consequences a client must know:
   failed agent apply is reverted by an operator, through `POST
   /v1/admin/platform/hosts/{id}/revert`.
 
+**The control-plane attempt drains the WHOLE FLEET first.** Recreating the control plane drops
+every agent's WebSocket, and an agent stops its sessions the moment that connection drops — so a
+control-plane apply ends every session on the instance, not none. The control-plane attempt
+therefore reports `state:"waiting_sessions"` with `sessions_remaining` as the **instance-wide**
+non-terminal session count, and the run cordons every host for the duration so nothing new lands
+on a host that is about to lose its agent. `force: true` skips that wait, with the same meaning it
+has for a host: the operator is agreeing to end those N sessions. The cordons the run imposed are
+released when it reaches a terminal state, and a host it found already cordoned stays cordoned.
+
 **A host attempt drains first, and the agent never does session logic.** Before sending
 `release_apply` the control plane cordons the host and waits for zero non-terminal sessions,
 reporting `state:"waiting_sessions"` with `sessions_remaining` while it waits. `force: true` skips
@@ -7003,11 +7012,11 @@ view.
 
 - **`release_id`** *(uuid, required)* — a `platform_releases` row id, as served in
   `GET /v1/admin/platform/releases` `available[].id`.
-- **`force`** *(boolean, optional, default `false`)* — applies to **every host target in this run**:
-  skip the zero-sessions wait and stop whatever is running. It exists on the fleet body, and not
-  only on the per-host one, because a fleet run whose every host target waits for a natural drain
-  can otherwise stall indefinitely with no way to say "go now" short of cancelling and applying
-  host by host. The control plane never uses it on itself — the control plane holds no sessions.
+- **`force`** *(boolean, optional, default `false`)* — applies to **every target in this run, the
+  control plane included**: skip the zero-sessions wait and stop whatever is running. It exists on
+  the fleet body, and not only on the per-host one, because a fleet run whose every target waits
+  for a natural drain can otherwise stall indefinitely with no way to say "go now" short of
+  cancelling and applying host by host.
 - **Which hosts are targets** is decided **when each target is reached**, not when the run is
   created, and by exactly amendment 1's eligibility rule (`identity_known`, `install_mode` is
   `registry`, `updater_present`, not above the control plane's release, host not offline). A host
