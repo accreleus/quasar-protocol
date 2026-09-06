@@ -2246,3 +2246,58 @@ numbered pairs; **0001 is frozen** like the rest of this contract (so `0002` is 
 an edit to `0001`). The default applies to existing rows, so no backfill is needed. The
 committed SQL in `migrations/` is the authoritative DDL — this document is its prose companion;
 if they ever disagree, that is a bug to fix under sign-off, not a silent divergence.
+
+
+## Steam preparation persistence (2026-09-06, Quasar #145)
+
+Operator-approved additive schema extension; the operator explicitly waived the
+separate Opus review requirement for this change. Migration 0077 in Quasar owns
+the executable definitions. No existing user home, template or session is migrated.
+
+Add to the `instance_settings` singleton:
+
+| Column | Definition | Purpose |
+| --- | --- | --- |
+| `steam_preparation_enabled` | `BOOLEAN NOT NULL DEFAULT true` | Source-specific desired policy for both production and consumption. Independent of discovery/source enablement. |
+| `steam_preparation_revision` | `BIGINT NOT NULL DEFAULT 1 CHECK (> 0)` | Monotonic snapshot revision, encoded as a read-only decimal string in APIs. |
+| `steam_preparation_image` | Nullable `JSONB` | Frozen eligible adopted identity `{image_id,registry_ref,version}`, null when no eligible Steam image is adopted. |
+
+A change to the boolean advances revision in the same transaction. A change to
+the eligible adopted Steam digest/version, insertion or removal also advances
+revision in that adoption transaction; a no-op does not. Capture eligibility
+from the explicit prebuilt Steam/provider/managed-home predicate at adoption and
+validate the exact immutable registry reference. A catalog refresh, unrelated
+image mutation or no-op adoption must not change this frozen authorization.
+Backfill the current eligible adopted identity on upgrade. Lock/serialize updates
+to the singleton so policy, identity and revision cannot describe different
+transactions. Snapshot reads must be consistent. A failed/missing policy read
+cannot grant agent authorization.
+
+Add nullable fields to `hosts`:
+
+| Column | Definition | Purpose |
+| --- | --- | --- |
+| `source_policy_versions` | `JSONB` | Capability advertisement of the current registered connection. |
+| `source_preparation_connection_id` | Nullable `TEXT` | Internal server-generated connection epoch; never transmitted by an agent. |
+| `source_preparation` | `JSONB` | Last validated full Steam preparation acknowledgement/status snapshot. |
+| `source_preparation_reported_at` | `TIMESTAMPTZ` | Server receipt time of that report. |
+
+Every registration assigns a new server connection epoch, replaces capabilities and clears the previous report and
+receipt time, including a reconnect by a version-1 agent. Absence of a capability
+must clear earlier support. An old connection's persisted acknowledgement cannot
+authorize jobs on a new connection. Normal capacity omission means unchanged;
+a present empty image array clears image status. Accept updates only from the
+current authenticated host connection with a matching server-generated epoch, so
+a delayed report from the previous socket cannot overwrite the new acknowledgement.
+Validate bounded payloads against the
+adopted identity. On disconnect, remaining persisted data is historical only;
+dispatch also requires current connectivity and matching revision acknowledgement.
+
+These columns report operational state; they are not independent authorization
+for the scheduler or a replacement for the agent's commit-time policy gate.
+The image API projects desired versus last-observed effective state, with pending
+and unsupported cases as specified in `control-api.md` and `agent-api.md`.
+Down migration removes only the policy/report columns and associated trigger and
+function. Published templates, existing homes, and ordinary image/session data
+remain intact. Downgrading application behavior is not a supported deployment
+operation; release schema-floor protections continue to apply.

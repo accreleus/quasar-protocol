@@ -7249,3 +7249,63 @@ register ─▶ login ─▶ GET /v1/apps ─▶ POST /v1/sessions {app_id}
 ```
 The client only ever talks to the control plane; the node agent is reached transparently via the
 signaling relay. This is the architecture's split, made literal at the API boundary.
+
+
+## Steam preparation administration (2026-09-06, Quasar #145)
+
+Operator-approved additive extension; the operator explicitly waived the separate
+Opus review requirement for this change. Existing administrator authorization,
+PATCH merge semantics, audit logging and image-list coverage remain in effect.
+
+`GET /v1/admin/settings` and successful PATCH responses add
+`steam_preparation_enabled` (boolean, default true on fresh and upgraded installs)
+and `steam_preparation_revision` (positive canonical decimal string, read-only).
+`PATCH /v1/admin/settings` accepts the boolean; omission preserves the saved value,
+null is invalid, and a client-supplied revision is rejected. A no-op PATCH does not
+advance revision. Change policy/revision in one transaction, then deliver the
+snapshot and reconcile after commit. Missing/unreadable persisted policy is an
+error, not an invented enabled policy sent to agents.
+
+The setting belongs under **Settings → Library → Sources → Steam**, labelled
+**Prepare Steam for faster first launch**. It independently controls automatic
+Steam template production and use by new empty homes. It does not enable/disable
+Steam library discovery, imports, ordinary launches or unrelated images. The
+source switch off cancels background preparation and stops seeding, preserving
+existing homes, templates and running sessions. Explicit host opt-outs remain
+effective and visible. See `agent-api.md` for enforcement and legacy behavior.
+
+The shared `ImageHostState` in administrator image responses adds nullable
+`steam_preparation` with these fields:
+
+| Field | Type / semantics |
+| --- | --- |
+| `eligible`, `supported` | Booleans: explicitly supported image and capable agent, respectively. |
+| `desired_enabled` | Saved source policy boolean, not proof of effective host behavior. |
+| `desired_revision` | Current policy revision as a decimal string. |
+| `applied_revision` | Last applied revision string or null. |
+| `policy_pending` | True while the desired revision is unacknowledged or host is disconnected. |
+| `preparation_enabled`, `consumption_enabled` | Effective booleans; null when unobserved/legacy. |
+| `state`, `reason` | Typed state/reason vocabulary below; never parse human text for logic. |
+| `template` | Null or `{registry_ref,version}` identifying an observed published template. |
+| `clone_mode`, `clone_reason` | Null when unobserved; otherwise measured `reflink`/`copy` and explanation. |
+| `reported_at` | Control-plane receipt timestamp or null, not an agent clock. |
+| `detail` | Bounded actionable explanation of preparation failures or deferral, without secrets or user paths. |
+
+The projection includes agent states from `agent-api.md` plus `unsupported`,
+`unknown`, `pending_policy`. An ineligible image reports `unsupported` /
+`unsupported_image` and false effective booleans, regardless of HOME metadata.
+A legacy agent reports `unknown` / `agent_upgrade_required`, `supported:false`
+and null effective booleans. A capable agent awaiting acknowledgement reports
+`pending_policy`; disconnected reports remain explicitly last-observed, pending,
+and timestamped. Retain the previous effective report while a newer desired policy
+is pending rather than rendering the desired boolean as applied.
+
+Only a matching published template establishes preparation readiness. Keep raw
+image installation state separate. Reflink versus copy is a measured filesystem
+result; copy fallback must not be represented as reflink acceleration. Do not add
+artificial ready host-image rows merely to display policy. Unsupported agents
+must have visible upgrade guidance beside the source setting because they cannot
+reliably enforce source-off consumption.
+
+Canonical field shapes and nullability are defined in `openapi.yaml`. This
+extension introduces no new endpoint and changes no session or discovery contract.
