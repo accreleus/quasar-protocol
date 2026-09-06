@@ -1712,3 +1712,148 @@ live video and audio peer connections; no container or media pipeline restart is
 - Enrollment is a shared token; mTLS/SPIFFE is the Phase 3/4 upgrade (same message shape).
 - The scheduler is trivial (one host, one GPU) but the assign/reserve/release path is the real
   one — N=1 is one row, not a special case.
+
+
+## Steam preparation source policy (2026-09-06, Quasar #145)
+
+Additive extension approved by the operator on 2026-09-06; the operator expressly
+waived the separate Opus review for this extension. This does not change library
+source enablement, discovery, session assignment, or the meaning of host settings.
+
+### Capability and authoritative snapshot
+
+A capable agent adds `"source_policy_versions":{"steam_preparation":1}` to
+`register`. Version 1 promises policy enforcement for both template production
+and consumption, live disable/cancellation, revision checks and status reporting.
+Every registration replaces the capability advertisement and clears the previous
+connection's acknowledgement; omission means unsupported, not retained support.
+
+The control plane sends the following optional block in `config_update`, alongside
+`settings` and `console_config`, immediately after registration, after policy or
+adopted-identity changes, and on reconnect:
+
+```json
+{
+  "type": "config_update",
+  "settings": null,
+  "source_policies": {
+    "steam_preparation": {
+      "revision": "8",
+      "enabled": true,
+      "images": [{
+        "image_id": "steam",
+        "registry_ref": "ghcr.io/accreleus/quasar-steam@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "version": "2026.09.02"
+      }]
+    }
+  }
+}
+```
+
+The digest above is an illustrative placeholder, not an installable image.
+`source_policies` is distinct from the sparse administrator host override map in
+`settings`. A source-only update sends `settings:null` to preserve the current
+host override map; `{}` would explicitly clear that map. Each Steam block is a full authoritative snapshot. Unknown source
+keys are ignored. `images` contains at most one adopted eligible image; an empty
+array withdraws eligibility. Keep the eligible identity when disabled so the
+agent can describe preserved templates. Revision is a positive canonical decimal
+string, not a JavaScript number. Image version is nonempty and at most 256 bytes.
+
+Initial eligibility requires the adopted prebuilt catalog entry `steam`, provider
+`steam`, managed-home runtime, and the exact repository
+`ghcr.io/accreleus/quasar-steam` with a lowercase SHA-256 digest. HOME/WorkingDir,
+a similar image name or a repository-prefix match is insufficient. Catalog offers
+do not replace the adopted version. The agent independently validates image ID,
+repository, digest and exact local ready version before work; policy never accepts
+arbitrary executable commands, host paths or credentials.
+
+On one connection, lower revisions are ignored and identical snapshots are
+idempotent. Different content at the same revision or malformed policy revokes
+preparation/consumption authorization and reports a feature error without ending
+user sessions. On reconnect, revoke the old connection's authorization and accept
+the first valid snapshot as authoritative, including a lower revision after an
+intentional database restore. Later `config_update` messages lacking this optional
+block preserve that connection's snapshot. Before the first valid policy or while
+disconnected, no new preparation or template seeding is authorized; ordinary cold
+launch remains usable.
+
+### Host permissions and commit boundaries
+
+Effective production is eligible identity AND enabled source policy AND host
+warmup permission. Consumption independently uses host template permission.
+Absent or empty `QUASAR_TEMPLATE_WARMUP` / `QUASAR_HOME_TEMPLATES` grants permission;
+recognized explicit false opts out, and malformed nonempty values deny the
+corresponding activity with an invalid-setting reason. Source off wins over an
+explicit host true. Environment changes require agent recreation; the source
+switch is live and independent of discovery/import.
+
+Close admission before acknowledging a disabled policy. Cancel active background
+preparation through the existing cancellation mechanism. Every queued/running job
+must check current image identity and revision before starting, at phase boundaries
+and immediately before atomic publication. The final filesystem commit is serialized
+against policy changes; a lengthy copy must not block receipt of disable. A home
+seed that has not committed must similarly recheck authorization before installation.
+Do not undo committed homes, erase templates, or stop active user sessions.
+Changing the effective home/template roots invalidates the store and clone probe.
+
+The existing `template.warmup` job params gain `policy_revision` (decimal string)
+alongside `image_id`, `registry_ref` and `version`. Jobs cannot authorize themselves.
+Dispatch requires a connected version-1 agent acknowledging the current policy;
+recheck when handing out work, not only when enqueuing. Stale work is skipped or
+cancelled through existing job outcomes, never published. Reconcile eligible
+already-adopted images on enable, upgrade and reconnect, using the existing
+serialized, deduplicated warmup lifecycle and user-session priority.
+
+### Capacity acknowledgement and status
+
+A capable agent adds optional `source_preparation` to `capacity`:
+
+```json
+{
+  "source_preparation": {
+    "steam": {
+      "policy_revision": "8",
+      "images": [{
+        "image_id": "steam",
+        "registry_ref": "ghcr.io/accreleus/quasar-steam@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "version": "2026.09.02",
+        "preparation_enabled": true,
+        "consumption_enabled": true,
+        "state": "preparing",
+        "reason": "none",
+        "template": null,
+        "clone_mode": "copy",
+        "clone_reason": "The template and home paths do not support reflink",
+        "detail": "Preparing Steam in the background"
+      }]
+    }
+  }
+}
+```
+
+The revision acknowledges an applied snapshot, independently of work completion.
+A present block replaces the feature snapshot; `images:[]` clears its image rows.
+Omission in a later capacity message means unchanged. Bind reports to the
+registered authenticated connection, never an agent-supplied host ID. Validate
+revision, exact adopted identity, at most one image row, typed fields and bounded
+text (1,024 characters for each human-readable field); reject malformed reports.
+Store receipt time on the control plane. Emit on policy application, preparation
+phase or terminal changes, store changes and reconnect via the capacity loop.
+
+Agent states are `waiting_image`, `queued`, `preparing`, `ready`, `deferred`,
+`failed`, `disabled`. Reasons are `none`, `source_disabled`,
+`host_warmup_disabled`, `host_templates_disabled`, `host_permissions_disabled`,
+`host_setting_invalid`, `image_not_ready`, `host_busy`, `storage_unavailable`,
+`stale_policy`, `preparation_failed`. Both effective booleans must be explicit.
+`ready` requires a published template matching the adopted digest/version, not an
+image download or historical job success. `template` is null or
+`{registry_ref,version}`; `clone_mode` is null, `reflink`, or `copy`, based on a
+probe using actual source/destination paths. Copy fallback is not preparation
+failure. Never include secrets, user identities or home paths.
+
+An old agent cannot enforce this source switch: the control plane does not dispatch
+new preparation to it, and the administrator sees unknown effective state and
+upgrade-required guidance. Its existing environment may still allow consumption.
+A new agent connected to an old control plane receives no policy and uses cold
+homes. Upgrade control plane first, then agents; never claim a saved desired switch
+was applied to unsupported or disconnected hosts.

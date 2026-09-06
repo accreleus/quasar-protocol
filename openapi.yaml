@@ -1976,6 +1976,7 @@ paths:
             schema:
               type: object
               properties:
+                steam_preparation_enabled: { type: boolean, description: "Controls automatic preparation and template consumption for eligible adopted Steam images. Absent unchanged; null invalid. Revision is read-only." }
                 registration_mode: { $ref: "#/components/schemas/RegistrationMode" }
                 storage_provider: { $ref: "#/components/schemas/StorageProvider" }
                 library_discovery_enabled:
@@ -3894,10 +3895,35 @@ components:
       properties:
         applied: { type: boolean, description: "P3. false (still 200) when installed_version already equalled the catalog version — a no-op, not an error." }
         image: { $ref: "#/components/schemas/CatalogImage" }
+    SteamPreparationStatus:
+      type: [object, "null"]
+      required: [detail, eligible, supported, desired_enabled, desired_revision, applied_revision, policy_pending, preparation_enabled, consumption_enabled, state, reason, template, clone_mode, clone_reason, reported_at]
+      properties:
+        detail: { type: string, maxLength: 1024 }
+        eligible: { type: boolean }
+        supported: { type: boolean }
+        desired_enabled: { type: boolean }
+        desired_revision: { type: string, pattern: "^[1-9][0-9]*$" }
+        applied_revision: { type: [string, "null"] }
+        policy_pending: { type: boolean }
+        preparation_enabled: { type: [boolean, "null"] }
+        consumption_enabled: { type: [boolean, "null"] }
+        state: { type: string, enum: [waiting_image, queued, preparing, ready, deferred, failed, disabled, unsupported, unknown, pending_policy] }
+        reason: { type: string }
+        template:
+          type: [object, "null"]
+          required: [registry_ref, version]
+          properties:
+            registry_ref: { type: string }
+            version: { type: string }
+        clone_mode: { type: [string, "null"], enum: [reflink, copy, null] }
+        clone_reason: { type: [string, "null"] }
+        reported_at: { type: [string, "null"], format: date-time }
     ImageHostState:
       type: object
       required: [host_id, state]
       properties:
+        steam_preparation: { $ref: "#/components/schemas/SteamPreparationStatus" }
         host_id: { type: string, format: uuid }
         node_name: { type: string }
         version: { type: [string, "null"] }
@@ -4822,8 +4848,10 @@ components:
       properties:
         settings:
           type: object
-          required: [registration_mode, storage_provider, library_discovery_enabled, library_discovery_interval_minutes, library_discovery_appdetails_enabled, mic_capture_enabled, updated_by, updated_at]
+          required: [steam_preparation_enabled, steam_preparation_revision, registration_mode, storage_provider, library_discovery_enabled, library_discovery_interval_minutes, library_discovery_appdetails_enabled, mic_capture_enabled, updated_by, updated_at]
           properties:
+            steam_preparation_enabled: { type: boolean, default: true }
+            steam_preparation_revision: { type: string, pattern: "^[1-9][0-9]*$", readOnly: true }
             registration_mode: { $ref: "#/components/schemas/RegistrationMode" }
             storage_provider: { $ref: "#/components/schemas/StorageProvider" }
             image_update_policy:
