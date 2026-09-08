@@ -4584,9 +4584,17 @@ active encoder already chosen by placement):
    over a resolution drop. `sessions.profile_id` still records the **served** rung.
 4. **`capped` verdict** ⇒ start the rung but not at the top of its bitrate band, only if
    `live_write_stable = true`; if `false`, treat `capped` as `unsafe` for default-start.
-5. **Uncertified / stale / unknown encoder** ⇒ no cap — today's tier-default behavior. The cap only
-   ever *lowers* a default, never raises one.
-6. **Explicit override wins.** An explicit `profile_id`/width/height/fps on `POST /v1/sessions`, or
+5. **(#144) The row must describe THIS encode path.** A certification measures one silicon +
+   driver + encode-stack combination, so a row is read only when its `encoder` **and** its
+   `driver_identity` (`schema.md`, from `agent-api.md` `capacity.gpus[].driver_identity`) match
+   what the target host reports now. A driver change therefore retires the caps measured before
+   it, and they return as the rungs are re-certified.
+6. **Uncertified / stale / unknown encoder / unknown driver identity** ⇒ no cap — today's
+   tier-default behavior. Unknown is on BOTH sides: a host that reports no identity, and a row
+   stored with none (every row predating migration 0078), keep matching everything, because
+   dropping a cap starts a session at a rung the host may not sustain. The cap only ever *lowers*
+   a default, never raises one.
+7. **Explicit override wins.** An explicit `profile_id`/width/height/fps on `POST /v1/sessions`, or
    an admin force flag, bypasses the cap entirely.
 
 ---

@@ -174,6 +174,22 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > — **platform release**, **channel**, **release manifest**, **updater**, **install mode** — and
 > this contract uses those words and no synonyms.
 
+> **Amendment — GPU driver identity (#144), additive, requires sign-off (pre-authorised by the
+> operator 2026-09-08).** Adds ONE optional, additive field to the agent `capacity` report:
+> **`gpus[].driver_identity`** — a short opaque string identifying the driver / encode stack that
+> GPU is running (`nvidia:610.57.04`, `vk:radv:Mesa 25.3.6`). It exists for **encoder
+> certification**: `host_encoder_certification` records `encode_ms` measured on one silicon +
+> driver + encode-stack combination, and until now carried nothing that could tell that
+> combination apart, so a performance cap measured before a driver change stayed applicable until
+> it expired. The control plane stores the reported value on `gpus`, stamps it onto each
+> certification row it writes, and refuses at launch a measurement carrying a different one.
+> **Additive** — one optional field on one existing upstream message; no existing message, field,
+> or ack contract changes, and an older agent that omits it behaves byte-identically. The value is
+> **opaque to the control plane**: it is compared for equality and never parsed. Absent ⇒ unknown,
+> and unknown matches everything — a host that reports none keeps every stored measurement, since
+> dropping the caps would launch at rungs the host may not sustain. See §`capacity` and `schema.md`
+> `gpus` / `host_encoder_certification` (migration 0078).
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -322,7 +338,8 @@ the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
   "gpus": [
     { "index": 0, "vendor": "amd", "model": "Radeon Pro V520",
       "vram_mb_total": 16384, "encode_slots_total": 2,
-      "render_node": "/dev/dri/by-path/pci-0000:04:00.0-render" }
+      "render_node": "/dev/dri/by-path/pci-0000:04:00.0-render",
+      "driver_identity": "vk:radv:Mesa 25.3.6" }
   ],
   "console_capabilities": {
     "connectors": ["DP-4", "HDMI-A-1"],
@@ -423,6 +440,21 @@ form constructed from the device's PCI address
 (the agent canonicalises by-path values, with a sysfs PCI-address fallback for containers that
 lack `/dev/dri/by-path`), so the admin UI can offer the reported values as a picker instead of
 free-text device paths. Absent ⇒ null on the API.
+
+`gpus[].driver_identity` *(NEW, #144, optional, additive)* — a short **opaque** string naming the
+driver / encode stack this GPU is running, e.g. `nvidia:610.57.04` or `vk:radv:Mesa 25.3.6`. It is
+compared for equality and never parsed: the agent owns how it is derived, and the string's shape is
+not a contract beyond being stable, single-line, and bounded (≤ 96 characters). What the contract
+does require is that it **changes when the encode stack changes and does not otherwise**, because
+encoder certifications are matched on it (`control-api.md` §Host encoder certification): a stored
+measurement whose identity differs from the GPU's current one is not applied. The agent resolves it
+by fallback — the NVIDIA kernel-module version, else Vulkan `VK_KHR_driver_properties`
+(`driverName` + `driverInfo`, which covers RADV/AMDVLK/ANV uniformly) — and reports **nothing**
+rather than a placeholder when neither answers. Absent ⇒ unknown: null on the API, and unknown
+matches every stored measurement, which is also what every row written before migration 0078
+does. Like `render_node`, it is replaced wholesale with the `gpus` set, so a report that stops
+carrying one clears the stored value rather than keeping a fingerprint of software nothing is
+running.
 
 `encode_slots_total` is the concurrent encode-session cap (the NVENC/VCN limit — architecture
 §"Resource governance"). At N=1 this is one GPU with generous slots; the field is mandatory so
