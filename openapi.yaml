@@ -2031,9 +2031,10 @@ paths:
                     reports which source is in force.
                 release_channel:
                   type: string
-                  enum: [stable, edge]
+                  enum: [stable, beta, edge]
                   description: >-
-                    Platform-release amendment 1 (#104/#106, migration 0074). Which platform
+                    Platform-release amendment 1 (#104/#106, migration 0074); `beta` added by
+                    amendment 3 (#121, migration 0079). Which platform
                     releases the admin console is shown. Absent = unchanged (pointer decode, the
                     same rule every field on this body follows - a plain decode would read "" and
                     silently reset the channel whenever an admin changed the registration mode).
@@ -4919,14 +4920,16 @@ components:
                 the envelope so pre-amendment servers stay conformant.
             release_channel:
               type: string
-              enum: [stable, edge]
+              enum: [stable, beta, edge]
               description: >-
-                Platform-release amendment 1 (#104/#106, migration 0074). The instance's platform-
-                release channel: stable = tagged, noted releases; edge = whatever was last
+                Platform-release amendment 1 (#104/#106, migration 0074); `beta` added by
+                amendment 3 (#121, migration 0079). The instance's platform-
+                release channel: stable = tagged, noted releases; beta = those AND the
+                prereleases among them; edge = whatever was last
                 published from release_edge_branch, with no notes. DEFAULT stable - an instance
-                that has never been configured is not shown branch builds. Read per request rather
-                than at boot, so a switch needs no restart. Optional in the envelope so
-                pre-amendment servers stay conformant.
+                that has never been configured is not shown prereleases or branch builds. Read per
+                request rather than at boot, so a switch needs no restart. Optional in the envelope
+                so pre-amendment servers stay conformant.
             release_edge_branch:
               type: string
               description: >-
@@ -5003,7 +5006,13 @@ components:
       required: [id, channel, version, source_commit, built_at, schema_version, prerelease, notes, compare_url, manifest, discovered_at]
       properties:
         id: { type: string, format: uuid, description: "Stable across detections; the handle amendment 2's apply will name." }
-        channel: { type: string, enum: [stable, edge] }
+        channel:
+          type: string
+          enum: [stable, edge]
+          description: >-
+            The channel this row is STORED on, which is not always the instance's channel: beta
+            has no rows of its own and reads stable's, so a release listed while the instance is
+            on beta reports `stable` here. Unchanged by amendment 3.
         version:
           type: [string, "null"]
           description: >-
@@ -5020,8 +5029,8 @@ components:
         prerelease:
           type: boolean
           description: >-
-            True for a prerelease tag. A stable-channel read never lists one; on edge it is
-            reported as found.
+            True for a prerelease tag. A stable-channel read never lists one, a BETA read lists
+            it (that is what the channel is for); on edge it is reported as found.
         notes:
           type: string
           description: >-
@@ -5118,8 +5127,11 @@ components:
       properties:
         channel:
           type: string
-          enum: [stable, edge]
-          description: "The instance's channel. Everything in `available` is on it; the other channel's releases are never mixed in."
+          enum: [stable, beta, edge]
+          description: >-
+            The instance's channel. Everything in `available` is what it selects; another
+            channel's releases are never mixed in. On `beta` the entries carry channel `stable`,
+            because beta reads those rows rather than storing its own.
         source_repo:
           type: string
           description: >-
@@ -5158,12 +5170,17 @@ components:
         available:
           type: array
           description: >-
-            Releases on the configured channel that are still offerable, NEWEST FIRST
+            Releases the configured channel selects that are still offerable, NEWEST FIRST
             (schema_version DESC, then built_at DESC - the tiebreak matters because an edge
-            channel produces many builds at one schema_version). A release below the installed
-            control plane's schema_version is NEVER here (ADR 0002); a prerelease is never here
-            on stable; a stable release with a missing or invalid manifest is never here either
-            (it is a manifest_invalid fault instead).
+            channel produces many builds at one schema_version). On BETA, SemVer 2.0.0 precedence
+            is inserted between those two keys, because that channel is the only one whose rows
+            can arrive out of version order: 0.2.0-rc.2 orders below 0.2.0, which orders below
+            0.2.1-rc.1, whatever order they were built in. A release below the installed
+            control plane's schema_version is NEVER here (ADR 0002); neither is one whose VERSION
+            orders below an installed prerelease at the same schema_version, which is what stops a
+            switch back to stable offering a downgrade (amendment 3); a prerelease is never here
+            on stable; a stable or beta release with a missing or invalid manifest is never here
+            either (it is a manifest_invalid fault instead).
           items: { $ref: "#/components/schemas/PlatformRelease" }
         targets:
           type: array

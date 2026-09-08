@@ -6679,8 +6679,9 @@ and what is wrong. **It is a read and only a read** — it applies nothing, writ
 ```
 
 **Top level.**
-- `channel` — the instance's channel (`stable` | `edge`), read from `instance_settings`. Everything
-  in `available` is on it; a release on the other channel is never mixed in.
+- `channel` — the instance's channel (`stable` | `beta` | `edge`), read from `instance_settings`.
+  Everything in `available` is what it selects; another channel's releases are never mixed in. On
+  `beta` the entries themselves report `channel: "stable"` (amendment 3).
 - `source_repo` — **additive (#104)**: the configured release repository as `owner/name`
   (default `accreleus/quasar`), so a client composes the release, commit and issue links from
   the repository detection actually reads rather than a hard-coded one; `""` when detection is
@@ -6702,15 +6703,17 @@ all four of `source_commit`, `built_at`, `install_mode`, `updater_present` are n
 must read this field rather than re-deriving it, so "what counts as known" can never disagree
 between the server and a client.
 
-**`available`.** Every release the detector has seen on the configured channel that is still
-offerable, **newest first: `schema_version` DESC, then `built_at` DESC.** The tiebreak matters
-because an edge channel produces many builds at one `schema_version`.
+**`available`.** Every release the detector has seen that the configured channel selects and that
+is still offerable, **newest first: `schema_version` DESC, then `built_at` DESC.** The tiebreak
+matters because an edge channel produces many builds at one `schema_version`. On `beta`, SemVer
+precedence is inserted between those two keys — see §Platform-release beta channel.
 
 - **A release whose `schema_version` is below the installed control plane's is NEVER listed**, on
   either channel (ADR 0002). This is the rule that makes a downgrade unrepresentable rather than
   merely discouraged: the console cannot offer what the wire does not carry.
 - **A prerelease is never listed while `channel` is `stable`.** Prerelease images are published so
-  release candidates can be exercised; the stable channel ignores them.
+  release candidates can be exercised; the stable channel ignores them, and `beta` is the channel
+  that does not (amendment 3).
 - **The channel switch is the case this rule exists for.** An instance that ran `edge` for a while
   is on a build whose schema may be ahead of every tagged release; switching back to `stable`
   therefore shows only stable releases at or above it, which is frequently **none**, and an empty
@@ -6724,12 +6727,12 @@ Per release:
 | field | meaning |
 |---|---|
 | `id` | the `platform_releases` row id (uuid). Stable across detections; the handle amendment 2's apply will name. |
-| `channel` | `stable` \| `edge`. Always equal to the top-level `channel` in this response — carried per row because the table holds both. |
+| `channel` | `stable` \| `edge` — the channel the row is **stored** on. Equal to the top-level `channel` except on `beta`, which stores no rows and reads `stable`'s, so its entries report `stable` here (amendment 3). |
 | `version` | stable semver without a leading `v` (`"0.2.0"`, `"0.2.0-rc.1"`). **`null` on edge**: an edge build is a commit, not a version, and inventing one would be a lie the UI would then render. |
 | `source_commit` | full 40-character lowercase hex. The identity, on both channels. |
 | `built_at` | RFC3339 UTC. The second ordering key. |
 | `schema_version` | integer — the highest migration the release's control-plane image embeds. The first ordering key, and the ADR 0002 gate. |
-| `prerelease` | true for a prerelease tag. A `stable` read never lists one (above); on `edge` it is reported as found. |
+| `prerelease` | true for a prerelease tag. A `stable` read never lists one (above), a `beta` read does; on `edge` it is reported as found. |
 | `notes` | the release notes, **markdown**, verbatim from the GitHub Release's `body` field (which the publish workflow fills from the changelog section). **`""` on edge** — an edge build has no notes, and `compare_url` is what stands in for them. Never null, so a client renders one type. A client MUST sanitize before rendering: this is upstream text. |
 | `compare_url` | on `edge`, the GitHub compare link from the installed control plane's `source_commit` to this release's — the diff a human reads when there are no notes. `null` on `stable` (the notes are that), and `null` on edge when the installed commit is unknown, since there is nothing to compare from. |
 | `manifest` | the **release manifest** asset verbatim (`ReleaseManifest`, below), as discovered. **`null` on edge**, which publishes no asset. |
@@ -6816,9 +6819,10 @@ duplicate its auth and audit wiring, and make a UI issue two calls to render one
 { "release_channel": "edge", "release_edge_branch": "develop" }
 ```
 
-- **`release_channel`** — `stable` | `edge`, **default `stable`**. Anything else is `400
+- **`release_channel`** — `stable` | `beta` | `edge`, **default `stable`** (`beta` added by
+  amendment 3, §Platform-release beta channel). Anything else is `400
   validation_failed`. Takes effect immediately, with no redeploy: the next
-  `GET /v1/admin/platform/releases` reads the other channel's rows.
+  `GET /v1/admin/platform/releases` selects a different set of rows.
 - **`release_edge_branch`** — **default `develop`**. Validation: non-empty, at most **255**
   characters, and a valid git ref name component — **no whitespace, no `..`, no leading `-`, no
   control characters**. Anything else is `400 validation_failed`. It is validated (and stored)
@@ -7256,6 +7260,94 @@ that response is unchanged, and a server that predates this amendment simply doe
   to disagree; the join by `host_id` costs a client one line and cannot.
 
 ---
+
+## Platform-release beta channel (amendment 3, #121, additive, admin-gated)
+
+> **Amendment — beta release channel (#121), additive, admin-gated, requires sign-off.** Widens
+> **one enum**: `release_channel` on the instance-settings envelope and PATCH body, and `channel`
+> on `PlatformReleaseView`, gain the value **`beta`**. Nothing else changes — no route, no field,
+> no status code, no message. `PlatformRelease.channel` is deliberately **not** widened.
+> Storage: `schema.md` `instance_settings.release_channel`, migration 0079 (one widened `CHECK`).
+> Vocabulary is `CONTEXT.md` §"Channel". ADR 0001 and ADR 0002 are unchanged and unweakened.
+
+### What `beta` is
+
+`beta` offers the releases `stable` offers **and the prereleases among them**. That is the whole
+of the feature: a release candidate is already published, already carries a
+`platform-release-manifest.json`, and is already detected and cached — the stable channel simply
+declines to list it. `beta` is the channel that lists it.
+
+**It stores nothing of its own.** Detection records every GitHub Release, prerelease or not, as a
+`platform_releases` row on channel `stable` carrying its `prerelease` flag. `beta` selects those
+same rows. Three consequences a client and an operator can rely on:
+
+- **Switching to or from `beta` re-detects nothing and writes nothing.** It changes which rows the
+  next read selects, exactly as the `stable`/`edge` switch already does.
+- **`PlatformRelease.channel` reads `stable` while the instance is on `beta`.** The row reports
+  where it is stored; the view's top-level `channel` reports what the instance follows. This is the
+  one place the two differ, and it is why `PlatformRelease.channel` keeps the enum it had.
+- **`beta` is a GitHub-Releases channel, not a branch channel.** `release_edge_branch` selects
+  nothing on it, exactly as on `stable`, and is still stored and still never cleared.
+
+Every rule `stable` applies still applies: a release below the installed control plane's
+`schema_version` is not listed (ADR 0002), and a release with a missing or invalid manifest is not
+listed but raises a `manifest_invalid` fault (ADR 0001). The **only** rule `beta` drops is the one
+that hides prereleases.
+
+### Ordering: SemVer precedence, between the two existing keys
+
+`available` on `beta` orders by **`schema_version` DESC, then SemVer 2.0.0 §11 precedence DESC,
+then `built_at` DESC, then `id`**. `schema_version` stays first: it is the key with a consequence
+(ADR 0002).
+
+Precedence is not string order and not publication order:
+
+```
+0.2.0-rc.1  <  0.2.0-rc.2  <  0.2.0  <  0.2.1-rc.1  <  0.2.1  <  0.3.0-rc.1
+0.3.0-rc.9  <  0.3.0-rc.10                      (numeric identifiers compare numerically)
+```
+
+`beta` is the only channel that needs this, and the reason is publication order. A release
+candidate is cut from the development branch while a patch is cut from the release branch, so
+`0.3.0-rc.1` can be **built before** the `0.2.5` that orders below it; ordering by `built_at`
+alone would then put `0.2.5` first and offer an instance running `0.3.0-rc.1` a move backwards.
+`stable` versions are cut monotonically, and an `edge` build has no version at all, so both keep
+the ordering they had.
+
+A version that does not parse as SemVer takes no part in this: the pair falls back to `built_at`
+rather than being given an invented order.
+
+### Switching back to `stable` — the instance waits, it is never rolled back
+
+**No channel offers a build that orders below the one installed.** Concretely: when the running
+control plane's `version` is a **prerelease**, a release at the same `schema_version` whose version
+orders below it is **not listed in `available`** on any channel.
+
+This is what a switch from `beta` back to `stable` runs into, and it is deliberate. An instance
+that took `0.3.0-rc.1` from `beta` and then switches to `stable` sees:
+
+- **`0.3.0` published** → listed, offered, applied normally. The switch is complete.
+- **`0.3.0` not yet published, newest stable is `0.2.5`** → `available` is **empty**, and every
+  target reports `no_release`. The instance stays on `0.3.0-rc.1` until `stable` passes it.
+
+`available` is empty and `no_release` is the answer, rather than a new eligibility reason: the
+`EligibilityReason` vocabulary is closed, and this is the same shape as the `edge`-to-`stable`
+switch already documented above, where an instance ahead of every tagged release is correctly
+offered nothing. **A downgrade is made unrepresentable rather than merely refused** — the release
+is not in `available`, so no target is evaluated against it and no apply can name it (`POST
+/v1/admin/platform/apply/*` rejects a release that is not listed, amendment 2).
+
+An operator who genuinely wants to go backwards has the manual path the console already shows for
+an ineligible target: it is a redeploy, and it is subject to ADR 0002 — a control-plane binary is
+never rolled back below the database's applied migration version (`docs/upgrading.md`).
+
+### What a client does
+
+Render the third option and nothing else. There is no new endpoint, no new reason identifier, no
+new fault kind, and no new field; a client that already renders `stable` and `edge` renders `beta`
+by adding it to the channel control. A client that predates this amendment and meets
+`"channel": "beta"` should render the value verbatim rather than failing — the same rule the
+closed vocabularies above carry.
 
 ## How the client uses this (end-to-end)
 ```
