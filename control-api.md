@@ -7005,8 +7005,11 @@ been sent.**
 one client-side mapping serves the wire, this API and the history: `updater_absent`, `busy`,
 `invalid`, `namespace_rejected`, `digest_malformed`, `pull_failed`, `recreate_failed`,
 `never_started`, `unhealthy`, `updater_unreachable`, `timeout`, plus the control-plane-only
-**`unsupported`** (no ack within the ack timeout). `reason` is non-null exactly when the state is
-`failed`.
+**`unsupported`** (no ack within the ack timeout), plus amendment 5's two appended signature
+refusals **`signature_missing`** and **`signature_invalid`** (#120). `reason` is non-null exactly
+when the state is `failed`. The two signature values are **appended**, so no existing identifier
+moves, and they are **inert unless an operator turns signature verification on** — it is off by
+default (ADR 0003). A client meeting an unrecognized value still renders it verbatim.
 
 **`EligibilityReason` gains two values, appended to amendment 1's fixed precedence.** They are
 appended rather than inserted, so no existing evaluation changes:

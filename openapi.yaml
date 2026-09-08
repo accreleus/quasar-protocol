@@ -5389,8 +5389,14 @@ components:
         and the history. Non-null exactly when the state is failed. "unsupported" is
         written by the control plane and never sent on the wire: no ack arrived within
         the 10s ack timeout, so the agent build predates the amendment. A client meeting
-        an unrecognized value renders it verbatim. Full per-value semantics: agent-api.md
-        §release_state.
+        an unrecognized value renders it verbatim. "signature_missing" and
+        "signature_invalid" are amendment 5's two APPENDED values (#120): a host that
+        requires a signed release met an unsigned one, and a manifest signature that did
+        not verify (bad signature, untrusted key, digests not named by the signed
+        manifest, a signature that could not be fetched, or verification on with no
+        trusted keys - all fail closed). Signature verification is OFF BY DEFAULT (ADR
+        0003), so neither occurs unless an operator turns it on. Full per-value
+        semantics: agent-api.md §release_state.
       enum:
         - updater_absent
         - busy
@@ -5404,6 +5410,8 @@ components:
         - updater_unreachable
         - timeout
         - unsupported
+        - signature_missing
+        - signature_invalid
     ApplyComponentDigest:
       type: object
       description: >-
