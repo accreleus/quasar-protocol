@@ -202,7 +202,21 @@ Two bounded recovery paths are defined:
   sends a new `offer` for that PC; the normal answer/trickle flow follows. Audio may be requested
   independently with `pc:"audio"`. Duplicate requests are idempotent while negotiation is in
   progress.
-- **Signaling or PeerConnection loss.** The authenticated client mints a replacement token for
+- **Signaling loss with the media path intact.** Added 2026-09-08 (#128). Signaling and media are
+  independent: media and the input DataChannel are answerer↔host, so they keep flowing while the
+  control plane is away. A client whose signaling socket closes while its peer connections are
+  still carrying media SHOULD mint a replacement token, open a new signaling WebSocket, and
+  **keep its existing peer connections**. It MUST NOT send `restart_ice` on that attach — the host
+  re-offers only on an explicit request, and media that never stopped needs no renegotiation.
+  Re-creating the peer connections here ends the session the recovery was meant to save: the host
+  observes the transport disappear and stops the session.
+
+  Close codes `4401` and `4404` are excluded: a refused token is refused again, and a terminal
+  session cannot be re-attached. `4410` remains terminal for this client as before. A client that
+  had a media recovery in flight when signaling dropped SHOULD send one `restart_ice` on the new
+  socket, because requests made while the socket was closed were never delivered.
+
+- **PeerConnection loss.** The authenticated client mints a replacement token for
   the same session, opens a new signaling WebSocket, and recreates its peer connections. Client
   attachment causes the still-running host pipeline to emit fresh offers. The session id,
   scheduler reservation, container, and application remain unchanged.
