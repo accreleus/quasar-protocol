@@ -1180,6 +1180,7 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `POST /v1/admin/platform/hosts/{id}/apply` | **admin** | *(amendment 2)* **per-host apply** of one release. Body: `release_id`, optional `force` (skip the zero-sessions wait and kill the N sessions running). `202` with the attempt. `404 not_found`; `422 release_below_schema_version`; `409 release_not_offered` / `409 host_not_eligible` (carrying the amendment-1 `EligibilityReason`) / `409 attempt_in_flight` / `409 run_active`; `501 apply_unsupported` when the agent never acks. Audited as `platform.apply.host` |
 | `POST /v1/admin/platform/hosts/{id}/revert` | **admin** | *(amendment 2)* **per-host revert** to the previous digests recorded on that host's last succeeded attempt — an apply with an older digest set, not a new wire message, and bounded by ADR 0002 (never above the control plane's release). Optional `force`. `202` with the attempt. `409 nothing_to_revert` / `409 host_not_eligible` / `409 attempt_in_flight` / `409 run_active`; `404 not_found`. Audited as `platform.revert.host` |
 | `GET /v1/admin/platform/attempts` | **admin** | *(amendment 2)* apply history, newest first — **including control-plane attempts and reverts**. Optional `host_id` narrows to one host; `limit` 1–200, default 50 |
+| `POST /v1/admin/platform/release-webhook/test` | **admin** | *(release notifications, amendment 4, #123)* send **one** test notification to the configured webhook. Ignores `release_webhook_enabled` and **records nothing**, so it can never suppress a real notification. A refused delivery is `200` with `ok: false`; only a test with nowhere to send is `400 webhook_not_configured`. Where the notification goes is `PATCH /v1/admin/settings`; the optional signing secret is `PUT /v1/admin/secrets/platform.release_webhook.secret`. Audited as `platform.release_webhook.tested` — outcome only, never the URL |
 | everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account. *(UI-P5: `POST /v1/sessions` additionally refuses a `profile_id` outside the app's allow-list with `409 profile_not_launchable_for_app` — a per-app configuration rule, not a role check, which is why it is `409` and not the `403` this table's admin rows produce. It is refused for **every** non-admin caller, including one supplying an explicit `stream` override, which carries no role gate here.* ***Phase 2:** `POST /v1/sessions` additionally refuses an app the caller holds no entitlement for with `403 forbidden`. That one **is** `403` and not `409`, because unlike the allow-list it is a statement about the **caller** rather than about the request — and unlike this table's admin rows it is refused for **every** role, admin included)* |
 
 > *(Platform-release amendment 1 adds **no rows** for the release channel or the edge branch. `release_channel` and `release_edge_branch` are instance settings and ride the existing `GET`/`PATCH /v1/admin/settings` rows above — the same reasoning that kept `allowed_origins` off a route of its own. The admin gate they inherit is those rows', not a new one.)*
@@ -7348,6 +7349,163 @@ new fault kind, and no new field; a client that already renders `stable` and `ed
 by adding it to the channel control. A client that predates this amendment and meets
 `"channel": "beta"` should render the value verbatim rather than failing — the same rule the
 closed vocabularies above carry.
+
+---
+
+## Release notifications (amendment 4, #123, additive, admin-gated)
+
+Amendments 1 and 2 gave the console a banner and an apply button. Both require someone to be
+*looking at the console*. This amendment adds the one thing that reaches an operator who is not:
+a **webhook**, POSTed once when the detector finds a release this instance could move to.
+
+**A webhook and not email.** Email needs SMTP credentials, a sender identity, deliverability and a
+bounce story before it delivers anything; a webhook is a URL and a POST, and it composes with
+Slack, Discord, ntfy or a five-line script. Nothing here forecloses email later — the delivery
+step is one function behind the same dedupe record.
+
+### Four rules the delivery obeys
+
+1. **It never breaks detection.** Notification runs *after* a successful detection pass, and no
+   outcome of it can fail that pass or hold back the banner. A refused webhook is a line in the
+   job's run summary (`notify`, `notify_reason`, `notify_status_code`), never a failed run.
+2. **It is contained.** The URL is admin-supplied, so it is less hostile than catalog data, but it
+   is still egress the server performs on someone else's say-so. Delivery is **https only**, sends
+   **no credential in the URL**, **follows no redirect**, **refuses at dial any host that resolves
+   to a loopback, private, link-local, multicast or unspecified address**, and **bounds the
+   response body**. This is the same containment the image-digest resolver uses
+   (§"Digest pinning"); the allowlist for one delivery is that URL's own host, so a webhook can
+   reach exactly the place it names and nothing else. `QUASAR_PLATFORM_WEBHOOK_HOSTS` narrows it
+   further for an operator who wants the destination pinned independently of whoever holds an
+   admin token. **A LAN or loopback receiver is therefore not reachable, by design.**
+3. **The same release never notifies twice.** Detection runs weekly *and* on demand, so a
+   watermark or "it was new this pass" would either re-announce or silently swallow. The record is
+   keyed on the **release** (schema.md `platform_release_notifications`): a delivered release is
+   never announced again, a failed one is retried on the next pass, and after the attempt cap it
+   is left un-notified rather than retried forever. **A fresh install announces at most the one
+   release it could move to, never its whole back catalogue** — the trigger is the same
+   "an update is available" the banner uses, not "a row was inserted".
+4. **The URL is a credential.** A Slack or Discord webhook URL authenticates by being known. It is
+   admin-readable (like every field on the admin settings envelope) but it never appears in a log
+   line, an audit record or a delivery error.
+
+### Configuration — on `/v1/admin/settings`, not routes of its own
+
+As with the channel and the edge branch, these are instance-wide singleton settings and add no
+route:
+
+```json
+// GET /v1/admin/settings — 200 (excerpt)
+{ "settings": { "release_webhook_enabled": false, "release_webhook_url": "" } }
+// PATCH /v1/admin/settings — request (partial, as always)
+{ "release_webhook_url": "https://hooks.example.com/services/T000/B000/XXXX",
+  "release_webhook_enabled": true }
+```
+
+- **`release_webhook_url`** — an absolute **https** URL with **no userinfo**, at most **2048**
+  characters. Anything else is `400 validation_failed`; `http`, a credential in the URL and a
+  relative reference are each refused. An explicitly-sent `""` **clears it and sets
+  `release_webhook_enabled` false in the same write**, unless the request also names that field.
+- **`release_webhook_enabled`** — default `false`. Setting it `true` with no URL stored and none
+  supplied in the same request is `400 validation_failed`: a switch that silently does nothing is
+  worse than a refusal.
+- Both follow the optional-pointer rule every settings field follows: **absent = unchanged**.
+- Audited by the existing `instance.settings.updated` event, whose `keys` array names whichever
+  changed. **Key names only, never values** — which is what keeps the URL out of the audit log.
+
+### The optional signing secret
+
+The shared secret is **not** a settings field and **not** a column of its own. It is an
+`instance_secrets` row, `platform.release_webhook.secret`, read and written through the existing
+encrypted-secrets surface (§"Encrypted secrets"), so it is encrypted at rest under a key that is
+not in the database and the wire is write-only. Its environment fallback is
+`QUASAR_PLATFORM_RELEASE_WEBHOOK_SECRET`.
+
+**Signing is optional.** Slack, Discord and ntfy authenticate by URL and need none; a custom
+receiver that wants proof gets it. With a secret configured every delivery carries:
+
+```
+X-Quasar-Event:         platform.release.detected | platform.release.test
+X-Quasar-Delivery:      <32 hex, unique per POST — a receiver may deduplicate on it>
+X-Quasar-Timestamp:     <unix seconds>
+X-Quasar-Signature-256: sha256=<hex HMAC-SHA256(secret, "<timestamp>.<raw body>")>
+```
+
+The timestamp is inside the signed material, so a captured delivery cannot be replayed under a new
+one. A receiver verifies by recomputing over the **raw** body it received, and comparing in
+constant time.
+
+### The body
+
+```json
+{
+  "event": "platform.release.detected",
+  "sent_at": "2026-09-08T02:00:11Z",
+  "text":    "Quasar 0.2.4 is available. This instance is on 0.2.3 — open Fleet ▸ Releases to apply it.",
+  "content": "Quasar 0.2.4 is available. This instance is on 0.2.3 — open Fleet ▸ Releases to apply it.",
+  "instance": { "version": "0.2.3", "source_commit": "abc1234…", "schema_version": 78,
+                "channel": "stable" },
+  "release":  { "id": "<uuid>", "channel": "stable", "version": "0.2.4",
+                "source_commit": "def5678…", "built_at": "2026-09-07T18:02:00Z",
+                "schema_version": 79, "prerelease": false,
+                "compare_url": null, "notes_excerpt": "### Added\n- …" }
+}
+```
+
+- **`text` and `content` carry the same sentence** under the two field names Slack and Discord
+  read. That is why a Slack or Discord incoming webhook renders this body with no adapter in
+  between, while everything structured sits beside them for a receiver that wants it.
+- **`release` is `null` on a test send** — there may be no release to describe.
+- **`notes_excerpt`** is bounded. The release body may be 64 KiB and a webhook receiver is not
+  where it belongs; the full notes are on `GET /v1/admin/platform/releases`.
+- The `event` vocabulary is closed: `platform.release.detected` | `platform.release.test`.
+
+### `POST /v1/admin/platform/release-webhook/test` — send a test (admin)
+
+The one new route. It sends a body of the real shape, with the real signature and
+`event: platform.release.test`, to the configured URL.
+
+```json
+// 200
+{ "delivery": { "ok": false, "status_code": 404, "error": "the webhook receiver answered 404 Not Found", "duration_ms": 214 } }
+```
+
+- **It ignores `release_webhook_enabled`** — testing a URL before switching it on is the point.
+- **It records nothing.** A test can never consume a release's dedupe record and suppress the real
+  notification for it.
+- **A refused delivery is `200` with `ok: false`**, not a `5xx`: the request succeeded, and the
+  receiver's answer is the payload. Only a test with nowhere to send is a `400`
+  (`webhook_not_configured`).
+- `error` is bounded prose and **never contains the URL**.
+
+### `GET /v1/admin/platform/releases` gains `release_webhook` (additive)
+
+The release view gains **one optional field** so the console renders the whole page from one read,
+exactly as `channel` and `edge_branch` already ride it:
+
+```json
+{
+  "channel": "stable", "...": "every amendment-1 and -2 field, unchanged",
+  "release_webhook": {
+    "enabled": true,
+    "url": "https://hooks.example.com/services/T000/B000/XXXX",
+    "secret_configured": false,
+    "last_delivery": { "release_id": "<uuid>", "release_version": "0.2.4", "status": "failed",
+                       "attempts": 2, "attempted_at": "...", "status_code": 500,
+                       "error": "the webhook receiver answered 500 Internal Server Error" }
+  }
+}
+```
+
+- **`secret_configured` is a boolean and never the value.**
+- **`last_delivery`** is the most recent attempt on the instance, or `null`. `status` is
+  `delivered` (terminal) or `failed` (retried next pass, up to the cap). `attempts` counts
+  detection **passes**, not HTTP requests — the retries within one pass are the server's business.
+- `status_code` is `null` when the request never got one: DNS, TLS, a refused dial and the egress
+  allowlist are different failures from a receiver saying no, and an operator needs to tell them
+  apart.
+- **`null`** on a server that does not serve this surface.
+
+---
 
 ## How the client uses this (end-to-end)
 ```
