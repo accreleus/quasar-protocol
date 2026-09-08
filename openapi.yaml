@@ -2058,8 +2058,9 @@ paths:
                   description: >-
                     Release notifications, ADDITIVE (#123, migration 0080). Whether a newly
                     detected platform release is POSTed to release_webhook_url. Absent =
-                    unchanged. Setting it TRUE with no URL stored and none supplied in the same
-                    request is 400 validation_failed - a switch that silently does nothing is
+                    unchanged. Setting it TRUE is 400 validation_failed whenever the URL this
+                    request LEAVES BEHIND is empty - nothing stored and none supplied, or an
+                    explicit "" in the same body - because a switch that silently does nothing is
                     worse than a refusal. Default false, so an instance that has never been
                     configured announces nothing.
                 release_webhook_url:
@@ -2068,8 +2069,8 @@ paths:
                   description: >-
                     Release notifications, ADDITIVE (#123, migration 0080). Where one release
                     notification is POSTed. Absent = unchanged; an explicitly-sent "" CLEARS it
-                    AND SETS release_webhook_enabled false in the same write, unless the request
-                    also sets that field. Any other value must be an absolute https URL with no
+                    AND SETS release_webhook_enabled false in the same write. Any other value
+                    must be an absolute https URL with no
                     userinfo, at most 2048 characters, or 400 validation_failed - http, a
                     credential in the URL and a relative reference are all refused. THE SERVER
                     STILL CONTAINS THE REQUEST AT SEND TIME: delivery refuses any host that

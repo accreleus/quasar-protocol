@@ -7404,10 +7404,11 @@ route:
 - **`release_webhook_url`** — an absolute **https** URL with **no userinfo**, at most **2048**
   characters. Anything else is `400 validation_failed`; `http`, a credential in the URL and a
   relative reference are each refused. An explicitly-sent `""` **clears it and sets
-  `release_webhook_enabled` false in the same write**, unless the request also names that field.
-- **`release_webhook_enabled`** — default `false`. Setting it `true` with no URL stored and none
-  supplied in the same request is `400 validation_failed`: a switch that silently does nothing is
-  worse than a refusal.
+  `release_webhook_enabled` false in the same write**.
+- **`release_webhook_enabled`** — default `false`. Setting it `true` is `400 validation_failed`
+  whenever the URL this request *leaves behind* is empty — nothing stored and none supplied, or
+  an explicit `""` in the same body. A switch that silently does nothing is worse than a refusal,
+  and there is no state where notifications are on with nowhere to send.
 - Both follow the optional-pointer rule every settings field follows: **absent = unchanged**.
 - Audited by the existing `instance.settings.updated` event, whose `keys` array names whichever
   changed. **Key names only, never values** — which is what keeps the URL out of the audit log.
