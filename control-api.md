@@ -6662,6 +6662,7 @@ and what is wrong. **It is a read and only a read** — it applies nothing, writ
       "notes": "### Fixed\n- Boot race in the node agent (#98)\n",
       "compare_url": null,
       "manifest": { "format_version": 1, "...": "the asset, verbatim" },
+      "migrates": false,
       "discovered_at": "2026-09-04T02:07:11Z" }
   ],
   "targets": [
@@ -6715,6 +6716,13 @@ precedence is inserted between those two keys — see §Platform-release beta ch
 - **A prerelease is never listed while `channel` is `stable`.** Prerelease images are published so
   release candidates can be exercised; the stable channel ignores them, and `beta` is the channel
   that does not (amendment 3).
+- **`migrates`** — **additive, amendment 6 (#153)**: true when applying this release runs at least
+  one migration on this instance, i.e. its `schema_version` is above the installed control plane's.
+  It is the ONE thing that decides whether a fleet apply's control-plane step drains the instance
+  (§"Platform-release apply"), so it is **derived and served rather than left to a client to
+  re-derive**, exactly as `identity_known` is: a client twin of the rule would go on telling an
+  operator what they are consenting to after the rule moved. Always present. A client with no
+  release to apply should read the cautious answer, `true`.
 - **The channel switch is the case this rule exists for.** An instance that ran `edge` for a while
   is on a build whose schema may be ahead of every tagged release; switching back to `stable`
   therefore shows only stable releases at or above it, which is frequently **none**, and an empty
@@ -6952,14 +6960,40 @@ from the other side). Consequences a client must know:
   failed agent apply is reverted by an operator, through `POST
   /v1/admin/platform/hosts/{id}/revert`.
 
-**The control-plane attempt drains the WHOLE FLEET first.** Recreating the control plane drops
-every agent's WebSocket, and an agent stops its sessions the moment that connection drops — so a
-control-plane apply ends every session on the instance, not none. The control-plane attempt
-therefore reports `state:"waiting_sessions"` with `sessions_remaining` as the **instance-wide**
-non-terminal session count, and the run cordons every host for the duration so nothing new lands
-on a host that is about to lose its agent. `force: true` skips that wait, with the same meaning it
-has for a host: the operator is agreeing to end those N sessions. The cordons the run imposed are
-released when it reaches a terminal state, and a host it found already cordoned stays cordoned.
+**The control-plane attempt drains the whole fleet first only when the release carries a
+migration** (amendment 6, #153) — that is, when the release's `migrates` is true, its
+`schema_version` being above the control plane's. A recreate on its own no longer ends a `running`
+session: the agent holds it and the client re-attaches signalling in place rather than rebuilding a
+media path that is still carrying the stream (`signaling.md`, #128).
+
+- **A migrating attempt behaves as it did before this amendment.** It reports
+  `state:"waiting_sessions"` with `sessions_remaining` as the **instance-wide** non-terminal
+  session count and waits for zero. The reason is no longer the restart: a held session's row is
+  read back by a binary that has just migrated the database underneath it, and every migration in
+  this schema was authored under "no session is live while I run". Nothing verifies a migration
+  against a live row and the sequencer cannot read the SQL, so it does not gamble.
+- **`force: true` on a migrating attempt STOPS those sessions** rather than skipping the wait.
+  It keeps its meaning — the operator is agreeing to end N live sessions — but it is now
+  discharged rather than assumed: the run `session_stop`s every host it cordoned and then still
+  waits for the count to reach zero before the release is sent, which takes seconds instead of
+  however long a player stays. A forced attempt that cannot reach zero before the apply deadline
+  fails `timeout` rather than migrating over the sessions anyway.
+- **A NON-migrating attempt drains nothing and reports no `sessions_remaining`.** It goes
+  `queued` → `pending`; `sessions_remaining` stays `null`, because no `running` session is being
+  waited on or lost, and `force` has no such wait to skip. It does briefly let **in-flight**
+  sessions — non-terminal but not yet `running` — settle before the recreate, since those have no
+  owner left afterwards and the agent fails them on reconnect. That wait is bounded, is skipped by
+  `force`, never enters `waiting_sessions`, and expiring does not fail the attempt: at stake is a
+  launch that was going to fail regardless, never a live stream.
+- **A release the control plane cannot read is treated as migrating**, and drains. An unnecessary
+  drain costs sessions visibly; a missing one runs a migration under live sessions and nothing
+  sees it.
+
+**Either way the run cordons every host for its duration**, because every host in the run is about
+to be recreated at its own step and a session that lands mid-run is one the run would end. The
+cordons the run imposed are released when it reaches a terminal state, and a host it found already
+cordoned stays cordoned. **Host attempts are unchanged** by this amendment: recreating an agent
+does end that host's sessions, so a host attempt drains exactly as documented below.
 
 **A host attempt drains first, and the agent never does session logic.** Before sending
 `release_apply` the control plane cordons the host and waits for zero non-terminal sessions,
