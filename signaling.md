@@ -211,10 +211,14 @@ Two bounded recovery paths are defined:
   Re-creating the peer connections here ends the session the recovery was meant to save: the host
   observes the transport disappear and stops the session.
 
-  Close codes `4401` and `4404` are excluded: a refused token is refused again, and a terminal
-  session cannot be re-attached. `4410` remains terminal for this client as before. A client that
-  had a media recovery in flight when signaling dropped SHOULD send one `restart_ice` on the new
-  socket, because requests made while the socket was closed were never delivered.
+  Close codes `4401`, `4404` and `4410` end the in-place re-attach: another attach of the same
+  peer connections cannot help once the credential was refused, the session is terminal, or a
+  later client owns the signaling. `4410` stays terminal outright. `4401` and `4404` fall through
+  to the client's ordinary recovery, which may still mint a fresh token and rebuild — that path is
+  unchanged, and for an expired token it can legitimately succeed. A client that had a media
+  recovery in flight when signaling dropped SHOULD send one `restart_ice` on the new socket,
+  because requests made while the socket was closed were never delivered; a client whose media
+  recovery had not yet sent anything MUST NOT, or two ICE-restart offers race.
 
 - **PeerConnection loss.** The authenticated client mints a replacement token for
   the same session, opens a new signaling WebSocket, and recreates its peer connections. Client

@@ -1725,9 +1725,13 @@ The inner `msg` is exactly what `signaling.md` defines — the relay adds only t
 routing tag. Input events and clock-sync (`input.md`) ride the WebRTC DataChannel directly
 peer-to-peer (browser ↔ node `webrtcbin`); they do **not** traverse this relay.
 
-When a replacement signaling WebSocket attaches to an already-running session, the control plane
-notifies the node through the existing session-scoped relay. The node emits fresh offers for its
-live video and audio peer connections; no container or media pipeline restart is implied.
+When a replacement signaling WebSocket attaches to an already-running session, the node emits
+fresh offers for its live video and audio peer connections **on request**: the client sends
+`restart_ice` per peer connection (`signaling.md`) and the node answers it. Corrected 2026-09-08
+(#128) — this paragraph previously said the control plane notifies the node on attach and the
+node then offers unprompted. There is no such notification: an attach that sends nothing is inert
+at the node, which is what makes the signalling-only re-attach in `signaling.md` safe. No
+container or media pipeline restart is implied either way.
 
 ## Reconnection & reconciliation
 - On agent reconnect, the control plane trusts the agent's `heartbeat.running_sessions` /
