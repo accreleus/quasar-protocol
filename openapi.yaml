@@ -1663,6 +1663,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+        "503": { description: "agent_not_connected — the session's host agent is reconnecting. RETRYABLE: the session is alive and its media may still be flowing; retry with backoff rather than treating this as terminal." , content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /v1/sessions/{id}/swap:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:

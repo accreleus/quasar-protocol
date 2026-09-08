@@ -2903,6 +2903,20 @@ Mints fresh signaling coordinates for an existing session owned by the authentic
 Allowed states are `assigned`, `starting`, and `running`. The operation does not create a session,
 reschedule it, or restart its container.
 
+**`503 agent_not_connected` is RETRYABLE and must not be treated as terminal** (amendment,
+2026-09-08, Quasar #128). A session now survives a control-plane restart: the agent holds it for a
+bounded grace window and re-reports it on reconnect. So this row can be `running` while its host
+agent is still reconnecting, and the control plane refuses to mint during that window.
+
+The refusal is deliberate. Minting would hand the caller fresh coordinates, and re-seating them
+destroys the peer connection that is still carrying media — after which the attach fails because
+the agent is not back yet. A client that retries with backoff keeps its stream and reconnects when
+the agent returns; a client that treats this as fatal throws away a working session.
+
+Retry until the host decides: the agent's own grace window is the authority, so a client's retry
+budget should outlast it (`QUASAR_SESSION_GRACE_SECS`, 90 s by default). Once that window expires
+the session goes terminal and this endpoint answers `409` instead, which IS fatal.
+
 **Response `201`:**
 ```json
 {
