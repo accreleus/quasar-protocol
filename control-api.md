@@ -6410,7 +6410,7 @@ field **names** and identifiers only, never a value that could be a secret):
 | `image.updated` | `POST /v1/admin/images/{id}/update` | `image` / image id | `{"applied", "version"}` |
 | `image.synced` | `POST /v1/admin/images/sync` | `image` / — | `{"images", "sync_error"}` |
 | `session.launched` | `POST /v1/sessions` | `session` / session id | `{"app_id", "host_id"}` |
-| `session.failed` | *(no route — the coordinator's terminal-failure edge)* | `session` / session id | `{"reason_source", "host_id", "state_detail"}`, plus `failure_code` (agent path) or `reason` (control-plane path) |
+| `session.failed` | *(no route — the coordinator's terminal-failure edge)* | `session` / session id | `{"reason_source", "app_id", "host_id", "state_detail"}`, plus `failure_code` (agent path) or `reason` (control-plane path). `app_id` is additive (#171): a failure names the app it belonged to, as `session.launched` does, so the two rows of one session can be matched from the feed. |
 
 - **`instance.settings.updated` records the CHANGED KEY NAMES and nothing else.** Not the old
   value, not the new one. The settings surface carries `allowed_origins` and will carry more;
