@@ -2078,6 +2078,17 @@ paths:
                     redirect, and bounds the response body. THE URL IS TREATED AS A CREDENTIAL
                     (a Slack or Discord webhook URL authenticates by being known), so it never
                     appears in a log line, an audit record or a delivery error.
+                platform_auto_apply:
+                  type: boolean
+                  description: >-
+                    Unattended automatic apply, ADDITIVE (amendment 8, #122, migration 0081).
+                    Whether a detected platform release is applied WITHOUT a click. Absent =
+                    unchanged. Default false, so an instance that never opts in behaves exactly as
+                    before. It depends on nothing else being configured first, so unlike
+                    release_webhook_enabled there is no companion 400: with nothing to apply it
+                    applies nothing and records why. NO WINDOW FIELD ACCOMPANIES IT, deliberately -
+                    an unattended pass runs on a successful platform.release_detect job, so that
+                    job's own schedule IS the window, and it is already editable in the Jobs tab.
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SettingsEnvelope" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
@@ -5005,6 +5016,12 @@ components:
                 SIGNING SECRET IS NOT HERE and never will be: it is an instance_secrets row read
                 through GET /v1/admin/secrets, which reports configured/readable and a masked
                 hint, never a value.
+            platform_auto_apply:
+              type: boolean
+              description: >-
+                Unattended automatic apply, ADDITIVE (amendment 8, #122, migration 0081). Whether
+                a detected platform release is applied without a click. Default false. Optional in
+                the envelope so a pre-#122 server stays conformant; a client reads absent as false.
             updated_by: { type: [string, "null"], format: uuid }
             updated_at: { type: string, format: date-time }
 
@@ -5523,12 +5540,24 @@ components:
         ONE IS ACTIVE PER INSTANCE, enforced by a partial unique index rather than by a
         code check, so two admins pressing Apply at once produce a unique violation and
         not two fleets moving.
-      required: [id, release_id, state, force, requested_by, cancel_requested, cancel_requested_at, current_target, current_host_id, error, skipped, attempts, created_at, started_at, finished_at]
+      required: [id, release_id, state, force, unattended, requested_by, cancel_requested, cancel_requested_at, current_target, current_host_id, error, skipped, attempts, created_at, started_at, finished_at]
       properties:
         id: { type: string, format: uuid }
         release_id: { type: string, format: uuid }
         state: { $ref: "#/components/schemas/ApplyRunState" }
         force: { type: boolean, description: "Applied to EVERY host target in this run. It exists on the fleet body, and not only on the per-host one, because a run whose every host target waits for a natural drain can otherwise stall indefinitely." }
+        unattended:
+          type: boolean
+          description: >-
+            ADDITIVE, amendment 8 (#122). True when the detection schedule started this run
+            rather than an admin pressing Update. A CLIENT SHOULD SAY SO: an admin finding a
+            fleet run they did not start is owed the explanation. requested_by cannot answer
+            this - it is null for an unattended run AND for one whose requesting admin has
+            since been deleted (ON DELETE SET NULL). Always false on a run an admin created,
+            and false on a server predating this amendment. An unattended run NEVER carries
+            force: force is an operator agreeing to end N live sessions and there is no
+            operator, so an unattended run is only ever started for a release whose
+            `migrates` is false (see the apply section).
         requested_by: { type: [string, "null"], format: uuid }
         cancel_requested:
           type: boolean

@@ -6995,6 +6995,30 @@ cordons the run imposed are released when it reaches a terminal state, and a hos
 cordoned stays cordoned. **Host attempts are unchanged** by this amendment: recreating an agent
 does end that host's sessions, so a host attempt drains exactly as documented below.
 
+**A run may be started by the schedule rather than by an admin** (amendment 8, #122). With
+`platform_auto_apply` on, a successful `platform.release_detect` pass may start a fleet run itself;
+that run reports `unattended: true`, and a client should say so, because an admin finding a fleet
+run they did not start is owed the explanation. It is the SAME run in every other respect — same
+sequencer, same ordering, same cordons, same drain decision, same ADR 0002 rules. Four things
+constrain it, and each is a refusal rather than a setting:
+
+- **A release whose `migrates` is true is NEVER applied unattended.** It is still detected, still
+  listed, still banners; it waits for a person. A migrating attempt drains the whole instance by
+  design, and ending every live session with nobody watching is not something to do on a schedule.
+  A non-migrating one costs no `running` session anything, which is what makes the rest of this
+  safe.
+- **An unattended run never carries `force`.** `force` is the operator agreeing to end N live
+  sessions, and there is no operator; on a migrating release it now also stops those sessions
+  (above), which this path cannot reach anyway.
+- **There is no window of its own.** The pass runs from the detection job, so that job's schedule is
+  the window — one schedule, already editable in the Jobs tab, that cannot disagree with itself.
+- **A failed unattended run suppresses THAT RELEASE, not the feature.** It is not retried on the
+  next pass; a newer release is still tried, and an admin applying the failed one themselves clears
+  the suppression. A single flaky host must not end automatic updates for an instance.
+
+Whether a pass acted, and why it did not, is recorded in the detection job's run summary
+(§Background jobs) — there is no new endpoint and no new state.
+
 **A host attempt drains first, and the agent never does session logic.** Before sending
 `release_apply` the control plane cordons the host and waits for zero non-terminal sessions,
 reporting `state:"waiting_sessions"` with `sessions_remaining` while it waits. `force: true` skips
