@@ -7352,8 +7352,14 @@ alone would then put `0.2.5` first and offer an instance running `0.3.0-rc.1` a 
 `stable` versions are cut monotonically, and an `edge` build has no version at all, so both keep
 the ordering they had.
 
-A version that does not parse as SemVer takes no part in this: the pair falls back to `built_at`
-rather than being given an invented order.
+A version that does not parse as SemVer is ordered strictly **below** every release whose version
+does, with `built_at` breaking ties inside each group (amendment 7, #121). Consulting SemVer only
+for a pair where BOTH versions parse is **not a total order** — mix one unparseable row in and the
+comparison cycles, leaving the database's scan order to decide which release is headlined. Ranking
+the unorderable rows beneath the orderable ones is the smallest rule that is total and still gives
+an invented order to nothing. No release the sanctioned publishing lane can produce reaches this
+case at all: a manifest whose version does not parse is now rejected outright, as is one whose
+`prerelease` flag disagrees with its version string.
 
 ### Switching back to `stable` — the instance waits, it is never rolled back
 
@@ -7463,7 +7469,8 @@ receiver that wants proof gets it. With a secret configured every delivery carri
 
 ```
 X-Quasar-Event:         platform.release.detected | platform.release.test
-X-Quasar-Delivery:      <32 hex, unique per POST — a receiver may deduplicate on it>
+X-Quasar-Delivery:      <32 hex, one per NOTIFICATION and repeated across its retries —
+                         which is what makes deduplicating on it work (amendment 7, #123)>
 X-Quasar-Timestamp:     <unix seconds>
 X-Quasar-Signature-256: sha256=<hex HMAC-SHA256(secret, "<timestamp>.<raw body>")>
 ```

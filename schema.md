@@ -2068,10 +2068,18 @@ indefinitely. This table is what makes an announced release stay announced.
 `CHECK ((status = 'delivered') = (delivered_at IS NOT NULL))` — the two halves of "delivered"
 cannot disagree.
 
-- **The claim is one statement.** A pass takes the right to send with a single
-  `INSERT … ON CONFLICT (release_id) DO UPDATE … WHERE status = 'failed' AND attempts < <cap>`,
-  so a scheduled pass and a "Check now" racing on the same release cannot both POST it: the loser
-  matches no row and sends nothing.
+- **The claim is one statement holding a LEASE** (amendment 7, #123). A pass takes the right to
+  send with a single
+  `INSERT … ON CONFLICT (release_id) DO UPDATE … WHERE status = 'failed' AND attempts < <cap>
+  AND last_attempt_at < now() - <lease>`, so a scheduled pass and a "Check now" racing on the same
+  release cannot both POST it: the loser matches no row and sends nothing.
+  **The lease is load-bearing, not belt-and-braces.** A claim leaves the row at
+  `status = 'failed'` for the whole send, which is indistinguishable from "an earlier pass failed,
+  retry me" — so without it an overlapping pass matched the same row and both POSTed. The lease
+  must exceed the delivery retry ladder's worst case, and refusing a row touched inside it is what
+  makes the claim exclusive. It also means the guarantee belongs to **this table**, rather than
+  being a side effect of the jobs framework single-flighting the detection job: it still holds with
+  a second control-plane replica.
 - **A test send writes nothing here.** `POST /v1/admin/platform/release-webhook/test` must never
   be able to consume a release's dedupe record and suppress the real notification for it.
 
