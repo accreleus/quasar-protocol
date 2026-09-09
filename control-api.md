@@ -6549,6 +6549,109 @@ clamped (see `GET`/`PATCH /v1/me/ui-preferences`).
 
 ---
 
+## Audit-log names — an id never travels alone (amendment 2026-09-10, additive, admin-gated)
+
+**One additive, derived, read-only field on `AdminActivity`. No new endpoint, no new
+parameter, no migration, no change to any existing field's shape or meaning.** A server that
+predates this amendment simply does not send it.
+
+### The problem it fixes
+
+An audit row stores identifiers. `GET /v1/admin/activity` served them and nothing else, so a
+`session.launched` entry read:
+
+```
+target_type "session", target_id "85d0b6a9-…"
+details     { "app_id": "8b1116c8-…", "host_id": "4daeaa27-…" }
+```
+
+Nothing there says *which app* or *which host*. Every consumer that wanted to answer that had
+to fan out to `/v1/admin/apps` and `/v1/admin/hosts` and join client-side, per page, or show
+uuids to a human. The rule this amendment establishes: **an identifier is never served
+without the name of the thing it identifies, and a name never replaces its identifier.** The
+ids stay exactly as they are — they are what you paste into a query.
+
+### `names`
+
+```
+names: { "<id>": "<display name>" }
+```
+
+Always present, never `null`; `{}` when the row references nothing nameable. Keyed by the raw
+id **as it appears on the row**, so a consumer looks up `names[target_id]` or
+`names[details.app_id]` with no transformation. An id with no resolvable name is simply
+**absent** from the map — absence is the miss, there is no sentinel.
+
+`names` covers the row's `target_id` **and** the identifiers inside `details`. Both, because
+the ids that matter most in practice are the nested ones, and one map with one rule beats a
+`target_name` scalar plus a second mechanism for everything else.
+
+**Derived at read time and never stored**, exactly as `actor_username` and `severity` already
+are (§4 above). The log is append-only, so a rename must show the *current* name; a name
+copied into the row at write time would make the feed a silently-stale second copy of the
+tables it names.
+
+**Except where read time cannot answer.** When the entity has been hard-deleted there is
+nothing left to join against, and that is precisely the row an operator most wants to read.
+For those actions the emitter has always stamped the name into `details` (`app.delete` writes
+`name`, `host.delete` writes `node_name`, `user.deleted` writes `username`,
+`storage.home.tombstone` writes `username` and `app_name`), and the server now feeds that
+stamped value back in as `names[target_id]` when the lookup misses. So the guarantee a client
+can rely on is one sentence: **`names[id]` is the entity's current name, or the name it had
+when the event happened, or absent.** A client must not try to distinguish the first two — the
+server cannot tell a deleted entity from one that never existed, and neither can it.
+
+The fallback applies to the **target only**. A stamped name is never attributed to some other
+identifier on the row: `storage.home.tombstone` stamps both `username` and `app_name`, and
+neither of them names the `host_id` sitting beside them.
+
+### What resolves
+
+`target_type` (with `action` where it is ambiguous) and an explicit allowlist of `details`
+keys select the table. Both are server-side detail and may grow without an amendment — a new
+resolvable kind adds entries to `names`, which changes no existing key.
+
+| Referenced as | Named by |
+|---|---|
+| `target_type: app`, and `library` (`library.scan.force` records `library` while carrying an app id) | the app's name |
+| `target_type: host` | the host's node name |
+| `target_type: user` | the username |
+| `target_type: session` | `"<app> · <user>"` — a session has no name of its own, and those are the two facts an operator wants |
+| `target_type: runtime_preset`, `stream_profile`, `launch_profile`, `image`, `job` | that record's name / display name |
+| `target_type: host_enrollment` | its node name, else its operator note |
+| `target_type: platform` | the release's version, or a 12-character commit for a build with none. `platform.apply.cancel` targets the **run**, and takes the label of the release that run applies |
+| `details.app_id`, `host_id`, `user_id`, `session_id`, `release_id` | as above |
+| `details.subject_id` | the user — **only** when the sibling `subject_type` is `user` |
+| `details.run_id` | the platform apply run, **only** under `platform.apply.cancel` |
+
+`invite`, `secret` and `instance` are deliberately **not** resolvable. An invite's code is
+never recorded (§ Invites), a secret's `target_id` already *is* its name, and `instance` names
+the deployment. `entitlement_id`, `attempt_id` and `capture_id` identify rows with no name to
+show and are not looked up.
+
+**The allowlist is an allowlist, not "resolve anything uuid-shaped."** The shape does not
+determine the table: `run_id` names two different tables depending on the action; `subject_id`
+is conditional on a sibling key; three id keys name nothing; and `session.failed` writes
+operator-facing prose into `reason` and `state_detail` that can itself contain a uuid. A
+shape-driven resolver would query on all of those.
+
+### Cost, and what it is not
+
+Resolution is batched **per page**, one primary-key lookup per referenced kind — never one
+query per row. A 100-row page costs at most a dozen index lookups.
+
+**`q` is still not searched over names**, for the same reason it is not searched over
+`details` (§4). Adding names to the predicate means an unindexed `ILIKE` across every named
+table, and a filter that then disagrees with server-side paging. `names` is a read-side
+convenience over the rows a query already returned; it is not a search surface.
+
+**A resolution failure is not an error.** If the lookup fails, the server logs it, serves
+`names: {}`, and the rest of the item is unchanged. A name is a convenience beside an id that
+is already on the row; failing the request instead would take the whole audit log away over a
+cosmetic feature.
+
+---
+
 ## Platform releases — identity and the release read surface (amendment 1, #104/#106, additive, admin-gated)
 
 > **Amendment — platform-release identity + release read surface (amendment 1, #104/#106),
