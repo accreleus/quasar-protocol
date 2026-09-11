@@ -7059,9 +7059,11 @@ from the other side). Consequences a client must know:
   the previous digests **itself**, because no migration can have run (ADR 0002 holds) and there is
   no console left for an operator to press Revert in. If it started and then failed, it is left
   failed: it ran, so assume it did whatever it does, and the attempt's `previous_digests` plus
-  `output` are the copy-paste manual recipe. **There is no automatic restore for a host** — a
-  failed agent apply is reverted by an operator, through `POST
-  /v1/admin/platform/hosts/{id}/revert`.
+  `output` are the copy-paste manual recipe. *(Amended by amendment 9, #185/#188: a **host**
+  whose new agent container fails its health wait IS restored, by its updater, and the control
+  plane records the restore as a `kind: auto_revert` attempt — §"Self-update hardening". The
+  control-plane rule above is unchanged: a started control plane may have migrated.)* The
+  operator's own `POST /v1/admin/platform/hosts/{id}/revert` remains for every other case.
 
 **The control-plane attempt drains the whole fleet first only when the release carries a
 migration** (amendment 6, #153) — that is, when the release's `migrates` is true, its
@@ -7147,12 +7149,15 @@ wedge forever on one target.
 
 ### States and reasons — one vocabulary, shared with the wire
 
-**`ApplyRunState`** — `pending` | `running` | `succeeded` | `failed` | `cancelled`. A run
-`succeeded` only when **every** target succeeded. **A run stops at its first failed target**: past
-a failed control plane, continuing would move agents onto a release the control plane is not on
-(ADR 0002), and past a failed host, continuing would be marching a known-bad digest set across the
-fleet. So there is deliberately **no `partial` state** — a `failed` run may well have succeeded
-targets behind it, and the per-target `attempts` are where that is read.
+**`ApplyRunState`** — `pending` | `running` | `succeeded` | `failed` | `cancelled`, plus amendment
+9's appended **`succeeded_partial`** (§"Self-update hardening"). A run `succeeded` only when
+**every** target it reached succeeded and it passed over nothing that was behind. **A run stops at
+its first failed target**: past a failed control plane, continuing would move agents onto a release
+the control plane is not on (ADR 0002), and past a failed host, continuing would be marching a
+known-bad digest set across the fleet. So a **`failed` run has no partial variant** — it may well
+have succeeded targets behind it, and the per-target `attempts` are where that is read.
+`succeeded_partial` is the other case: nothing failed, but a host was skipped that was not
+`up_to_date`, and the fleet is on mixed versions.
 
 **`ApplyAttemptState`** — `queued` | `waiting_sessions` | `pending` | `pulling` | `recreating` |
 `verifying` | `succeeded` | `failed` | `cancelled`. The six middle values are exactly
@@ -7676,6 +7681,154 @@ exactly as `channel` and `edge_branch` already ride it:
   allowlist are different failures from a receiver saying no, and an operator needs to tell them
   apart.
 - **`null`** on a server that does not serve this surface.
+
+---
+
+## Self-update hardening — preflight, automatic agent restore, partial fleet outcome (amendment 9, #185, additive, admin-gated)
+
+> **Amendment 9 (#185 with sub-issues #186–#190), additive, requires sign-off.** Nothing here
+> redesigns the apply path shipped under #104; every piece makes an incident that was discovered
+> mid-run, on a host, as "down", into a message on the release card before the run starts or
+> instead of an outage. Four surfaces move, all additive: **one new object on every target**
+> (`preflight`), **one inserted eligibility reason** (`preflight_blocked`), **one appended run
+> state** (`succeeded_partial`) with **one nullable field on the run** (`retry_of`), and **one
+> appended attempt kind** (`auto_revert`) whose wire twin is `agent-api.md` `release_state`'s
+> optional `restored`. Persisted by migration **0083** (`schema.md`). No existing shape, status
+> code, route or behaviour changes for a target whose preflight is `ok` and a run that skips no
+> host — which is every fleet that was working before.
+
+### Preflight — is this target *shaped* so an apply can be carried out?
+
+Eligibility (amendment 1) answers *may this target take the release*. **Preflight answers whether
+it *can*** — whether the stack around the target is the shape the updater needs — and the two are
+kept apart because they fail for different people: an ineligible target is waiting on a release or
+on a decision, a blocked one is waiting on an operator with a shell. Every target on
+`GET /v1/admin/platform/releases` carries:
+
+```json
+{ "kind": "host", "host_id": "<uuid>", "node_name": "gpu-host-01",
+  "eligible": false, "reason": "preflight_blocked",
+  "preflight": {
+    "state": "blocked",
+    "checked_at": "2026-09-11T09:12:44Z",
+    "checks": [
+      { "id": "agent_connected",      "status": "pass", "detail": "the agent is connected" },
+      { "id": "updater_socket",       "status": "pass", "detail": "updater 0.2.5 answered on /run/quasar-updater/updater.sock" },
+      { "id": "updater_stack_dir",    "status": "pass", "detail": "/srv/quasar/deploy, 2 compose files" },
+      { "id": "updater_overlays",     "status": "pass", "detail": "quasar-node-agent was started with the same compose files as the updater" },
+      { "id": "health_addr_bindable", "status": "fail", "detail": "127.0.0.1:9091 is answered by node gpu-host-01 pid 4121, not this agent (pid 3980) — free the port (ss -ltnp | grep 9091) or set QUASAR_HEALTH_ADDR to a free address and recreate the agent" },
+      { "id": "image_resolvable",     "status": "pass", "detail": "both component manifests resolve at ghcr.io" }
+    ] } }
+```
+
+- **`state`** — `ok` (every check passed), `blocked` (at least one failed), `unknown` (none failed,
+  at least one could not be evaluated). **`blocked` is what produces the `preflight_blocked`
+  eligibility reason; `unknown` never blocks anything** — a fleet of agents that predate the
+  checks must keep updating, or nobody could ever install the build that adds them. A client
+  renders `unknown` as a warning, never as a stop.
+- **`checked_at`** — when the facts were gathered: for a host, when its agent last reported
+  readiness (every 15 s while connected); for the control plane, when its updater was last asked
+  (cached 30 s). `null` when nothing was gathered.
+- **`checks`** — every check the target has, in the vocabulary's order, each `{id, status,
+  detail}`. `status` is `pass` | `fail` | `unknown` and, like `ReadinessCheck.status`, **not an
+  enum**: a consumer passes an unrecognised value through. `detail` is operator prose that, on a
+  `fail`, **names the fix**; it is never parsed.
+
+**The check vocabulary (`PreflightCheckId`, closed).** The three a host's agent can answer about
+itself are also that agent's **readiness check ids** (`agent-api.md` `readiness`), so the Hosts
+tab and the Releases tab say the same words about the same fact, and preflight for a host is a
+read of its stored readiness rather than a second probe.
+
+| id | target | passes when | a `fail` detail names |
+|---|---|---|---|
+| `updater_socket` | both | the updater's socket exists AND `GET /v1/self` over it answered | the three-way #184 distinction: **no mount directory** → "the socket volume is not mounted in this container; recreate the control plane" (`docker compose up -d --force-recreate --no-deps quasar-control-plane`); **directory but no socket** → "the updater is not running" (`docker compose up -d quasar-updater`); **socket but no answer** → the error. For a host the same three, about the agent's container. |
+| `updater_stack_dir` | both | the updater reports a discovered working directory and compose-file list (it fails closed at boot otherwise, so a serving updater always passes; the check exists so an updater that is *not* serving is explained by `updater_socket` and not by silence) | `QUASAR_STACK_DIR` and the host path the updater needs |
+| `updater_overlays` | both | the compose files the target's own container was started with (its `com.docker.compose.project.config_files` label, read by the updater) are the same set the updater was started with | both lists and the service: an operator who brought the agent up with an overlay the updater does not know would otherwise learn it as a recreate that dropped the overlay |
+| `image_resolvable` | both | every component manifest of `available[0]` resolves at the registry **as seen from the control plane** (a `GET` of the manifest by digest, no pull; an edge release resolves its commit tag) | the component and the registry's answer. `unknown` with no release listed. This is an instance-wide fact copied onto every target — it says the digests exist where every host will pull from, not that a given host can reach the registry; a host that cannot still fails `pull_failed` at its step. |
+| `agent_connected` | host | the host's agent has a live socket to this control plane right now (#169's `AgentConnected`) | nothing beyond the fact — `host_offline` already makes the target ineligible; the check is here so the card lists every fact in one place |
+| `health_addr_bindable` | host | the address in the agent's `QUASAR_HEALTH_ADDR` is answered by **this** agent (`/health` carries `node` and `pid`, #152) | the address and who answered instead, with `ss -ltnp` and the variable to change. `skip`/`unknown` when the endpoint is disabled. A squatter can only take the port while the agent is down, so on a running post-#152 agent this passes by construction; its value is on an older, tolerant agent (which reports the squatter) and on the *next* start, which is exactly when an apply recreates the agent. |
+
+**`preflight_blocked` — where it sits.** Inserted into `EligibilityReason` after
+`control_plane_not_first` and before `attempt_in_flight`:
+`no_release` → `identity_unknown` → `up_to_date` → `install_mode_source` → `updater_absent` →
+`host_offline` → `release_above_control_plane` → `control_plane_not_first` →
+**`preflight_blocked`** → `attempt_in_flight` → `run_active`. A stack shape is a durable fact and
+amendment 1's rule that durable reasons outrank transient ones is what fixes the position; the
+only target whose answer changes is one that is both blocked and mid-apply. Because it is an
+eligibility reason and not a parallel gate, everything downstream needs no new rule:
+
+- **The fleet run skips a blocked host at its turn** exactly as it skips an offline one — reported
+  in `skipped` with this reason — and the run then ends `succeeded_partial` (below).
+- **`POST /v1/admin/platform/apply` refuses `409 preflight_blocked`** when the *control-plane*
+  target is blocked, since nothing moves before it; the message names the failing check and its
+  fix. A run started by the schedule (amendment 8) is refused the same way in its summary
+  (`not_eligible` with `preflight_blocked` as the detail).
+- **`POST /v1/admin/platform/hosts/{id}/apply` answers `409 host_not_eligible` with
+  `reason: preflight_blocked`** — no new code, the existing refusal carries it.
+- **The console** disables Update while the control plane is blocked (the existing
+  control-plane-blocker rule), shows the failing check's detail beside the target, and in the fleet
+  confirmation lists the hosts that will be skipped and why, so consent names the partial outcome
+  before it happens.
+
+**Staleness.** A host's facts are as fresh as its last readiness report; the control plane's are
+re-read on every view (30 s cache) and **the apply endpoints re-read before deciding**, so a
+stale `ok` cannot authorise a run and "Check now" refreshes the image check.
+
+### `succeeded_partial` — a run that skipped a host is not a clean success
+
+**`ApplyRunState` gains `succeeded_partial`**, appended, terminal. A run reaches it when it got to
+the end of its host list with **nothing failed** but **passed over at least one host for a reason
+other than `up_to_date`** — offline, blocked, source-built, no updater, or an attempt already in
+flight. The fleet is then on mixed versions, and before this amendment the run said `succeeded`
+and the banner said the release was applied; an external reporter read exactly that as "the
+control plane updated but it can't find the agent".
+
+- `up_to_date` is the one skip that does not make a run partial: a host already on the release
+  was not passed over, it was done.
+- **It is not a failure.** It does not suppress an unattended release (amendment 8's rule keys on
+  `failed` and only `failed`), and the next unattended pass picks the host up on its own once it
+  can take the release — that was already how `PlanAutoApply` behaves for a host that is behind.
+- **`skipped` is now persisted** (`schema.md` 0083), because the state is decided from it and a
+  partial run whose explanation was lost on a crash would be a state with no reason.
+- A `failed` run is unchanged and still has no partial variant.
+
+**"Retry skipped hosts" is a plain fleet apply.** `PlatformApplyRequest` gains an optional
+**`retry_of`** (uuid): the `succeeded_partial` run this apply is finishing. It changes nothing
+about what the run does — the control plane reads `up_to_date` and is skipped, every updated host
+reads `up_to_date` and is skipped, and only the hosts that are behind move — so there is
+deliberately **no host filter**: a second way of choosing targets would be a second place for the
+answer to "what will this run touch" to live. The new run serves `retry_of`; `404 not_found`
+when no such run exists. A client links the two in both directions from the run list.
+
+### `auto_revert` — the updater put the host back, and the history says so
+
+**`PlatformApplyAttempt.kind` gains `auto_revert`**, appended. When a node-agent apply's new
+container **fails its health wait** — `never_started`, `recreate_failed` or `unhealthy` — the
+host's **updater restores the previous digests itself** (`.env.prev` back, `up` again), records
+the failed container's last log lines in `output` (which is where `health-bind-failed` lands, the
+#152 field case), and reports the failure with `restored: true` (`agent-api.md` `release_state`).
+The restored agent replays that result on its reconnect (#193), and the control plane then:
+
+1. records the apply attempt `failed` with the updater's reason and output, as before;
+2. **inserts one `kind: auto_revert` attempt beside it, already terminal** — `succeeded` when the
+   restore came up, `failed` when the restore itself failed and `previous` is the manual recipe —
+   with the failed apply's `previous_digests` as its `requested_digests` and vice versa, so a
+   history reader sees both steps and a revert-state derivation still reads the host's latest
+   attempt;
+3. finishes a fleet run that was on that host `failed` (the stop rule is unchanged: a second host
+   failing the same way is likely the same cause).
+
+Why the updater and not the control plane: the agent that would carry a control-plane-issued
+revert is the one that is down. The updater already holds `.env.prev` and the previous digests,
+and already does exactly this for a never-started control plane. The old rule — "a node-agent
+apply is never auto-restored, because a silent revert hides the failure" — is superseded because
+the revert is not silent: `restored`, the log tail, and the `auto_revert` row are the record
+(ADR 0004). **The control-plane rule is unchanged**: a started control plane may have migrated,
+and is never restored automatically.
+
+**One automatic restore per attempt, no retry.** If the restore fails, both failures are surfaced
+(`output` carries both) and the host is where a failed `recreate_failed` always left it — stopped,
+with `previous` as the recipe. The operator's `POST .../revert` is unchanged for every other case.
 
 ---
 

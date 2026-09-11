@@ -978,6 +978,17 @@ one the agent invents, so a state message maps to exactly one
   wholesale.
 - **`started_at` / `updated_at` / `finished_at`** *(RFC3339 UTC)* — when the updater accepted the
   request, when this state was written, and when it became terminal (`null` until then).
+- **`restored`** *(boolean, optional, additive — amendment 9, #185/#188)* — `true` on a `failed`
+  message when the **updater put the previous digests back itself** after the new agent container
+  failed its health wait (`recreate_failed`, `never_started` or `unhealthy` on a node-agent apply),
+  so the host is on the digests in `previous` again and its old agent is the one sending this
+  message — replayed on its reconnect, because the agent that carried the apply out is gone. The
+  control plane records a `kind: auto_revert` attempt beside the failed one (`control-api.md`
+  §"Self-update hardening"). Absent or `false` means nothing was restored; an older agent never
+  sends it, and an older control plane ignores it. The restore's own outcome is in `output`: the
+  failed container's last log lines (which is where `health-bind-failed` lands), then one line
+  saying the previous digest came back up — or that the restore also failed, in which case
+  `previous` is the manual recipe as before.
 
 **`reason` — the closed vocabulary.** These are the same identifiers the `release_apply` `ack`
 uses when it rejects (§`release_apply`), deliberately: an attempt that failed at the ack and one
@@ -993,7 +1004,7 @@ they can be rendered by one mapping.
 | `digest_malformed` | a `digest` is not a well-formed `sha256:` + 64 lowercase hex. (Ack rejection, or the updater's own check.) |
 | `pull_failed` | at least one component digest could not be pulled (registry unreachable, auth denied, manifest not found, or the "mismatched image rootfs and manifest layers" that a digest published without a tag behind it produces). |
 | `recreate_failed` | the compose recreate exited non-zero. The old container is already gone at this point — compose removes it before starting the replacement — so this state is a **stopped service**, and `previous` is the restore recipe. |
-| `never_started` | the recreate produced a container that **never started** (`State.StartedAt` is zero). Distinguished from `unhealthy` because it is the one failure in which nothing the new image would have done can have happened — for the control-plane target that is what makes an automatic restore safe (`control-api.md`; ADR 0002 holds because no migration can have run). A node-agent apply is **never** auto-restored. |
+| `never_started` | the recreate produced a container that **never started** (`State.StartedAt` is zero). Distinguished from `unhealthy` because it is the one failure in which nothing the new image would have done can have happened — for the control-plane target that is what makes an automatic restore safe (`control-api.md`; ADR 0002 holds because no migration can have run). A node-agent apply that fails this way, or `recreate_failed` / `unhealthy`, **is restored by the updater** since amendment 9 (#185/#188) — it carries no migrations, and the failure is not hidden: the message says `restored: true` and the control plane records the restore as its own attempt. |
 | `unhealthy` | the new container started and then did not reach running-and-healthy within the updater's wait timeout. It ran; assume it did whatever it does. |
 | `updater_unreachable` | the updater's socket could not be reached, or its result file for this `request_id` stopped advancing or disappeared. "I cannot see the actor", as distinct from `updater_absent`'s "there is no actor". |
 | `timeout` | the apply did not reach a terminal state within the deadline. Emitted by whichever side observes it first; the control plane writes it on the attempt when no terminal `release_state` arrives (`control-api.md`). |
