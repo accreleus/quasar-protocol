@@ -5598,10 +5598,11 @@ components:
             button was pressed - the host's UPDATER put the previous digests back itself
             after the new agent container failed its health wait (agent-api.md
             release_state `restored`), and the control plane wrote this row beside the
-            failed apply so the history shows both steps. It is recorded terminal on
-            insert (succeeded when the restore came up, failed otherwise), was never
-            driven over the wire, and its requested_digests are the failed apply's
-            previous_digests.
+            failed apply so the history shows both steps. It is recorded succeeded on
+            insert (the updater reports `restored` only for a restore that came up; a
+            restore that itself failed leaves no row and both failures in the failed
+            apply's output), was never driven over the wire, and its requested_digests
+            are the failed apply's previous_digests.
         target: { type: string, enum: [control_plane, host] }
         host_id: { type: [string, "null"], format: uuid, description: "Null exactly when target is control_plane." }
         node_name: { type: [string, "null"] }

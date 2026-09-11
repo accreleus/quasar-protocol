@@ -7810,11 +7810,11 @@ the failed container's last log lines in `output` (which is where `health-bind-f
 The restored agent replays that result on its reconnect (#193), and the control plane then:
 
 1. records the apply attempt `failed` with the updater's reason and output, as before;
-2. **inserts one `kind: auto_revert` attempt beside it, already terminal** — `succeeded` when the
-   restore came up, `failed` when the restore itself failed and `previous` is the manual recipe —
-   with the failed apply's `previous_digests` as its `requested_digests` and vice versa, so a
-   history reader sees both steps and a revert-state derivation still reads the host's latest
-   attempt;
+2. **inserts one `kind: auto_revert` attempt beside it, already `succeeded`** — with the failed
+   apply's `previous_digests` as its `requested_digests` and vice versa, so a history reader sees
+   both steps. A restore that itself failed produces no row: `restored` is only ever `true` for a
+   restore that came up, and both failures are in the failed apply's `output`, with `previous` as
+   the manual recipe. Both revert-target derivations skip `auto_revert` rows (below);
 3. finishes a fleet run that was on that host `failed` (the stop rule is unchanged: a second host
    failing the same way is likely the same cause).
 
