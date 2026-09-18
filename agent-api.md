@@ -511,7 +511,8 @@ them and nothing changes for it)*:
   this host), `homes` (every launch that mounts a managed home), `gpu` (launches placed on the GPU
   whose `capacity.gpus[].index` equals `gpu_index`). `enforced_by: "agent"` marks the agent's own
   safety states (container runtime unusable, startup cleanup not yet succeeded): the agent refuses
-  those launches itself and **no readiness override lifts them**.
+  those launches itself and **no readiness override lifts them**. Like every check id, the id of
+  such a check is the agent's to choose; consumers key on `blocks`, never on a particular id.
 
 **What may block (amendment 11, ADR 0005 — this replaces the original "ADVISORY ONLY" rule).**
 Registration is still never affected: a host with every check failing still registers, which is

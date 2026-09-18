@@ -2757,33 +2757,6 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: "restart_required — a restart-class knob changed with live sessions and restart_confirm != true (body carries live_sessions)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
-  /v1/admin/hosts/{id}/readiness-overrides/{check_id}:
-    parameters:
-      - { $ref: "#/components/parameters/PathId" }
-      - name: check_id
-        in: path
-        required: true
-        description: "The agent-owned readiness check id, as it appears in the host's readiness report."
-        schema: { type: string, minLength: 1, maxLength: 128 }
-    put:
-      tags: [admin]
-      summary: Launch on this host despite one named failing readiness check (amendment 11, #260). Idempotent.
-      x-required-role: admin
-      responses:
-        "200": { description: The override (existing or new). , content: { application/json: { schema: { $ref: "#/components/schemas/ReadinessOverride" } } } }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/Conflict" }
-    delete:
-      tags: [admin]
-      summary: Withdraw a readiness override (amendment 11, #260). Idempotent.
-      x-required-role: admin
-      responses:
-        "204": { description: No override remains for this check. }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
   /v1/admin/hosts/{id}/restart:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
@@ -4910,7 +4883,7 @@ components:
             it to pass through. Consumers MUST render/store an unrecognized value rather than
             reject it.
         summary: { type: string, description: "One sentence an operator can act on, in plain language." }
-        remediation: { type: string, description: "Exact commands to fix it, distro-aware where cheaply knowable. Empty for pass/skip." }
+        remediation: { type: string, description: "Exact commands to fix it, distro-aware where cheaply knowable. Empty unless the check asks the operator for something (so: empty for pass and skip, and usually for unknown and provisioning)." }
     ReadinessBlocks:
       type: object
       description: >-
@@ -4929,12 +4902,12 @@ components:
     ReadinessGate:
       type: object
       description: "Amendment 11 (#260). The control plane's current readiness verdict for this host. ALWAYS SERIALIZED."
-      required: [state, blocks]
+      required: [state, blocking]
       properties:
         state: { type: string, description: "OPEN STRING. active, or abstaining (never reported, or the report is stale — nothing is excluded)." }
-        blocks:
+        blocking:
           type: array
-          description: "One entry per check carrying `blocks` with status fail, INCLUDING overridden ones, so a failing check is never hidden."
+          description: "One entry per check carrying `blocks` with status fail, INCLUDING overridden ones, so a failing check is never hidden. Populated whatever `state` is; while abstaining nothing is excluded from admission."
           items:
             type: object
             required: [check_id, scope, gpu_index, enforced_by, overridden]
