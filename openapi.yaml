@@ -2757,6 +2757,33 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: "restart_required — a restart-class knob changed with live sessions and restart_confirm != true (body carries live_sessions)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /v1/admin/hosts/{id}/readiness-overrides/{check_id}:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - name: check_id
+        in: path
+        required: true
+        description: "The agent-owned readiness check id, as it appears in the host's readiness report."
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    put:
+      tags: [admin]
+      summary: Launch on this host despite one named failing readiness check (amendment 11, #260). Idempotent.
+      x-required-role: admin
+      responses:
+        "200": { description: The override (existing or new). , content: { application/json: { schema: { $ref: "#/components/schemas/ReadinessOverride" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [admin]
+      summary: Withdraw a readiness override (amendment 11, #260). Idempotent.
+      x-required-role: admin
+      responses:
+        "204": { description: No override remains for this check. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /v1/admin/hosts/{id}/restart:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
