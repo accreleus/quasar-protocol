@@ -469,18 +469,61 @@ sessions should not vanish, that's a fault the control plane logs).
 > never reaches the agent. This contract is therefore **unchanged** by P2-01; the note is
 > recorded only for traceability.
 
-`readiness` *(NEW, first-run-experience §S1, optional, additive)* is the agent's **advisory**
-host-readiness report: an array of `{ id, status, summary, remediation }`, where `id` is a stable
-machine key (e.g. `"nvidia_egl_vendor_json"`), `status` is `"pass" | "fail" | "skip"` (`skip`
-means "not applicable to this host", e.g. an NVIDIA check on an AMD box — never "we could not
-tell"), `summary` is one operator-actionable sentence, and `remediation` is an exact fix command
-(empty for `pass`/`skip`). **The check set is agent-owned** — a consumer must pass an
-unrecognized `status` through rather than reject it, so adding, renaming, or removing a check
+`readiness` *(first-run-experience §S1, optional, additive; **amended by amendment 11, #260 —
+evidence-gated readiness**)* is the agent's host-readiness report: an array of **readiness
+checks** `{ id, status, summary, remediation }` plus three optional fields (below). `id` is a
+stable machine key (e.g. `"nvidia_egl_vendor_json"`); `summary` is one operator-actionable
+sentence; `remediation` is an exact fix command (empty unless the check asks the operator for
+something). **The check set is agent-owned** — a consumer must pass an unrecognized `id`, `status`,
+`source` or `blocks.scope` through rather than reject it, so adding, renaming, or removing a check
 never needs a protocol amendment. Absent ⇒ the control plane keeps its last stored value
 (keep-if-absent, exactly like `effective_settings`); an explicit `[]` is a real overwrite
-("reported, nothing to say"), distinct from "never reported". **ADVISORY ONLY**: a failing check
-MUST NOT affect registration, admission, or scheduling — a host with every check failing still
-registers and still runs sessions. See `readiness.rs`'s probe set and `schema.md` `hosts.readiness`.
+("reported, nothing to say"), distinct from "never reported".
+
+**`status`** is an open string. Known values *(amendment 11 regularises the three the agent
+already sent beyond the original `pass | fail | skip`)*:
+
+| `status` | Meaning |
+|---|---|
+| `pass` | observed and fine |
+| `fail` | observed and not fine; `remediation` says what to do |
+| `warn` | a named risk that is never a failure (a proxy that cannot prove harm) |
+| `skip` | **not applicable to this host** (an NVIDIA check on an AMD box) — never "we could not tell" |
+| `provisioning` | the agent is materialising the thing this check reads (the NVIDIA driver volume) right now |
+| `unknown` | *(amendment 11)* **indeterminate**: a host probe could not be concluded — a deadline passed, a reply was lost, the runtime went away, a launch pre-empted it. `summary` carries the reason. It is neither a failure nor `skip` |
+
+**Optional per-check fields** *(amendment 11, all additive; an agent that predates them omits
+them and nothing changes for it)*:
+
+- **`observed_at`** — RFC3339, when the observation behind this check was **made**, which for a
+  retained host-probe result is earlier than the report that carries it. Absent ⇒ the consumer
+  may assume the report's own time.
+- **`source`** — open string, where the observation came from: `host_probe` (a bounded disposable
+  job exercised the real path), `local` (the agent read its own container or host filesystem),
+  `runtime` (the container runtime answered), `operator` (the operator's own configuration).
+- **`blocks`** — `{ "scope": <string>, "gpu_index": <int, only when scope is "gpu">,
+  "enforced_by": "control_plane" | "agent" }`. **Present only on a check that rests on
+  evidence** — the result of a host probe, or a definitive local observation such as an
+  unreachable container runtime or an unwritable homes root — and it declares what that check
+  blocks **when and only when its `status` is `fail`**. It is present on such a check whatever its
+  current status, so a consumer can mark the checks that *would* block. A proxy check (a file
+  exists, a firewall rule parses) **never carries `blocks`**. Known scopes: `host` (every launch on
+  this host), `homes` (every launch that mounts a managed home), `gpu` (launches placed on the GPU
+  whose `capacity.gpus[].index` equals `gpu_index`). `enforced_by: "agent"` marks the agent's own
+  safety states (container runtime unusable, startup cleanup not yet succeeded): the agent refuses
+  those launches itself and **no readiness override lifts them**. Like every check id, the id of
+  such a check is the agent's to choose; consumers key on `blocks`, never on a particular id.
+
+**What may block (amendment 11, ADR 0005 — this replaces the original "ADVISORY ONLY" rule).**
+Registration is still never affected: a host with every check failing still registers, which is
+what lets the console show why. Admission and scheduling are affected by **exactly one thing**: a
+check that carries `blocks` and whose `status` is `fail` (`control-api.md` "Evidence-gated
+readiness"). Every other check, and every other status of a blocking-capable check — `unknown`
+included — **MUST NOT** affect admission or scheduling. An agent MUST NOT put `blocks` on a proxy
+check. When a host probe is inconclusive the agent keeps reporting that check's **last definitive
+result**, with its original `observed_at`, and may say in `summary` that a later attempt was
+inconclusive; it reports `unknown` only while no definitive result exists for that `id`. Either
+way an indeterminate probe neither sets nor clears a block. See `schema.md` `hosts.readiness`.
 
 ### `heartbeat` — liveness + live utilization
 ```json

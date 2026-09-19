@@ -1036,7 +1036,10 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   `no_host_available` (503,
   *P2-01* — no online host/GPU can serve the request), `capacity_exhausted` (503, *P2-01* — a
   matching GPU is online but its free encode slots / VRAM cannot satisfy the request right now),
-  `internal` (500). **Retryable:** `no_host_available`, `capacity_exhausted`, `rate_limited`
+  `host_not_ready` (503, *amendment 11, #260* — a host/GPU that could otherwise serve the request
+  is online, and the **only** reason none qualified is a failing evidence-based readiness check;
+  the remedy is the host's admin, not the caller),
+  `internal` (500). **Retryable:** `no_host_available`, `capacity_exhausted`, `host_not_ready`, `rate_limited`
   (and `session_quota_exceeded` / `home_in_use` once one of the caller's sessions ends).
   **`home_not_provisioned` is NOT retryable** — retrying reproduces it forever. It is resolved by
   a user *action* (launch the parent app once, so its home exists), which is why the message names
@@ -1112,6 +1115,7 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `GET /v1/hosts`, `GET /v1/hosts/{id}` | **admin** | host/capacity oversight |
 | `POST /v1/hosts/{id}/drain`, `POST /v1/hosts/{id}/uncordon` | **admin** | *(P3-01)* host lifecycle — cordon a host out of service / return it |
 | `DELETE /v1/hosts/{id}` | **admin** | *(admin-delete)* forget an offline host — refuse-if-online-or-in-use |
+| `PUT` / `DELETE /v1/admin/hosts/{id}/readiness-overrides/{check_id}` | **admin** | *(amendment 11, #260)* launch on this host despite one named failing readiness check / withdraw that decision — idempotent; `409` when the check is not an overridable block right now |
 | `GET /v1/apps`, `GET /v1/apps/{id}` | user | the library — **both reads require auth** *(UI-P1: the list was public until 2026-07-27; see the breaking-change amendment. `favourite` is resolved from the bearer identity, so an anonymous read could not answer it anyway)*. **(Phase 2: both are now entitlement-scoped — the list for every role including admin, the single read for non-admins as a `404`. This is not a role gate and produces no `403`; an entitlement is a per-subject grant, not a role. The unfiltered catalogue is `GET /v1/admin/apps`.)** |
 | `GET /v1/sessions/{id}`, `GET /v1/sessions`, `DELETE /v1/sessions/{id}` | **owner or admin** | resource-ownership check (`403` otherwise), not a blanket admin gate |
 | `POST /v1/sessions/{id}/swap` | **owner or admin** | *(P2-02)* same ownership check as `DELETE`. **(Phase 2: additionally `403 forbidden` when the **session owner** is not entitled to the target app — keyed on the owner, never on the caller, so an admin swapping someone else's session cannot launder their own entitlements into it)** |
@@ -3374,6 +3378,12 @@ A `POST /v1/sessions` launch is admitted only if **both** gates pass, evaluated 
      (`SELECT … FOR UPDATE` on the `gpus` row, P1-8 / P2-03) so concurrent launches cannot
      oversubscribe, commits the `sessions` row as `assigned`, and returns `201`.
 
+> **Amendment 11 (#260):** a third sibling, **`503 host_not_ready`**, is returned when an online
+> host/GPU would otherwise have qualified and a failing evidence-based readiness check is the only
+> reason none did — see "Evidence-gated readiness". The readiness filter sits in the shared
+> candidate and recheck filter beside the rules above, **not** in the totals probe, and abstains
+> on a stale or absent report.
+
 Both 503s carry the uniform error body and **no** session row persists. The two conditions are
 kept distinct so the client and the admin UI can tell "nothing is serving" (`no_host_available`
 — operator should check why the agent is offline) from "everything is busy" (`capacity_exhausted`
@@ -3738,10 +3748,14 @@ bearer is `403`, before any host lookup, per §Authorization) and both return th
 > `readiness` value last changed, so the admin UI can show a report as stale rather than silently
 > presenting old evidence as current). Sourced from the agent's `capacity.readiness`
 > (`agent-api.md`), stored opaquely (`schema.md` `hosts.readiness` / `readiness_reported_at`).
-> **ADVISORY WORDING ONLY** — the admin Hosts detail page and the setup wizard render this as
-> guidance; it never gates registration, admission, or scheduling, and no endpoint anywhere
-> refuses a request because a check failed. Canonical schema: `openapi.yaml` `Host` /
-> `ReadinessCheck`.
+> ~~**ADVISORY WORDING ONLY** — it never gates registration, admission, or scheduling, and no
+> endpoint anywhere refuses a request because a check failed.~~ **Superseded by amendment 11
+> (#260, "Evidence-gated readiness" below):** registration is still never gated, and a check
+> without `blocks` is still guidance only, but a check that rests on evidence and fails now
+> excludes the launches it names from admission. `readiness_reported_at` is stamped on **every
+> real report**, not only on a change (the shipped behaviour since migration 0062; the earlier
+> "last changed" wording was wrong), which is what makes it usable as the gate's freshness
+> signal. Canonical schema: `openapi.yaml` `Host` / `ReadinessCheck`.
 
 > **Amendment — platform-release identity, additive (amendment 1, #104/#106).** The host body
 > (`GET /v1/hosts`, `GET /v1/hosts/{id}`, and the host list) gains four fields, **all always
@@ -6474,12 +6488,14 @@ Two new response fields on every item:
   |---|---|
   | action ends `.failed`, or contains `error` | `err` |
   | action ends `.deleted`, `.delete`, `.revoked`, `.disabled` | `warn` |
-  | action is `host.drain`, `session.stop`, or `storage.home.tombstone` | `warn` |
+  | action is `host.drain`, `session.stop`, `storage.home.tombstone`, or *(amendment 11)* `host.readiness_override.set` | `warn` |
   | anything else | `info` |
 
-  The three named exceptions are the destructive-but-not-suffix-marked actions: draining a
+  The named exceptions are the destructive-but-not-suffix-marked actions: draining a
   host, force-stopping someone's session, and tombstoning a home all take something away from
-  a user. A new action needs no contract change — it lands as `info` unless it matches a rule.
+  a user — and, since amendment 11, setting a readiness override, which makes a host launch
+  against evidence that says it should not. A new action needs no contract change — it lands as
+  `info` unless it matches a rule.
 
 ```
 GET /v1/admin/activity?action=user.&since=2026-08-01T00:00:00Z&q=devon
@@ -7906,3 +7922,175 @@ reliably enforce source-off consumption.
 
 Canonical field shapes and nullability are defined in `openapi.yaml`. This
 extension introduces no new endpoint and changes no session or discovery contract.
+
+## Evidence-gated readiness — what may block a launch, `host_not_ready`, readiness overrides (amendment 11, #260, requires sign-off)
+
+> **Amendment 11 (#260, under #210/#211; decision record: `quasar` ADR 0005 "only evidence gates a
+> launch").** This is **not purely additive**: it withdraws one sentence the contract used to
+> state absolutely — that host readiness *never* gates admission or scheduling. Everything else
+> is additive: **three optional fields and one status** on a readiness check (`agent-api.md`
+> `readiness`), **two always-serialized fields on the host body** (`readiness_gate`,
+> `readiness_overrides`), **one retryable launch refusal** (`503 host_not_ready`), and **two
+> admin-gated routes** (the readiness override). Persisted by migration **0085** (`schema.md`).
+> A host whose agent predates this amendment sends no `blocks`, so nothing about it can block and
+> its behaviour is exactly what it was.
+
+### The rule
+
+Registration is never gated: a host with every check failing still registers, because that is
+what lets the console say why. A launch is affected by readiness in exactly one way:
+
+> **A readiness check blocks only when it carries `blocks` and its `status` is `fail`.**
+
+`blocks` is put there by the agent only on a check that rests on **evidence** — a host probe that
+exercised the real path, or a definitive local observation (container runtime unreachable, homes
+root unwritable). A **proxy** check (a file exists, a firewall rule parses) never carries it, so it
+can never block, for the reason the original rule gave: refusing sessions on a false negative is
+worse than a red card. `warn`, `skip`, `provisioning`, `unknown` and any unrecognized status never
+block, whatever else the check carries. An unrecognized `blocks.scope` never blocks.
+
+| `blocks.scope` | What a failing check excludes from admission |
+|---|---|
+| `host` | every launch on the host |
+| `homes` | every launch on the host that would mount a managed home |
+| `gpu` | every launch that would be placed on the host's GPU whose index is `blocks.gpu_index` |
+
+### The gate
+
+The verdict is computed by the control plane **once per stored readiness report and once per
+override change**, by a pure function of (the report, the host's overrides), and persisted as
+derived scheduling columns (`schema.md`). Admission's **candidate and recheck** queries read those
+columns through the one filter they already share, beside the live free-VRAM veto, so a pick and
+its recheck cannot disagree. The filter is deliberately **not** part of the totals probe, which
+stays the "would anything have qualified on capacity alone" question — the same arrangement as
+the free-VRAM veto, and what makes `host_not_ready` distinguishable (below).
+
+Several failing checks may name the same scope. The derived columns collapse them: a scope stays
+blocked until **every** unoverridden failing check naming it is gone, so overriding one of two
+failing `host` checks changes `overridden` on that entry and nothing else.
+
+**The gate abstains — nothing is excluded — when** the host has never reported readiness, or its
+`readiness_reported_at` is older than the staleness window (implementation-defined, default
+**60 s**, four missed 15-second reports; the control plane's knob is
+`QUASAR_READINESS_STALE_SECS`). It fails open exactly as the free-VRAM veto does: a host that has
+gone quiet is already excluded by not being `online`, and stale evidence must not strand a fleet.
+`readiness_reported_at` is stamped on every real report, which is what makes this well-defined.
+
+- **Freshness is the report's age, never a check's `observed_at`.** A retained definitive `fail`
+  keeps blocking for as long as the agent keeps reporting it, however old its `observed_at` —
+  by design, since an indeterminate probe never clears a block. `observed_at` is provenance for
+  the console only.
+- A `capacity` message that **omits** `readiness` is keep-if-absent and does **not** refresh
+  `readiness_reported_at`, so an agent that stops sending readiness drifts to `abstaining` after
+  the window while staying online. That is the intended fail-open.
+- An explicit **`[]`** is a real, fresh report: the gate is `active`, nothing blocks, every stored
+  override becomes `inert`, and nothing lapses.
+
+A check with `enforced_by: "agent"` is excluded from placement like any other block, so a launch
+is refused cleanly instead of failing on the host — but the agent refuses those launches itself
+regardless, and no override lifts them.
+
+### `503 host_not_ready` — retryable
+
+Returned by `POST /v1/sessions` when **the candidate query finds nothing, and the same query with
+only the readiness filter removed would have found a GPU** — readiness is then the sole reason
+the launch cannot be placed. It is diagnosed by a second query in the position of the free-VRAM
+veto's diagnostic, never by the totals probe. In every other case the existing classification
+stands unchanged: nothing online or nothing that could ever serve the request is
+`no_host_available`; a ready host that is full, or vetoed on VRAM, is `capacity_exhausted` — also
+when some *other* host is blocked by readiness, because the caller's remedy is then still to
+retry. Uniform error body, no session row persists, same `503` rationale as its two siblings, and
+**no `Retry-After`**: the condition clears when an admin acts, not on a timer.
+
+**Swap is not readiness-gated.** `POST /v1/sessions/{id}/swap` places nothing — it reuses the
+running session's host — and the gate is a placement filter. A swap on a host whose gate blocks
+is allowed and never returns `host_not_ready`; the agent's own `enforced_by: "agent"` safety
+states still refuse at the host. The message tells a user the host needs its
+administrator's attention and **never names a check** — check detail is admin-only and lives on the
+host body. It is retryable because the condition clears without any change to the request.
+
+### Host body additions — both always serialized
+
+`GET /v1/hosts`, `GET /v1/hosts/{id}` and the host list gain:
+
+```json
+"readiness_gate": {
+  "state": "active",
+  "blocking": [
+    { "check_id": "media_probe_gpu0", "scope": "gpu", "gpu_index": 0,
+      "enforced_by": "control_plane", "overridden": false }
+  ]
+},
+"readiness_overrides": [
+  { "check_id": "audio_probe", "created_by": "<uuid|null>", "created_by_username": "alice",
+    "created_at": "2026-09-19T10:00:00Z", "inert": false }
+]
+```
+
+- **`readiness_gate.state`** — `active` (the gate is reading this host's report) or `abstaining`
+  (never reported, or stale). Open string.
+- **`readiness_gate.blocking`** — one entry per check that currently carries `blocks` with status
+  `fail`, **including overridden ones** (`overridden: true` means it is excluded from the verdict;
+  it is listed so the console never hides a failing check behind an override). `gpu_index` is
+  `null` unless `scope` is `gpu`. Empty array when nothing blocks. Computed at read time by the
+  same function that writes the scheduling columns. It is populated from the stored report
+  **whatever `state` is**: while `abstaining` the entries are facts for the console and nothing is
+  excluded from admission. (Named `blocking`, an array, so it is not confused with a check's own
+  `blocks` object.)
+- **`readiness_overrides`** — every override stored for the host. `inert: true` means the host's
+  current report has no check with that `check_id` (check ids are agent-owned and may be renamed):
+  the override excludes nothing and is shown so an admin can withdraw it. `created_by_username`
+  follows the invites / host-enrolment precedent: resolved by a join at read time, and `null`
+  together with `created_by` once the user row is gone.
+
+The per-check optional fields (`observed_at`, `source`, `blocks`) reach the console inside
+`readiness[]` unchanged — the control plane stores and serves the agent's report verbatim, as
+before.
+
+### Readiness override — admin
+
+An admin's recorded decision to launch on one host despite **one named failing check**. It never
+hides the check, applies to that `check_id` on that host only, and ends when the check next passes.
+
+`PUT /v1/admin/hosts/{id}/readiness-overrides/{check_id}` — no body. **`200`** with the override
+object (the shape above), idempotent: repeating it returns the existing override and writes no
+second audit row. **`404`** unknown host. **`409 conflict`** when the host's current report has no
+check with that id carrying `blocks` and status `fail`, or when that check's
+`enforced_by` is `agent` — an override that would exclude nothing, or that the agent would ignore,
+is refused rather than stored. The message says which. **`400 validation_failed`** for a
+malformed `check_id`: it is one URL path segment, percent-decoded once, 1–128 bytes, characters
+`[A-Za-z0-9._:-]` only. Check ids are agent-owned and an agent may report one outside that set;
+it is stored and rendered like any other, it simply cannot be overridden.
+
+The `PUT` and the `DELETE` lock the host row, re-read its stored `readiness`, evaluate the
+precondition, write, and **recompute the verdict in the same transaction** — the same transaction
+shape as storing a readiness report, so an override and a report serialise and the derived
+columns can never be left describing the state before either.
+
+`DELETE /v1/admin/hosts/{id}/readiness-overrides/{check_id}` — **`204`**, idempotent (`204` when
+none exists). **`404`** unknown host.
+
+**Lapse.** When a stored report shows an overridden `check_id` with status `pass`, the control
+plane deletes that override in the same transaction that recomputes the verdict, so an override
+cannot mask a later regression. `unknown`, `warn`, `skip` and a vanished id do **not** lapse it
+(the first three are not a pass; the last is `inert`).
+
+**Audit.** `host.readiness_override.set` (severity `warn` — see the severity table: it makes a
+host launch against evidence that says it should not), `host.readiness_override.cleared` (an
+admin's `DELETE` that removed a row) and `host.readiness_override.lapsed` (actor null — the
+system); the last two restore the default and stay `info`. Each carries `node_name` and
+`check_id` in `detail`. An idempotent repeat writes no row.
+
+**Authorization** is the standing rule: `RequireAuth → RequireAdmin` at route registration; a
+non-admin bearer is `403` before any lookup.
+
+### What does not change
+
+Release **preflight** (amendment 9) keeps reading `hosts.readiness` exactly as before. It already
+maps an unrecognized status to its own `unknown` and never blocks on it, so the new `unknown`
+status needs no change there, and `PreflightCheckId` stays closed and untouched. (Preflight's
+`unknown` means "not reported / cannot tell from here"; a readiness check's `unknown` means "a
+host probe was inconclusive". They are separate vocabularies that agree on the one thing that
+matters: neither blocks.) Cordon/drain
+stays a separate, operator-driven axis. Host readiness remains **host-local**: no readiness check
+claims that a browser can reach the host, and nothing here is evidence of it.
