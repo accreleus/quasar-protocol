@@ -986,6 +986,25 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > or required-field change, so `TestOpenAPIDrift` sees nothing move — which is correct, and is the
 > known limit of that gate rather than a gap in this amendment).
 
+> **Amendment 12 — per-GPU codec sets and codec-aware placement (#296), additive, requires
+> sign-off (pre-authorised by the operator 2026-09-22).** The agent now reports a codec set per
+> GPU (`agent-api.md` `capacity.gpus[].codecs`), and placement uses it, so a session is only ever
+> placed on a GPU that can encode the codec it gets: **`sessions.codec` is always in the placed
+> GPU's codec set.** **Additive in shape** — one nullable field on `GPUAvailability`
+> (`GET /v1/hosts/{id}/gpus`); `LaunchRequest`, `Session` and `Error` are unchanged, no route is
+> added, and no error code is introduced. **The meaning changes are called out where they live:**
+> "Rung resolution" drops *"placement is deliberately codec-blind"* — an explicit `stream.codec`
+> is now a **codec constraint** applied at placement as a candidacy gate, an Auto launch carries a
+> **codec preference** that orders candidate GPUs, and the rung resolves after placement against
+> the **placed GPU's** codec set; an explicit codec no free capable GPU can take is
+> `503 capacity_exhausted`, one no online capable GPU can take is `503 no_host_available`, and the
+> `409 conflict` arm leaves the launch path. "Admission control" and "Codec resolution" are
+> reworded to match, and `GET /v1/me/profiles` computes `host_encoder_not_supported` over GPU
+> sets. **Backward compatible:** a GPU whose agent reports no per-GPU set inherits the host's
+> `codecs`, so a fleet of older agents places and resolves exactly as before; an older control
+> plane ignores the per-GPU field and keeps reading the host-level `capacity.codecs`, which is now
+> the union over usable GPUs. Persisted by migration **0086** (`schema.md` `gpus.codecs`).
+
 ## Conventions
 - Base path **`/v1`**. JSON request and response bodies; `Content-Type: application/json`.
 - TLS in deployment (architecture: control plane is the public ingress). The web client derives
@@ -3114,16 +3133,34 @@ fps and bitrate, and **`stream` is always the truth** for a live session.
 > when the only thing that varied was the codec.*
 
 The launch walks the resolved launch profile's **rungs**, in `position` order, and takes the first
-that survives every clamp. Placement is deliberately **codec-blind**: the scheduler does not filter
-hosts by rung, the session is admitted against the **top rung** (the highest-demand one, so
-admission can never admit what it would have refused), and the rung resolves **after** placement,
-where the host is known. The resolved rung is then written back in the single post-schedule stream
-update the certification cap already performs.
+that survives every clamp. The scheduler does not filter by rung: the session is admitted against
+the **top rung** (the highest-demand one, so admission can never admit what it would have refused),
+and the rung resolves **after** placement, where the host and GPU are known. The resolved rung is
+then written back in the single post-schedule stream update the certification cap already performs.
+
+*(amendment 12, #296)* Placement is **codec-aware**, in two grades, and the GPU is still chosen
+before the rung:
+
+- **Codec constraint.** An explicit `stream.codec` (the launch panel sends it when the user picks a
+  codec by hand; admin and diagnostic callers send it as before) is a **candidacy gate**: only a GPU
+  whose codec set contains that codec is a candidate, in the pick, the re-check and the refusal
+  diagnosis alike (§Admission control). Nothing is downgraded to another codec.
+- **Codec preference.** A launch without `stream.codec` (Auto) carries the distinct wire codecs of
+  the chain's rungs, in chain order, that survive the client-side clamps (2/3 and 4). It **orders**
+  candidate GPUs — a GPU that can encode an earlier codec ranks first — and never excludes one. A
+  legacy/tier launch has no chain and therefore no preference.
+- A GPU's **codec set** is `agent-api.md` `capacity.gpus[].codecs`; a GPU that reported none
+  inherits its host's `capacity.codecs`, and a host that reported none is h264-only.
+
+> **Amendment 12 withdraws** the sentence *"Placement is deliberately codec-blind: the scheduler
+> does not filter hosts by rung"*. What survives of it is that the scheduler does not filter by
+> rung; what changes is that it applies the codec constraint and ranks by the codec preference,
+> and that clamps 0 and 1 below read the placed GPU's codec set instead of the host's.
 
 | # | clamp | rule |
 |---|---|---|
-| 0 | admin/diagnostic `stream.codec` override | selects the first rung with that codec; no such rung ⇒ `400 validation_failed`; host cannot encode it ⇒ `409 conflict` (unchanged: host encoder capability is physics) |
-| 1 | host encoder set | reject a rung whose codec is not in the placed host's reported wire codec set (`agent-api.md` `capacity.codecs`; an agent reporting nothing is h264-only) |
+| 0 | explicit `stream.codec` *(amendment 12: sent by the launch panel for a hand-picked codec, and by admin/diagnostic callers)* | selects the first rung with that codec. No such rung ⇒ `400 validation_failed` (unchanged). Because the codec is a placement gate, the placed GPU can always encode it; the refusals move to placement: a capable GPU exists but none is free (slots, VRAM veto) ⇒ **`503 capacity_exhausted`**; no online usable GPU can encode it ⇒ **`503 no_host_available`**; both messages name the codec. *(amendment 12: the former "host cannot encode it ⇒ `409 conflict`" arm is removed from the launch path; `409` for that condition survives only on the certification bench)* |
+| 1 | GPU encoder set *(amendment 12; was "host encoder set")* | reject a rung whose codec is not in the **placed GPU's** codec set (`agent-api.md` `capacity.gpus[].codecs`; a GPU reporting none inherits the host's `capacity.codecs`; a host reporting nothing is h264-only). The reason string stays `host_encoder` (§Codec decision) |
 | 2/3 | client decode probe | reject a rung whose codec is hard-gated and unproven (`h265`/`av1` need an explicit `true`; a stale or absent probe means no). **Additionally** reject a rung whose `min_decode_height` exceeds the probe's measured decode height — new, because a rung now carries its own resolution |
 | 4 | decode-failure history | reject a rung this (user, device) previously failed to decode. **Keyed by rung id** for rows written from UI-P4 onward; a pre-UI-P4 row keyed `(launch profile, codec)` bans every rung of that launch profile using that codec, which is exactly its old meaning |
 | 5 | hardware encoder | reject a rung with `hardware_encoder_required` when the placed host has no hardware encoder. Explicit as a clamp for the first time: it was previously only an eligibility input, where host capability is usually unknown |
@@ -3190,7 +3227,9 @@ codec: it answers the single video codec the host offers. Resolution is, in orde
 - **candidates** = the selected profile's `codecs` with status `launchable`, in catalog preference
   order (an `auto` launch with no profile, or a legacy/tier launch, has a single candidate: h264);
 - **clamp 1, host encoder** = the placed host's reported wire `codecs` set (`agent-api.md`
-  `capacity.codecs`; an old agent reporting nothing is h264-only);
+  `capacity.codecs`; an old agent reporting nothing is h264-only); *(amendment 12, #296)* now the
+  **placed GPU's** codec set (`capacity.gpus[].codecs`, inheriting the host's `codecs` when the GPU
+  reported none), as in §Rung resolution clamp 1;
 - **clamp 2/3, client decode** = the launching device's capability probe
   (`user_devices.capabilities.codecs`, `POST /v1/me/devices`): h265 and av1 are **hard-gated** on a
   proven `true` (a stale/absent probe resolves to the h264 floor, because sending an undecodable
@@ -3202,7 +3241,8 @@ codec: it answers the single video codec the host offers. Resolution is, in orde
   launchable in every profile and decodable by every browser, so a session can never fail to resolve
   a codec, the same silent-downgrade-to-H.264 posture as Sunshine/Moonlight).
 
-**Admin/diagnostic override.** `POST /v1/sessions` accepts an optional `stream.codec` (validated
+**Admin/diagnostic override** *(amendment 12, #296: the explicit codec — the launch panel also
+sends it for a hand-picked codec)*. `POST /v1/sessions` accepts an optional `stream.codec` (validated
 against `h264|h265|av1`; a bad value ⇒ `400 validation_failed`). It is **orthogonal** to the
 `stream.*` resolution envelope: a codec-only override does **not** bypass the profile eligibility
 gate (unlike the other `stream.*` fields). It forces a concrete codec, bypassing clamps 2/3
@@ -3211,7 +3251,11 @@ exactly the forced re-test path by which a
 previously-failed codec on a since-fixed encoder gets a fresh trial, whose sustained smooth run
 records the clearing pass. It does **not** bypass clamp 1: forcing a codec the placed host
 cannot encode returns **`409 conflict`** and no session persists (host encoder capability is
-physics). Authorization is unchanged: codec resolution is server-side and the override is honoured
+physics). *(amendment 12, #296 — superseded: the explicit `stream.codec` is now a codec
+constraint applied at placement, so the session is only ever placed on a GPU that can encode it
+and clamp 1 cannot reject it. No free capable GPU ⇒ `503 capacity_exhausted`; no online capable
+GPU ⇒ `503 no_host_available`; the `409 conflict` arm leaves the launch path and survives only on
+the certification bench. See §Rung resolution clamp 0.)* Authorization is unchanged: codec resolution is server-side and the override is honoured
 per the caller's role exactly like the other `stream.*` overrides; the codec field is never a
 client-asserted capability or an access-control input.
 
@@ -3331,7 +3375,7 @@ A `POST /v1/sessions` launch is admitted only if **both** gates pass, evaluated 
 2. **Per-GPU capacity (the governor).** The request's resource ask comes from the app row —
    `requested_encode_slots = apps.default_encode_slots` (clients never set this; the `stream`
    block carries resolution/bitrate, not resource reservations). A GPU admits the launch iff
-   **both** of the following hold, with availability derived per `schema.md` §gpus
+   **each** of the following holds *(amendment 12 adds (c); it was "both")*, with availability derived per `schema.md` §gpus
    (`total − Σ reservations of sessions in {assigned, starting, running, stopping}`):
 
    **(a) The encode-slot reservation.** This is the real budget and the only race-safe one:
@@ -3356,6 +3400,14 @@ A `POST /v1/sessions` launch is admitted only if **both** gates pass, evaluated 
    never reduce availability**: an agent whose sampler breaks cannot be allowed to strangle its
    own host.
 
+   **(c) The codec constraint** *(amendment 12, #296)*. When the launch carries an explicit
+   `stream.codec`, a GPU whose codec set (`agent-api.md` `capacity.gpus[].codecs`, inheriting the
+   host's `capacity.codecs` when the GPU reported none; h264-only when neither did) does not contain
+   that codec is not a candidate. Unlike (b) it is a statement about the GPU's capability, not its
+   load, so it applies to the **totals probe** as well as to the candidate and recheck queries: the
+   pick, the recheck and the refusal diagnosis all see the same candidate set, as they do for the
+   host pin and the image gate. A launch without `stream.codec` has no constraint.
+
    > **Declared per-app VRAM is no longer part of admission.** `apps.default_vram_mb` and
    > `sessions.reserved_vram_mb` are **deprecated** (`schema.md`). The API still accepts
    > `default_vram_mb` on app write and it is still returned on read, but it no longer influences
@@ -3364,8 +3416,9 @@ A `POST /v1/sessions` launch is admitted only if **both** gates pass, evaluated 
    > could silently oversubscribe.
 
    - If **no online host** has any GPU that could serve the request — no host is `online`, or none
-     has a GPU whose **encode-slot totals** could ever satisfy the ask — reject with
-     **`503 no_host_available`**. This is the "fleet is empty/down" condition; it is distinct from
+     has a GPU whose **encode-slot totals** could ever satisfy the ask *(amendment 12: or none has
+     such a GPU that can encode the constrained codec — the message then names the codec)* —
+     reject with **`503 no_host_available`**. This is the "fleet is empty/down" condition; it is distinct from
      "full". Note the VRAM floor is deliberately *not* part of this test: a GPU whose total is at
      or below the floor is abstained from the veto and is therefore servable, so counting the
      floor here would report a merely-busy host as one the fleet can never serve.
@@ -3373,10 +3426,20 @@ A `POST /v1/sessions` launch is admitted only if **both** gates pass, evaluated 
      **available** slots, or none currently shows enough **free VRAM**, reject with
      **`503 capacity_exhausted`**. This is the "up but full right now" condition; it is
      **retryable** — a later launch may succeed once an active session ends, or once memory is
-     released and the next sample reflects it.
+     released and the next sample reflects it. *(amendment 12: with a codec constraint, "candidate"
+     means a GPU that can encode the codec, so an explicit codec whose capable GPUs are all busy is
+     `capacity_exhausted` — the message names the codec — and is never placed on a GPU that cannot
+     encode it.)*
    - Otherwise the scheduler picks a satisfying GPU and reserves transactionally
      (`SELECT … FOR UPDATE` on the `gpus` row, P1-8 / P2-03) so concurrent launches cannot
      oversubscribe, commits the `sessions` row as `assigned`, and returns `201`.
+     *(amendment 12, #296)* Among satisfying GPUs, a launch without `stream.codec` is ordered by
+     its **codec preference** (§Rung resolution): a GPU that can encode an earlier codec in the
+     preference ranks ahead of one that can only encode a later one. The key sits **after** the
+     home-locality preference (a home on another host is a different install and wins) and
+     **before** the load-spread policy, so a free GPU that can give the client its preferred codec
+     is chosen over a less loaded GPU that cannot. An empty preference orders nothing. The
+     preference is a sort key only — it never excludes a GPU, and the recheck does not apply it.
 
 > **Amendment 11 (#260):** a third sibling, **`503 host_not_ready`**, is returned when an online
 > host/GPU would otherwise have qualified and a failing evidence-based readiness check is the only
@@ -4128,6 +4191,15 @@ probe it is the conservative default (`1080p60`) and `confidence` is `low`.
   `display_refresh_too_low` is advisory: a measured display below 98% of a profile's
   nominal frame rate makes that profile risky and prevents recommendation, but does not
   make an otherwise eligible profile unlaunchable.
+- *(amendment 12, #296)* **`host_encoder_not_supported` is computed over GPU codec sets.** A codec
+  is host-encodable for this caller when some GPU that could take the caller's launch has it in its
+  codec set (`agent-api.md` `capacity.gpus[].codecs`, inheriting the host's `capacity.codecs` when
+  the GPU reported none) — the union of GPU codec sets over the GPUs that pass the launch's
+  candidacy without the free-slot term (a busy GPU still counts), with the host pin for a derived
+  tile and the image gate as before, and **the readiness gate applied**, so a codec only a
+  readiness-blocked GPU offers is not offered. It was the union of host codec sets over candidate
+  hosts. The reason vocabulary is unchanged, and a non-admin still sees only the reason, never a
+  host or GPU.
 - Debug/internal profiles (`720p30`) are **never** returned.
 
 #### What this endpoint returns after UI-P4 *(BREAKING — read this before the shape above)*
