@@ -190,6 +190,22 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > dropping the caps would launch at rungs the host may not sustain. See §`capacity` and `schema.md`
 > `gpus` / `host_encoder_certification` (migration 0078).
 
+> **Amendment 12 — per-GPU codec sets (#296), additive, requires sign-off (pre-authorised by the
+> operator 2026-09-22).** Adds ONE optional, additive field to the agent `capacity` report:
+> **`gpus[].codecs`** — the wire codec set that one GPU has been shown to encode. A host
+> advertised one codec set for all its GPUs, so on a host whose GPUs differ (a discrete card that
+> encodes AV1 beside an iGPU whose video engine does not), or on a single GPU whose Vulkan encoder
+> element registers for a codec the device cannot run, a session could be placed on a GPU that
+> cannot encode the codec it was resolved to, and it failed at pipeline start. **Additive in
+> shape**; three meanings are sharpened and called out where they live: `capacity.codecs` becomes
+> the union of `gpus[].codecs` over GPUs with `encode_slots_total > 0`; a codec probe readiness
+> check never carries `blocks`; and the `session_assign` `stream.codec` guarantee narrows from the
+> host's set to the assigned GPU's. **Backward compatible both ways:** a GPU that reports no
+> `codecs` (an older agent) is read as inheriting the host's `codecs`, and an older control plane
+> reads the host-level `capacity.codecs` exactly as before — its meaning, the union over usable
+> GPUs, is at least as true as it was. See §`capacity`, §`session_assign`, `control-api.md`
+> "Rung resolution" / "Admission control", and `schema.md` `gpus.codecs` (migration 0086).
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -339,7 +355,8 @@ the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
     { "index": 0, "vendor": "amd", "model": "Radeon Pro V520",
       "vram_mb_total": 16384, "encode_slots_total": 2,
       "render_node": "/dev/dri/by-path/pci-0000:04:00.0-render",
-      "driver_identity": "vk:radv:Mesa 25.3.6" }
+      "driver_identity": "vk:radv:Mesa 25.3.6",
+      "codecs": ["h264", "h265"] }
   ],
   "console_capabilities": {
     "connectors": ["DP-4", "HDMI-A-1"],
@@ -386,8 +403,14 @@ the agent's env): the control plane stores the latest map and returns it as `eff
 **latched** (the values the process is actually using), so a pending-restart discrepancy is
 visible by comparing `effective` against `resolved`. Absent ⇒ `effective` is null.
 
-`codecs` *(NEW, multi-codec, optional, additive)* is the **wire** codec set the host's active
-encoder path can produce: a subset of `["h264", "h265", "av1"]` (`h265` is HEVC on the wire; the
+`codecs` *(NEW, multi-codec, optional, additive; **reworded by amendment 12, #296**)* is the
+**host codec set**: the union of `gpus[].codecs` over the GPUs with `encode_slots_total > 0` (a
+render-node pin reports every other GPU with zero slots, so a pinned host's set is its one GPU's).
+Its shape and its absent-rule are unchanged, so an older control plane reads the same field with a
+meaning at least as true as before. *(Before amendment 12 it was "the **wire** codec set the host's
+active encoder path can produce"; the rest of this paragraph is that original definition, and
+still describes what the agent requires before it will put a codec into any GPU's set.)* It is a subset
+of `["h264", "h265", "av1"]` (`h265` is HEVC on the wire; the
 control-plane profile catalog's `hevc` maps to it in one place in the Go code). A codec is reported
 only when both its encoder element is registered for the agent's active `EncoderChoice` (or, for the
 Vulkan encoder configured with AV1, its per-session vendor-encoder fallback) AND its RTP payloader
@@ -455,6 +478,22 @@ matches every stored measurement, which is also what every row written before mi
 does. Like `render_node`, it is replaced wholesale with the `gpus` set, so a report that stops
 carrying one clears the stored value rather than keeping a fingerprint of software nothing is
 running.
+
+`gpus[].codecs` *(NEW, amendment 12, #296, optional, additive)* — the **GPU codec set**: the wire
+codecs this GPU can encode, a subset of `["h264", "h265", "av1"]` in the same vocabulary as the
+host-level `codecs`. A *usable* GPU is one with `encode_slots_total > 0`. `h264` is always present on a usable GPU; it is the floor. A GPU with zero slots (a render-node pin reports every other GPU that way) may omit `codecs` or report `[]`; the control plane never places on it and the host-level union ignores it. A codec above the
+floor appears **only after a passing codec probe on this GPU** — a host probe that runs the media
+probe on this GPU for that codec — so an unknown result is not advertised, and after an agent
+restart a GPU reports `["h264"]` until its codec probes have run. The agent derives the set under
+the host's one encoder choice, from what the registry can build on this GPU's render node, minus
+any driver-compatibility exclusion that applies to this GPU, minus every codec without a passing
+probe. **Absent ⇒ the control plane reads this GPU's set as the host's `codecs`** (the
+legacy-agent path; an older agent reports no per-GPU set and behaves exactly as before). Like
+`render_node` and `driver_identity` it is replaced wholesale with the `gpus` set, so a GPU whose
+report omits it stores NULL and inherits, and no keep-if-absent rule of its own applies. The
+host-level `codecs` above is the union of this field over the GPUs with `encode_slots_total > 0`.
+The agent re-sends `capacity` whenever a codec probe changes a GPU's set, rather than waiting for
+the next periodic report. `codec_throughput` stays host-level.
 
 `encode_slots_total` is the concurrent encode-session cap (the NVENC/VCN limit — architecture
 §"Resource governance"). At N=1 this is one GPU with generous slots; the field is mandatory so
@@ -524,6 +563,14 @@ check. When a host probe is inconclusive the agent keeps reporting that check's 
 result**, with its original `observed_at`, and may say in `summary` that a later attempt was
 inconclusive; it reports `unknown` only while no definitive result exists for that `id`. Either
 way an indeterminate probe neither sets nor clears a block. See `schema.md` `hosts.readiness`.
+
+**Codec probe checks never block (amendment 12, #296).** A codec probe — the media probe run on
+one GPU for one codec above the H.264 floor — reports as a readiness check with an agent-owned id
+(today `media_probe_gpu<N>_<codec>`; consumers key on fields, never on the id, as for every
+check), carrying `source: host_probe` and `observed_at`, and **never `blocks`**. Its effect is on
+`capacity.gpus[].codecs`, not on admission: a failed codec probe removes that codec from that
+GPU's set and blocks nothing. No `blocks` scope is added for it; the `blocks` vocabulary above is
+unchanged. This sentence exists so a `codec` scope is not added later without a decision.
 
 ### `heartbeat` — liveness + live utilization
 ```json
@@ -1168,6 +1215,12 @@ capability but does not by itself mirror ordinary browser sessions to a physical
 > already clamped against the host's `codecs` set. Omitted (legacy/tier launch, or an older control
 > plane) ⇒ H.264, so every pre-multi-codec session and older agent is unaffected. Additive; no
 > existing field or shape changes.
+>
+> *(amendment 12, #296 — the guarantee narrows to the assigned GPU)* The control plane sends only
+> a `codec` in the **assigned GPU's** codec set — `capacity.gpus[gpu_index].codecs`, or the host's
+> `codecs` when that GPU reported none — not merely one in the host's union. The agent's
+> `ack{ok:false}` for a codec it cannot encode on that GPU is unchanged, and remains the check
+> behind the control plane's own. No shape changes.
 
 > *(microphone capture, additive, 2026-08-02)* The `stream` block may also carry an optional
 > **`mic`: bool** (omitted ⇒ `false`). When `true`, the agent adds a `recvonly` Opus
