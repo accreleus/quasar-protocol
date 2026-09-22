@@ -8147,8 +8147,8 @@ none exists). **`404`** unknown host.
 
 **Lapse.** When a stored report shows an overridden `check_id` with status `pass`, the control
 plane deletes that override in the same transaction that recomputes the verdict, so an override
-cannot mask a later regression. `unknown`, `warn`, `skip` and a vanished id do **not** lapse it
-(the first three are not a pass; the last is `inert`).
+cannot mask a later regression. `unknown`, `warn`, `skip`, `unsupported` *(amendment 12 addendum,
+#311)* and a vanished id do **not** lapse it (the first four are not a pass; the last is `inert`).
 
 **Audit.** `host.readiness_override.set` (severity `warn` — see the severity table: it makes a
 host launch against evidence that says it should not), `host.readiness_override.cleared` (an
