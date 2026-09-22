@@ -4701,7 +4701,7 @@ components:
             fps: { type: integer }
             bitrate_kbps: { type: integer }
             h264_profile: { $ref: "#/components/schemas/H264Profile" }
-            codec: { allOf: [ { $ref: "#/components/schemas/Codec" } ], description: "Multi-codec: optional admin/diagnostic codec override. Orthogonal to the resolution envelope (a codec-only override does not bypass the eligibility gate). Bypasses the device-decode and failure-history clamps (forced re-test path) but not the host-encoder clamp (409 conflict if the placed host cannot encode it)." }
+            codec: { allOf: [ { $ref: "#/components/schemas/Codec" } ], description: "Multi-codec: optional admin/diagnostic codec override. Orthogonal to the resolution envelope (a codec-only override does not bypass the eligibility gate). Bypasses the device-decode and failure-history clamps (forced re-test path) but not the host-encoder clamp. Amendment 12 (#296): the explicit codec is a codec constraint applied at placement, so the session is placed only on a GPU that can encode it; no free capable GPU is 503 capacity_exhausted, no online capable GPU is 503 no_host_available (formerly 409 conflict if the placed host could not encode it)." }
     LaunchResponse:
       type: object
       required: [session, signaling]

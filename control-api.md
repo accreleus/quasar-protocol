@@ -3334,7 +3334,7 @@ and echoed on **every** session body.
 | outcome | how it reads |
 |---|---|
 | **won on merit** | `selected: true`, `rejected_by: null`, `clamps_bypassed: false`, `floor: false`, `override: null` — it was measured against every clamp and survived |
-| **operator override** (clamp 0) | `override` names the forced codec and the selected rung has `clamps_bypassed: true` with `rejected_by: null`. It **skipped** clamps 2/3, 4, 5 and 6 rather than surviving them — clamp 1 is the only one an override honours, so a `rejected_by: "host_encoder"` here is the `409` path and no session persists |
+| **operator override** (clamp 0) | `override` names the forced codec and the selected rung has `clamps_bypassed: true` with `rejected_by: null`. It **skipped** clamps 2/3, 4, 5 and 6 rather than surviving them — clamp 1 is the only one an override honours, and *(amendment 12, #296)* since the explicit codec is a placement gate the placed GPU can always encode it, so a `rejected_by: "host_encoder"` here is an invariant breach, not a launch outcome (formerly the `409` path; no session persists) |
 | **the floor** | `floor: true`, and the selected rung is `clamps_bypassed: true` **while still carrying the `rejected_by` that killed it during the walk**. That pairing is the point: the terminal rung was dispatched *despite* being rejected. Recording it as an unqualified pass would misinform an operator about a session that is, for example, running a codec this device has already failed to decode |
 
 `floor` and `clamps_bypassed` answer different questions — "did anything survive?" versus "was
