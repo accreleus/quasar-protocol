@@ -205,6 +205,12 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > reads the host-level `capacity.codecs` exactly as before — its meaning, the union over usable
 > GPUs, is at least as true as it was. See §`capacity`, §`session_assign`, `control-api.md`
 > "Rung resolution" / "Admission control", and `schema.md` `gpus.codecs` (migration 0086).
+>
+> *Addendum (#311, signed off by the operator 2026-09-22):* readiness `status` gains the known
+> value `unsupported` — observed, the hardware does not provide the capability; not a fault,
+> definitive, never blocks, never presented as needing attention. A codec probe reports it when
+> the GPU cannot open that codec's encoder at all. Additive: `status` was always an open string
+> that consumers pass through. See §`readiness`.
 
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
@@ -530,6 +536,7 @@ already sent beyond the original `pass | fail | skip`)*:
 | `skip` | **not applicable to this host** (an NVIDIA check on an AMD box) — never "we could not tell" |
 | `provisioning` | the agent is materialising the thing this check reads (the NVIDIA driver volume) right now |
 | `unknown` | *(amendment 11)* **indeterminate**: a host probe could not be concluded — a deadline passed, a reply was lost, the runtime went away, a launch pre-empted it. `summary` carries the reason. It is neither a failure nor `skip` |
+| `unsupported` | *(amendment 12 addendum, #311)* **observed: this hardware does not provide the capability** — not a fault, nothing to fix. Today only a codec probe reports it, for a GPU whose encode pipeline cannot open that codec's encoder at all. It is a **definitive** result (retained like `pass` and `fail`), it never blocks, and a console MUST NOT present it as needing attention. It differs from `skip` (the check does not apply to this host) and from `fail` (the capability should work and does not) |
 
 **Optional per-check fields** *(amendment 11, all additive; an agent that predates them omits
 them and nothing changes for it)*:
@@ -568,8 +575,10 @@ way an indeterminate probe neither sets nor clears a block. See `schema.md` `hos
 one GPU for one codec above the H.264 floor — reports as a readiness check with an agent-owned id
 (today `media_probe_gpu<N>_<codec>`; consumers key on fields, never on the id, as for every
 check), carrying `source: host_probe` and `observed_at`, and **never `blocks`**. Its effect is on
-`capacity.gpus[].codecs`, not on admission: a failed codec probe removes that codec from that
-GPU's set and blocks nothing. No `blocks` scope is added for it; the `blocks` vocabulary above is
+`capacity.gpus[].codecs`, not on admission: a codec probe that does not pass removes that codec
+from that GPU's set and blocks nothing. *(amendment 12 addendum, #311)* When the GPU cannot open
+the codec's encoder at all, the check's `status` is `unsupported` (a hardware fact, not a fault);
+any other definitive failure of a codec probe is `fail`. No `blocks` scope is added for it; the `blocks` vocabulary above is
 unchanged. This sentence exists so a `codec` scope is not added later without a decision.
 
 ### `heartbeat` — liveness + live utilization

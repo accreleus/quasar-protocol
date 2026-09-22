@@ -8021,8 +8021,8 @@ what lets the console say why. A launch is affected by readiness in exactly one 
 exercised the real path, or a definitive local observation (container runtime unreachable, homes
 root unwritable). A **proxy** check (a file exists, a firewall rule parses) never carries it, so it
 can never block, for the reason the original rule gave: refusing sessions on a false negative is
-worse than a red card. `warn`, `skip`, `provisioning`, `unknown` and any unrecognized status never
-block, whatever else the check carries. An unrecognized `blocks.scope` never blocks.
+worse than a red card. `warn`, `skip`, `provisioning`, `unknown`, `unsupported` *(amendment 12
+addendum, #311)* and any unrecognized status never block, whatever else the check carries. An unrecognized `blocks.scope` never blocks.
 
 | `blocks.scope` | What a failing check excludes from admission |
 |---|---|
