@@ -1580,9 +1580,20 @@ paths:
             session_quota_exceeded / home_in_use / profile_ineligible /
             profile_not_launchable_for_app / conflict (pre-existing), or (Phase 3)
             home_not_provisioned - a derived tile whose parent has no home on any host - or
-            parent_app_disabled.
+            parent_app_disabled. Amendment 12 (#296): conflict is no longer returned for an
+            explicit stream.codec the placed host cannot encode - that arm leaves the launch path
+            (the codec is now a placement gate; see 503) and survives only on the certification
+            bench.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
-        "503": { $ref: "#/components/responses/Unavailable" }
+        "503":
+          description: >-
+            no_host_available / capacity_exhausted / host_not_ready (amendment 11: a failing
+            evidence-based readiness check is the only reason no host qualified) - well-formed but
+            cannot be placed now (retryable). Amendment 12 (#296): an explicit stream.codec is a
+            codec constraint applied at placement; when a GPU that can encode it exists but none
+            is free the answer is capacity_exhausted, and when no online usable GPU can encode it
+            the answer is no_host_available, both with a message naming the codec. No new code.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/sessions/{id}:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     get:
@@ -6534,7 +6545,7 @@ components:
     GPUAvailability:
       type: object
       description: "One GPU's capacity from GET /v1/hosts/{id}/gpus."
-      required: [gpu_id, gpu_index, vendor, model, vram_mb_total, vram_mb_reserved, vram_mb_used, vram_mb_free, vram_sampled_at, slots_total, slots_reserved, active_sessions, render_node]
+      required: [gpu_id, gpu_index, vendor, model, vram_mb_total, vram_mb_reserved, vram_mb_used, vram_mb_free, vram_sampled_at, slots_total, slots_reserved, active_sessions, render_node, codecs]
       properties:
         gpu_id: { type: string }
         gpu_index: { type: integer }
@@ -6571,6 +6582,19 @@ components:
         # host-observability-2: stable by-path render-node device path for this GPU
         # (valid as a render_node setting value); null until reported.
         render_node: { type: [string, "null"] }
+        # Amendment 12 (#296, additive, admin-gated read): the GPU codec set.
+        codecs:
+          type: [array, "null"]
+          items: { $ref: "#/components/schemas/Codec" }
+          description: >-
+            Amendment 12 (#296), additive. ALWAYS SERIALIZED. The wire codecs this GPU can
+            encode (agent-api.md capacity.gpus[].codecs, schema.md gpus.codecs), as the launch
+            path reads them: the GPU's own reported set, or - for a GPU whose agent reports no
+            per-GPU set - its host's codecs (inheritance). Null when neither this GPU nor its host
+            has ever reported a codec set (a pre-multi-codec agent), which the launch path treats
+            as h264-only; like HostSettingsResponse.codecs it is deliberately NOT normalised to
+            ["h264"] here, because "never reported" and "reported h264 only" need different
+            operator advice. HostSettingsResponse.codecs keeps serving the host union.
     GPUsResponse:
       type: object
       required: [items]
