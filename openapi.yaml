@@ -1585,15 +1585,7 @@ paths:
             (the codec is now a placement gate; see 503) and survives only on the certification
             bench.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
-        "503":
-          description: >-
-            no_host_available / capacity_exhausted / host_not_ready (amendment 11: a failing
-            evidence-based readiness check is the only reason no host qualified) - well-formed but
-            cannot be placed now (retryable). Amendment 12 (#296): an explicit stream.codec is a
-            codec constraint applied at placement; when a GPU that can encode it exists but none
-            is free the answer is capacity_exhausted, and when no online usable GPU can encode it
-            the answer is no_host_available, both with a message naming the codec. No new code.
-          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "503": { $ref: "#/components/responses/Unavailable" }
   /v1/sessions/{id}:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     get:
@@ -3625,7 +3617,7 @@ components:
         body is byte-identical either way, so a client parses it from one place.
       content: { application/json: { schema: { $ref: "#/components/schemas/ClientTooOldError" } } }
     Unavailable:
-      description: "no_host_available / capacity_exhausted / host_not_ready (amendment 11: a failing evidence-based readiness check is the only reason no host qualified) — well-formed but cannot be placed now (retryable)."
+      description: "no_host_available / capacity_exhausted / host_not_ready (amendment 11: a failing evidence-based readiness check is the only reason no host qualified) — well-formed but cannot be placed now (retryable). Amendment 12 (#296): an explicit stream.codec is a codec constraint applied at placement; when a GPU that can encode it exists but none is free the answer is capacity_exhausted, and when no online usable GPU can encode it the answer is no_host_available, both with a message naming the codec. No new code."
       content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
 
   schemas:

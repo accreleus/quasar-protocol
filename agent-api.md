@@ -481,7 +481,7 @@ running.
 
 `gpus[].codecs` *(NEW, amendment 12, #296, optional, additive)* — the **GPU codec set**: the wire
 codecs this GPU can encode, a subset of `["h264", "h265", "av1"]` in the same vocabulary as the
-host-level `codecs`. `h264` is always present on a usable GPU; it is the floor. A codec above the
+host-level `codecs`. A *usable* GPU is one with `encode_slots_total > 0`. `h264` is always present on a usable GPU; it is the floor. A GPU with zero slots (a render-node pin reports every other GPU that way) may omit `codecs` or report `[]`; the control plane never places on it and the host-level union ignores it. A codec above the
 floor appears **only after a passing codec probe on this GPU** — a host probe that runs the media
 probe on this GPU for that codec — so an unknown result is not advertised, and after an agent
 restart a GPU reports `["h264"]` until its codec probes have run. The agent derives the set under
@@ -492,7 +492,8 @@ legacy-agent path; an older agent reports no per-GPU set and behaves exactly as 
 `render_node` and `driver_identity` it is replaced wholesale with the `gpus` set, so a GPU whose
 report omits it stores NULL and inherits, and no keep-if-absent rule of its own applies. The
 host-level `codecs` above is the union of this field over the GPUs with `encode_slots_total > 0`.
-`codec_throughput` stays host-level.
+The agent re-sends `capacity` whenever a codec probe changes a GPU's set, rather than waiting for
+the next periodic report. `codec_throughput` stays host-level.
 
 `encode_slots_total` is the concurrent encode-session cap (the NVENC/VCN limit — architecture
 §"Resource governance"). At N=1 this is one GPU with generous slots; the field is mandatory so

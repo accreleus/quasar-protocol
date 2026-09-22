@@ -237,10 +237,11 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > override does not bypass the profile eligibility gate. It bypasses the device-decode and
 > decode-failure-history clamps (this is the forced re-test path for a fixed encoder) but **not** the
 > host-encoder clamp: forcing a codec the placed host cannot encode returns **`409 conflict`** (no
-> session persists), because host encoder capability is physics, not overridable. **(3)** The admin
+> session persists), because host encoder capability is physics, not overridable *(the 409 arm was
+> retired from the launch path by amendment 12, #296: the explicit codec is now a placement gate)*. **(3)** The admin
 > `/v1/admin/stream-profiles` write path may set a profile's **`codecs[].status`** (the rollout
 > switch). **(4)** Codec resolution is **server-side** (see §Authorization note). Reason codes:
-> `validation_failed` (400) and `conflict` (409) are reused; no new code. `agent-api.md`
+> `validation_failed` (400) and `conflict` (409) are reused *(409's codec arm retired by amendment 12)*; no new code. `agent-api.md`
 > (`session_assign.stream.codec`, `capacity.codecs`) and `schema.md` (`sessions.codec`,
 > `stream_profiles.codecs`, `hosts.codecs`, `user_device_profile_history.codec`) carry the wire and
 > storage halves. See `docs/design/plans/2026-07-22-multi-codec-hevc-av1-spec.md` §3.
@@ -462,9 +463,9 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > caller gets the same answer. `409` puts it with its two neighbours: `profile_ineligible` (409 —
 > the *device* refuses a valid profile) and `conflict` (409 — the app's `force` policy refuses an
 > override).
-> **Why its OWN code and not the generic `conflict`.** On this endpoint `conflict` already carries
+> **Why its OWN code and not the generic `conflict`.** On this endpoint `conflict` already carried
 > two unrelated conditions — profile overrides are disabled, and the placed host cannot encode the
-> requested codec — and a client cannot tell them apart except by message string, which is not part
+> requested codec (that one retired by amendment 12, #296) — and a client cannot tell them apart except by message string, which is not part
 > of this contract. The three want different responses, and this one is the only **recoverable**
 > member: it means the caller's menu is *stale* (an operator narrowed the allow-list after it was
 > rendered), so the remedy is to re-read `GET /v1/me/profiles?app_id=…` and re-pick. That is the
@@ -3249,13 +3250,14 @@ gate (unlike the other `stream.*` fields). It forces a concrete codec, bypassing
 (device decode), 4 (failure history), 5 (hardware encoder) and 6 (encoder throughput). This is
 exactly the forced re-test path by which a
 previously-failed codec on a since-fixed encoder gets a fresh trial, whose sustained smooth run
-records the clearing pass. It does **not** bypass clamp 1: forcing a codec the placed host
-cannot encode returns **`409 conflict`** and no session persists (host encoder capability is
-physics). *(amendment 12, #296 — superseded: the explicit `stream.codec` is now a codec
-constraint applied at placement, so the session is only ever placed on a GPU that can encode it
-and clamp 1 cannot reject it. No free capable GPU ⇒ `503 capacity_exhausted`; no online capable
-GPU ⇒ `503 no_host_available`; the `409 conflict` arm leaves the launch path and survives only on
-the certification bench. See §Rung resolution clamp 0.)* Authorization is unchanged: codec resolution is server-side and the override is honoured
+records the clearing pass. It does **not** bypass clamp 1 (host encoder capability is physics),
+but *(amendment 12, #296)* the explicit `stream.codec` is a codec constraint applied at placement,
+so the session is only ever placed on a GPU that can encode it and clamp 1 cannot reject it: no
+free capable GPU ⇒ **`503 capacity_exhausted`**; no online capable GPU ⇒
+**`503 no_host_available`**; both messages name the codec and no session persists. *(Before
+amendment 12, forcing a codec the placed host could not encode returned `409 conflict`; that arm
+leaves the launch path and survives only on the certification bench. See §Rung resolution
+clamp 0.)* Authorization is unchanged: codec resolution is server-side and the override is honoured
 per the caller's role exactly like the other `stream.*` overrides; the codec field is never a
 client-asserted capability or an access-control input.
 
@@ -3444,7 +3446,7 @@ A `POST /v1/sessions` launch is admitted only if **both** gates pass, evaluated 
 > **Amendment 11 (#260):** a third sibling, **`503 host_not_ready`**, is returned when an online
 > host/GPU would otherwise have qualified and a failing evidence-based readiness check is the only
 > reason none did — see "Evidence-gated readiness". The readiness filter sits in the shared
-> candidate and recheck filter beside the rules above, **not** in the totals probe, and abstains
+> candidate and recheck filter beside rules (a)–(c); unlike (c) *(amendment 12)* it is **not** in the totals probe, and abstains
 > on a stale or absent report.
 
 Both 503s carry the uniform error body and **no** session row persists. The two conditions are
@@ -4619,7 +4621,8 @@ launch profile's first h264 rung). Launches a Diagnostics session pinned to the 
 **streaming the rung's own codec** — a verdict must be measured on the codec it is filed under — and
 returns its `session_id` + signaling token so the harness can attach a CFT peer. Subject to normal
 admission control (a fully reserved GPU → `409`, not a stolen slot). A rung whose codec the pinned
-host cannot encode is refused up front rather than failing opaquely; a stream profile that is not a
+host cannot encode is refused up front rather than failing opaquely (`409 conflict`, the arm
+amendment 12 retired from `POST /v1/sessions`); a stream profile that is not a
 rung, or a rung no launch profile lists, is `400` (neither can ever be launched, so neither can be
 meaningfully certified).
 
