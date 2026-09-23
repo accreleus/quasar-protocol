@@ -2818,8 +2818,17 @@ session ID is never reused, so a pre-swap terminal means that agent could not
 subsequently accept a swap for that same session. Clearing is idempotent.
 
 Stop, `ReapHostExceptRunning`, heartbeat omission, offline sweep, restart and
-session-row deletion never clear a hold. Session rows (when present, ascending
-ID) are locked before all affected claims in ascending
+session-row deletion never clear a hold. After each cleanup-capable agent
+registration, the control plane sends `session_stop` on that authenticated
+connection epoch for every held session on that claim owner host whose
+session row is terminal or gone. It groups multiple claims for one session
+ID, retries stop while the hold remains on the same epoch at a capped interval
+regardless of its ack, and repeats the scan after each capable reconnect until a qualified terminal
+clears the hold; a stop ack alone never clears it. A late or repeated terminal
+is processed through the hold-only path above. This also recovers an
+assignment/swap lost after socket handoff when the agent never recorded the
+session ID. No stop is sent for a NULL-host claim. Session rows (when present,
+ascending ID) are locked before all affected claims in ascending
 `(user_id,canonical_app_id)` order, then `user_homes`; when the session row is
 gone, the partial index finds its held claims before ordered claim locks.
 This order applies to terminal reconciliation and #347 repair as well as
@@ -2829,8 +2838,8 @@ key order, checks the hold, then tombstones homes and deletes the user/app
 **in the same transaction**. A refused delete rolls back all tombstones.
 Direct SQL deletion can deadlock against a session callback; PostgreSQL
 aborts one transaction and it must retry without a partial tombstone.
-No network call occurs under these
-locks. Tombstone, agent GC pull and GC confirmation treat a held claim as in
+No network call occurs under these locks. Tombstone, agent GC pull and GC
+confirmation treat a held claim as in
 use independently of session state or `app_id`, and may neither reap its
 backing home nor release its claim.
 
