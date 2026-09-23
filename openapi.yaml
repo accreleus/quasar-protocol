@@ -2717,6 +2717,23 @@ paths:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/AdminHomesResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/storage/home-claims:
+    get:
+      tags: [admin]
+      summary: Diagnose canonical managed-home claims, including claim-only reservations and conflicts.
+      x-required-role: admin
+      parameters:
+        - { name: user_id, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: app_id, in: query, required: false, schema: { type: string, format: uuid }, description: "A derived tile resolves to its canonical parent app." }
+        - { name: host_id, in: query, required: false, schema: { type: string, format: uuid }, description: "Filter by the claim owner host, not recorded locations." }
+        - { name: state, in: query, required: false, schema: { type: string, enum: [reserved, materialized, conflict] } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+        - { name: cursor, in: query, required: false, schema: { type: string }, description: "Opaque exclusive keyset cursor bound to the filters." }
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/AdminHomeClaimsResponse" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /v1/admin/storage/homes/{id}:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     delete:
