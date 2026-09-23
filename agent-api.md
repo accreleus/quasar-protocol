@@ -2394,19 +2394,32 @@ accessibility. Scope is `next_session` or `restart`. Expiry is an RFC3339 UTC
 instant.
 For Automatic hardware, `accessible_device.id` is lowercase SHA-256 of UTF-8
 `gpu\0<N>\0<render_node>\0<driver_identity>\n`, where `<N>` is the
-unprefixed decimal GPU index and the other fields are the exact reported
-nonempty strings. `host_probe_result.id` is lowercase SHA-256 of UTF-8
+unprefixed decimal `capacity.gpus[].index`, `<render_node>` is the exact
+nonempty `capacity.gpus[].render_node`, and `<driver_identity>` is the exact
+nonempty `capacity.gpus[].driver_identity` (stored in the matching
+`gpus.render_node` and `gpus.driver_identity` columns). The agent and
+control plane reject NUL in any field; `\0` denotes byte 0x00 and `\n`
+denotes byte 0x0A in these encodings. `host_probe_result.id` is lowercase SHA-256 of UTF-8
 `media_probe_gpu<N>\0<observed_at>\0host_probe\0pass\n`, using the
-exact nonempty `observed_at` JSON string in the passing readiness check.
+exact nonempty decoded `observed_at` JSON string in the passing readiness
+check. The string must be ASCII RFC3339 and contain no NUL or LF.
 The control plane extracts this string directly from the stored JSONB check
 without parsing or reformatting it; the agent hashes the same string it sent.
 Both fact objects are included in the sorted `prerequisites` and its digest.
-The agent recomputes both against its own accessible device inventory and
+For a restart group, `seeded_group_digest.id` or
+`last_verified_group_digest.id` is exactly the current active snapshot
+digest carried in that group's authenticated inventory; its kind selects the
+fact kind. Before durable acceptance the agent recomputes this fact from its
+own current active snapshot, as well as both hardware facts from its
+accessible device inventory and
 **most recent** real media host probe for that GPU immediately before accepting
 the grant. That most recent result must itself be `pass`; a later failed,
 skipped or indeterminate probe rejects the old passing result.
 It rejects a path it cannot open or a result whose device identity no longer
 matches, even if the control plane saw a later database receipt time. The
+agent retains the device identity used by the probe and rejects a result from
+an earlier agent process incarnation. A later real media probe replaces the
+earlier result even when it fails or is indeterminate. The
 control plane uses database receipt times only to exclude pre-connection
 reports; its clock and the agent's probe clock are not compared.
 

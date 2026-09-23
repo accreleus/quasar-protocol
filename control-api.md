@@ -8277,7 +8277,8 @@ has `encode_slots_total > 0`, a nonempty `render_node`, and
 `readiness` check `media_probe_gpu<N>` for that GPU must have
 `source=host_probe`, `status=pass`, a nonempty `observed_at`, and
 `hosts.readiness_reported_at >= hosts.last_registered_at`. Those database
-receipt times establish current-connection provenance; agent timestamps
+receipt times reject pre-connection rows; the authenticated socket identity
+and journal gate establish current-connection authority. Agent timestamps
 identify probe results but are not compared to the database clock. The
 current connection's journal gate must also be complete. A device path merely
 seen in sysfs or a previous connection never qualifies. The check's GPU
