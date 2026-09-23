@@ -2413,8 +2413,146 @@ reservations, not production SQL migrations.
 |---|---|---|
 | `host_policy_revisions` | `host_id UUID PRIMARY KEY REFERENCES hosts(id) ON DELETE CASCADE`, `revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0)`, `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`, `updated_by UUID NULL REFERENCES users(id) ON DELETE SET NULL` | One row per host, locked by typed CAS edits and legacy PATCH. Choices, revision and obligations commit atomically. |
 | `host_setting_choices` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `key TEXT NOT NULL`, `source TEXT NOT NULL CHECK (source IN ('automatic','deployment','explicit'))`, `explicit_value JSONB NULL`, `revision BIGINT NOT NULL CHECK (revision >= 0)`, `PRIMARY KEY (host_id,key)`, `CHECK ((source = 'explicit') = (explicit_value IS NOT NULL))`, `CHECK (explicit_value IS NULL OR jsonb_typeof(explicit_value) <> 'null')` | SQL NULL means no explicit value. JSON `null` is not a typed explicit value. The guarded `jsonb_typeof <> 'null'` is required because an unguarded SQL CHECK accepts unknown. Validate key, type and range against `hostcfg.Catalog` before writing. |
-| `host_setting_groups` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `group_key TEXT NOT NULL`, `desired_revision BIGINT NOT NULL CHECK (desired_revision >= 0)`, `desired_digest TEXT NOT NULL`, `applied_revision BIGINT NULL CHECK (applied_revision >= 0)`, `scope TEXT NOT NULL CHECK (scope IN ('next_session','restart'))`, `status TEXT NOT NULL CHECK (status IN ('pending','applied','failed','upgrade_required','uncertain'))`, `evidence_connection UUID NULL`, `evidence_at TIMESTAMPTZ NULL`, `PRIMARY KEY (host_id,group_key)`, `CHECK (applied_revision IS NULL OR applied_revision <= desired_revision)` | A verified active readback advances only the matching group, revision and digest. |
+| `host_setting_groups` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `group_key TEXT NOT NULL`, `desired_revision BIGINT NOT NULL CHECK (desired_revision >= 0)`, `desired_digest TEXT NULL`, `applied_revision BIGINT NULL CHECK (applied_revision >= 0)`, `applied_digest TEXT NULL`, `scope TEXT NOT NULL CHECK(scope IN ('next_session','restart'))`, `status TEXT NOT NULL CHECK(status IN ('pending','applied','failed','upgrade_required','uncertain'))`, `evidence_connection UUID NULL`, `evidence_at TIMESTAMPTZ NULL`, `PRIMARY KEY (host_id,group_key)`, `CHECK (applied_revision IS NULL OR applied_revision <= desired_revision)`, `CHECK (status <> 'applied' OR ((desired_digest IS NOT NULL AND applied_digest = desired_digest AND applied_revision = desired_revision) IS TRUE))` | A verified active readback advances only the matching group, revision and content digest. Offline deployment choices may have no candidate digest yet. |
 | `host_reconcile_obligations` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `kind TEXT NOT NULL`, `resource_key TEXT NOT NULL`, `revision BIGINT NOT NULL CHECK (revision >= 0)`, `next_attempt_at TIMESTAMPTZ NOT NULL`, `retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0)`, `PRIMARY KEY (host_id,kind,resource_key)` | New intent replaces the revision. A wakeup is never authority to apply obsolete intent. |
+
+Migration 0087 also adds nullable `hosts.deployment_settings JSONB`,
+`hosts.deployment_settings_connection UUID` and
+`hosts.deployment_settings_reported_at TIMESTAMPTZ`, with
+`CHECK (deployment_settings IS NULL OR jsonb_typeof(deployment_settings) = 'object')`
+and `CHECK ((deployment_settings IS NULL) =
+(deployment_settings_connection IS NULL) AND (deployment_settings IS NULL) =
+(deployment_settings_reported_at IS NULL))`.
+The 0087 down migration drops them. Store a catalog-typed
+`capacity.deployment_settings` only from the authenticated RH05 agent
+connection. A valid report replaces the entire map. A present malformed report
+clears all three columns in the same write, even on the same connection. Omission
+on the same authenticated connection preserves its current map; omission after
+reconnect leaves only historical data. The map is usable for
+resolving deployment-source choices only while its connection UUID equals the
+live hub's current authenticated connection incarnation, checked under the same
+host transaction/lock as preview and offer construction; a missing, invalid,
+needed value or previous-connection map is unavailable.
+The capacity writer checks under the per-host connection lifecycle gate and
+host lock that the reporting socket is still the hub's current connection
+incarnation **before** any baseline, accepted-group or capacity-detection
+write. A displaced socket's late report is dropped; it cannot clear a newer
+baseline or lift a newer seed connection's admission gate.
+No backfill from `hosts.effective_settings`, environment guesses, catalog display
+defaults or old agents is permitted. A current report replaces the entire map;
+the candidate prerequisite hashes only the parsed typed projection of the
+group's deployment-source keys, not the whole report. The agent validates that
+fact independently before durable acceptance. Parse before canonicalization;
+do not derive the hash from JSONB's serialized text.
+
+Migration 0087 also adds `hosts.config_policy_versions JSONB NULL`,
+`hosts.config_policy_advertised_groups JSONB NULL`,
+`hosts.config_policy_confirmed_groups JSONB NULL`,
+`hosts.config_policy_ever_owned_groups JSONB NOT NULL DEFAULT '[]'::jsonb`,
+`hosts.config_policy_reported_at TIMESTAMPTZ NULL`,
+`hosts.config_policy_gate_connection UUID NULL`, and
+`hosts.config_policy_delivery_id UUID NULL` with
+`CHECK (config_policy_delivery_id IS NULL OR config_policy_gate_connection IS NOT NULL)`.
+Versions, advertised groups and report time are replaced on every
+registration, including omission. Version 2 requires a sorted unique array;
+unknown group names are ignored. Registration computes a provisional accepted
+echo in connection memory, but does not replace stored confirmed groups or
+extend ever-owned groups. A current-socket
+capacity report must carry `config_policy_accepted_groups` exactly matching
+that echo, after the agent fsyncs its ownership markers. Under the host lock
+and connection lifecycle gate the control plane then replaces the confirmed
+groups with the acknowledged echo and extends the ever-owned union. On a
+missing, malformed or stale acknowledgement it retains the last confirmed
+set for offline display/edit decisions and keeps current-connection admission
+gated. The last confirmed set permits offline typed edits only for
+groups known to be typed-owned, while every dispatch rechecks ownership against
+the current authenticated connection. Version 1, unknown version or invalid
+group shape grants no typed ownership. The 0087 down migration drops these
+columns. No deployment-baseline map is inferred from the advertisement.
+The ever-owned array is a monotone sorted union of groups whose accepted echo
+was durably confirmed by the agent's current-socket capacity acknowledgement;
+a seed alone never adds ownership. It is
+not cleared by disconnect, smaller echo or rollback and prevents projecting a
+pending typed desire into a legacy map for a previously owned group. Online
+legacy PATCH includes the current provisional echo, confirmed echo and
+ever-owned groups; offline legacy PATCH uses the last confirmed echo union
+ever-owned groups. The provisional echo authorizes no typed offer or applied
+claim. A subsequent complete journal inventory reconciles
+any agent-owned group missing after database restore before legacy delivery
+or admission resumes.
+
+On every version 2 registration, the host transaction sets
+`config_policy_gate_connection` to that new authenticated connection UUID
+before scheduling can observe the host online. This dedicated 0087 admission
+gate is separate from GPU `capacity_detection` and from 0088 owner-scoped
+restrictions; it keeps #335 independent of #337. Complete journal inventory
+precedes the one full legacy-owned settings delivery. That map excludes all
+groups in the current provisional echo, confirmed echo or ever-owned union.
+#335 implements the complete paged inventory handshake and durable agent
+journal for its supported next-session group with 0087. Before 0089 exists,
+finished `applied`, `recovered` and `revoked_unstarted` inventory entries are
+history, not orphans; only their revision high-water mark fences future offers.
+An unfinished entry whose group, revision and digest match the current
+`host_setting_groups` desired candidate is held in current-connection memory
+until the agent reports a durable terminal state. A different unfinished
+entry, or any `uncertain` entry, keeps admission gated with an operator repair
+remedy. A different unfinished entry can clear that gate after its safe durable
+terminal report arrives on the current connection and its active snapshot is
+reconciled; an `uncertain` entry cannot clear it this way. The
+agent journal is the durable execution-start record in #335; the control plane
+stores pending intent in `host_setting_groups` and advances that row's
+`applied_revision`, `applied_digest`, status and evidence columns only after a
+matching verified active readback. #338's 0089 replaces this limited
+connection-memory rule with the durable control-plane attempt ledger and
+general orphan/recovery reconciliation; the first-map safety gate does not
+wait for that migration. Once 0089 exists, its
+`host_journal_reconciliation` row supplies the inventory-complete condition
+for the separate 0087 delivery gate.
+The control plane stores
+its fresh `settings_delivery_id` in `config_policy_delivery_id` before sending
+the complete map. While the gate is closed, each changed complete map replaces
+that ID under the same host lock before send; retransmission of an unchanged
+map retains its ID. Only the latest ID can clear the gate. A bounded missing
+acknowledgement either resends the same map or closes the socket to renegotiate;
+an older acknowledgement cannot lift the gate. Only a current-socket capacity with exact matching
+`config_policy_legacy_map_applied_id`, after accepted-group acknowledgement,
+clears both columns under the host row lock. A later omission leaves a cleared
+gate clear. A displaced socket cannot clear it. Every reservation and launch,
+including explicit-host and console launch, checks the nullable gate under
+the selected host lock; non-NULL means unavailable for new work. If a
+pre-RH05, version 1 or unknown typed-version agent reconnects while `ever_owned_groups` is nonempty, set the gate
+and retain it with an `upgrade_required` re-upgrade/repair remedy: that agent
+cannot restore the durable active typed snapshot. A never-typed old agent
+uses legacy admission as before. The down migration drops the gate columns.
+
+`desired_digest` is NULL only while a candidate has never resolved for that
+revision; an offline edit still commits choices, revision and obligation.
+Losing current-connection baseline evidence blocks new offers/previews and
+shows `baseline_unavailable`, but by itself changes neither an already resolved
+digest nor status. On a valid new baseline report, recompute each affected
+candidate under the host lock used by preview/offer construction, and supersede
+any unstarted approval if the digest changed. The operator revision does not
+increment for an environment observation; `(revision, content_sha256)` identifies
+the candidate. If the new digest equals the previous desired digest, leave the
+group unchanged. If it differs from `applied_digest`, move `applied`, `pending`
+or `failed` to `pending` only when no started nonterminal attempt owns the
+group. Never clear `uncertain` or `upgrade_required` on a baseline report;
+those statuses require their own reconciliation. If a baseline report arrived
+while a started attempt owned the group, re-evaluate its desired candidate
+when that attempt reaches a terminal phase; do not leave a stale digest or
+silently erase the attempt's original failure. A desired digest that changes
+back to `applied_digest` restores `applied` only after a matching **verified**
+active snapshot is read back on the current authenticated connection. A seed
+never does. Applied requires matching revision **and** content digest from
+active agent readback.
+An unavailable baseline never authorizes a new candidate.
+For a group outside the current confirmed echo and ever-owned union, a legacy
+PATCH still commits its choice, policy revision and obligation, but the
+obligation is parked: no typed offer is dispatched. Its typed status is
+`upgrade_required` with a remedy saying the legacy writer remains active and
+an agent upgrade is needed for RH05 proof. When that group becomes confirmed
+typed-owned, reconcile the parked obligation against current evidence and
+move it to `pending` without claiming the legacy write had been verified.
 
 Backfill each present non-null legacy override as `explicit`; absent or cleared
 keys are `deployment`. Never infer `automatic` from installer or catalog defaults.

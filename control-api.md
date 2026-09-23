@@ -8219,6 +8219,44 @@ observation, not a grant or proof that the configuration has applied.
 Preparation and readiness are separate fields. `source` is
 `automatic|deployment|explicit`; only explicit carries a typed `value`.
 Deployment preserves the agent's existing environment/device-detection baseline.
+For a deployment choice, the resolved value and offer digest come only from the
+agent's valid, typed `capacity.deployment_settings` on the authenticated current
+connection (`agent-api.md`). A saved offline deployment choice remains pending
+with `desired_digest:null` until that report arrives; the settings choice,
+revision and reconcile obligation are still durable. The legacy effective map
+and catalog display defaults cannot fill a missing baseline. A missing,
+incomplete or stale report yields a
+`baseline_unavailable` reason/remedy in the typed view; it is neither a failed
+application nor `upgrade_required` when the agent advertises the separate
+`deployment_baseline:1` capability. A connected agent without that capability
+shows `upgrade_required` for a deployment-source group. The
+`baseline_unavailable` remedy requests a fresh agent capacity report or
+reconnect when a stale matching report was invalidated after a rejection.
+A valid new baseline whose resolved digest matches the stored desired digest leaves the status
+unchanged. Losing baseline evidence on disconnect blocks new offers/previews
+but does not erase an already resolved digest or change the last verified
+status by itself. On a new agent connection, `applied` remains a historical
+status until complete authenticated journal inventory reports the durable
+active snapshot; a differing digest moves the group to pending, while a
+matching **verified** active snapshot restores `applied` for the current
+revision and digest. A seed never counts as applied proof.
+A valid new baseline recomputes the candidate digest; if it differs from the last verified applied
+digest, a group in `applied`, `pending` or `failed` becomes pending only when
+no started nonterminal attempt owns it, and a relevant unstarted approval is
+superseded. `uncertain` and `upgrade_required` retain their protective/remedy
+status until their own reconciliation completes.
+If the baseline changes back so that desired digest again equals the last
+verified active digest, `applied` is restored only after a current-connection
+verified active readback. It needs no idle approval merely to prove a value
+already active; a matching seed cannot take this path.
+The approved candidate binds only the needed deployment-source keys' typed
+baseline digest as a prerequisite. `resolved_settings` may contain JSON `null`
+only for a catalog-nullable key whose baseline is genuinely unset. An
+indeterminate or invalid needed value leaves the candidate unresolved.
+Each deployment choice resolves to exactly its reported baseline value, even
+when another group key is explicit. A combination that violates existing
+cross-key validation is rejected as `400 validation_failed`; neither side
+silently recalculates a deployment value from a sibling's explicit choice.
 Automatic is supported only for the encoder/render-node hardware group and needs
 accessible-device plus passing host-probe evidence. The current 39-key
 source/effect/evidence matrix is `quasar/docs/design/rh05-contract-proposal.md`;
@@ -8231,15 +8269,52 @@ invalid key/type/source/dependent combination returns `400 validation_failed` wi
 no partial write. Stale revision returns `409 stale_revision` with the current
 view and changed keys. Success commits choices, monotone revision and durable
 reconcile obligation in one transaction, returns `200` with the new typed view,
-and reports offline work pending. Independent groups succeed/fail separately.
+and reports offline work pending. Independent groups succeed/fail separately
+at application time; a multi-group PATCH is atomic at persistence time.
 Only an authenticated current connection observation matching group, revision
 **and** content digest can advance applied status. Older agents retain supported
 legacy settings but RH05-only choices show `upgrade_required`.
+Any host without a confirmed accepted typed advertisement, online or offline, rejects
+typed edits with `409 upgrade_required` and writes nothing; saved RH05-only
+choices on such a host display `upgrade_required`. On a version 2 agent, typed
+policy edits for groups absent from its confirmed accepted
+`config_policy_groups` return `409 upgrade_required` without persistence; those
+keys remain available through the legacy settings endpoint until a later agent
+advertises and negotiates their typed group. A request mixing owned and unowned
+groups fails as a whole without a partial write. Until the current agent
+acknowledges its provisional echo in an authenticated capacity report after
+fsyncing sticky ownership markers, typed dispatch and admission stay gated;
+the provisional echo is not applied proof. An offline host uses its last
+confirmed accepted group set for this decision and remains pending for an owned typed group;
+one with no known typed advertisement does not accept a typed edit. The legacy
+writer continues carrying each unowned key during this staged rollout.
+On every version 2 connection, the dedicated 0087 settings gate also holds
+all new session admission until complete authenticated journal inventory is
+reconciled and the agent's current-connection capacity echoes the exact
+`settings_delivery_id` of the full legacy-owned settings map after durable
+application. GPU `capacity_detection` continues to mean GPU detection only.
+While the gate is closed, a changed complete map replaces the pending
+delivery ID under the host lock; only the latest acknowledgement clears it.
+The same map and ID may be retransmitted after a bounded wait, or the
+connection closed to renegotiate. An absent, stale or mismatched echo keeps admission gated; later capacity
+omission after a successful echo does not close the gate again.
+For a never-owned group edited through legacy PATCH, choice, revision and
+reconcile obligation are durable, but the obligation is parked and no typed
+offer is sent. Its typed status is `upgrade_required` with a remedy explaining
+that the legacy writer remains active and RH05 proof requires an agent upgrade.
+When the group becomes confirmed owned, its parked obligation is reconciled
+and becomes pending; no legacy effective report is promoted to applied proof.
+If a pre-RH05, version 1 or unknown typed-version agent reconnects after any group became durably typed-owned,
+the host remains unavailable for new sessions and that group shows
+`upgrade_required` with a re-upgrade or explicit repair remedy. The control
+plane never sends its pending desired value through the legacy map; that
+older agent cannot restore a typed active snapshot.
 
 `POST /v1/admin/hosts/{id}/policy/retry` takes `{"group":"<key>"}`. A
 transient exhausted group can retry with bounded backoff; invalid intent is not
 retryable. A disruptive retry needs fresh scoped approval. Typed errors include
-`unsupported_source`, `attempt_conflict`, `retry_exhausted` and
+`unsupported_source`, `upgrade_required`, `group_execution_unavailable`,
+`attempt_conflict`, `retry_exhausted` and
 `recovery_uncertain`.
 
 ### Existing settings PATCH and restart: explicit behavior amendment
@@ -8248,22 +8323,48 @@ The existing catalog and settings GET response shapes are unchanged. Legacy
 `resolved` remains a display projection. Legacy PATCH null removes a sparse
 override for **any** key and selects deployment, never Automatic;
 `abr_floor_kbps:null` is a clear, not a stored explicit JSON null. This corrects
-the conflicting nullable-null prose in the older PATCH section above.
+the conflicting nullable-null prose in the older PATCH section above. For a
+typed-owned group, this legacy null clear follows the same
+pending-until-current-baseline rule as a typed deployment-source edit. An
+unowned group clears through the legacy settings map immediately.
 
-For an **RH05-capable agent**, a valid restart-class legacy PATCH serializes
+For a group **owned by the RH05 typed writer** according to the current
+provisional or confirmed echo **or** durable ever-owned union on an online
+connection (confirmed echo or ever-owned union while offline), a
+valid restart-class legacy PATCH serializes
 through the policy revision and returns the old `200` shape with
 `restart_triggered:false`, regardless of live sessions. `restart_confirm` is
 accepted for compatibility but grants no idle-apply approval and sends no
-restart. The old `409 restart_required` guard does not apply to this PATCH in
-RH05 mode. The typed group is pending, and `pending_restart` remains false until
-an approved restart starts. For an **older agent**, the old
+restart. The old `409 restart_required` guard does not apply to this PATCH while
+the group is typed-owned. The typed group is pending, and `pending_restart`
+remains false until an approved restart starts. An ever-owned group omitted
+by a smaller echo stores the edit but sends neither its legacy value nor a
+restart; its typed view shows `upgrade_required` until ownership is
+reconciled. A newly provisional group also stores the edit without a legacy
+value or restart while admission is gated; typed reconciliation begins only
+after its current-connection ownership acknowledgement. For a **never-owned group on an older or version 2 agent**, the old
 `409 restart_required`/`restart_confirm`/immediate-restart behavior remains; it
 provides no RH05 applied proof. This is a frozen-endpoint semantic amendment.
+For an unowned restart-class key, that legacy restart is refused with
+`409 attempt_conflict` while any started nonterminal or `uncertain` RH05
+attempt of **either scope** is open **or the host's journal reconciliation
+gate is incomplete**; the
+legacy edit has no partial write in that case. A mixed legacy PATCH uses this
+guard only for its unowned restart-class keys and commits all or none. A
+refused restart never sets `pending_restart` or reports
+`restart_triggered:true`. It can be
+retried after the operation is resolved.
 
 Standalone `POST /v1/admin/hosts/{id}/restart` retains its existing response,
 offline `409 conflict` and live-session `409 restart_required`/`confirm` guard.
-On an RH05 agent it restarts only the last verified active configuration, never
-activates an unapproved candidate. Pending desired policy remains pending.
+It also returns `409 attempt_conflict` while a started nonterminal or
+`uncertain` RH05 attempt of either scope is open, or while the host's journal reconciliation gate (0087 before 0089, then the 0089 row) is
+incomplete, before sending a restart command. A refused restart never sets
+`pending_restart` or reports `restart_triggered:true`.
+On an RH05 agent it retains the last verified or durably seeded active snapshot for each
+typed-owned group, never activating an unapproved typed candidate. Legacy-owned
+keys continue their established restart resolution. Pending typed policy remains
+pending.
 `pending_restart` reflects an actual restart in flight and clears on verified
 reconnect; it is not configuration-applied status.
 

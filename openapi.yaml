@@ -2757,12 +2757,13 @@ paths:
         RH05 legacy compatibility exception: this revisionless write serializes under the host
         settings row and increments the same policy revision. A non-null value chooses explicit;
         null chooses deployment, even if the prior source was automatic. Relevant unstarted
-        approval is superseded. For an RH05-capable agent a valid disruptive edit returns 200
-        with restart_triggered:false regardless of live sessions; restart_confirm is accepted
-        but does not approve or start an RH05 restart. The typed group remains pending and
-        pending_restart remains false until an approved restart actually begins. For an older
-        agent the previous restart_required guard and restart_confirm immediate-restart behavior
-        remain; its effective-settings map is not RH05 application proof.
+        approval is superseded. A typed-owned group (current provisional or confirmed
+        echo, or durable ever-owned set while online; confirmed echo or ever-owned set
+        while offline) returns 200 with restart_triggered:false for disruptive edits;
+        restart_confirm cannot approve RH05 idle apply. A never-owned group retains the
+        legacy restart_required guard and restart_confirm immediate-restart behavior.
+        An open or uncertain RH05 attempt of either scope blocks an unowned restart edit.
+        The effective-settings map is not RH05 application proof.
       x-required-role: admin
       requestBody:
         required: true
@@ -2775,7 +2776,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: "Old agents only: restart_required when a restart-class knob changed with live sessions and restart_confirm != true (body carries live_sessions). RH05-capable agents save the edit with 200 instead." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "409": { description: "restart_required for a never-owned restart-class key with live sessions and no confirmation, or attempt_conflict while an RH05 attempt/reconciliation gate blocks legacy restart. Typed-owned keys save without immediate restart." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
   /v1/admin/hosts/{id}/policy:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     get:
@@ -2794,7 +2795,8 @@ paths:
         Validates the whole edit before persistence. A successful edit commits choices, a
         monotone revision and reconciliation obligation in one transaction; offline intent is
         saved as pending. A stale edit does not write and returns the current view and changed
-        keys. A relevant edit supersedes an unstarted idle approval.
+        keys. A relevant edit supersedes an unstarted idle approval. A group without
+        confirmed typed ownership returns upgrade_required without writing anything.
       x-required-role: admin
       requestBody:
         required: true
@@ -2805,7 +2807,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: stale_revision with current view and changed keys., content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicyConflict" } } } }
+        "409": { description: "stale_revision with current view and changed keys, or upgrade_required with no write." , content: { application/json: { schema: { anyOf: [ { $ref: "#/components/schemas/HostPolicyConflict" }, { $ref: "#/components/schemas/ErrorEnvelope" } ] } } } }
   /v1/admin/hosts/{id}/readiness-overrides/{check_id}:
     parameters:
       - { $ref: "#/components/parameters/PathId" }
@@ -2842,9 +2844,11 @@ paths:
       summary: Restart the host's agent without changing overrides (host-observability-2).
       description: >-
         Retains its 200/409 live-session confirm guard on old and RH05-capable agents. An
-        RH05-capable agent restarts only the last verified active configuration; it never
+        RH05-capable agent restarts only the last verified or durably seeded active configuration; it never
         activates an unapproved pending candidate. A pending policy group remains pending.
         pending_restart reflects an actual restart in flight and clears on verified reconnect.
+        A started nonterminal or uncertain RH05 attempt of either scope, or incomplete
+        journal reconciliation (0087 gate before 0089, then the 0089 row), refuses the restart with attempt_conflict.
       x-required-role: admin
       requestBody:
         required: false
@@ -2856,7 +2860,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: "restart_required (live sessions, confirm != true — body carries live_sessions) or conflict (host offline)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "409": { description: "restart_required (live sessions, confirm != true), conflict (host offline), or attempt_conflict (open/uncertain RH05 attempt or incomplete journal reconciliation)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
   /v1/admin/hosts/{id}/console-config:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     get:
@@ -5095,7 +5099,7 @@ components:
           additionalProperties: true
         restart_confirm:
           type: boolean
-          description: "Old agents: required to apply a restart-class knob while live sessions exist. RH05 agents accept this field for compatibility but it grants no idle-apply approval and triggers no restart."
+          description: "For never-owned restart-class keys, permits legacy restart with live sessions. For typed-owned groups it is accepted for compatibility but grants no idle-apply approval or immediate restart."
 
     RH05Revision:
       type: string
@@ -5128,14 +5132,16 @@ components:
         desired_revision: { $ref: "#/components/schemas/RH05Revision" }
         applied_revision:
           oneOf: [ { $ref: "#/components/schemas/RH05Revision" }, { type: "null" } ]
-        desired_digest: { $ref: "#/components/schemas/RH05Digest" }
+        desired_digest:
+          oneOf: [ { $ref: "#/components/schemas/RH05Digest" }, { type: "null" } ]
+          description: "Null while an offline or baseline-unavailable deployment choice has not resolved to a candidate."
         applied_digest:
           oneOf: [ { $ref: "#/components/schemas/RH05Digest" }, { type: "null" } ]
         scope: { type: string, enum: [next_session, restart] }
         status: { type: string, enum: [pending, applied, failed, upgrade_required, uncertain] }
         fresh: { type: boolean, description: Whether the evidence still matches the current agent and prerequisites. }
         observed_at: { type: [string, "null"], format: date-time }
-        remedy: { type: [string, "null"], description: Actionable reason when pending, failed, upgrade required or uncertain. }
+        remedy: { type: [string, "null"], description: "Actionable reason when pending, failed, upgrade required or uncertain; baseline_unavailable names missing current-connection deployment evidence." }
         next_retry_at: { type: [string, "null"], format: date-time }
         attempt_id: { type: [string, "null"], format: uuid }
         approval_preview:
