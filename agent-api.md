@@ -2342,7 +2342,30 @@ array. Each fact is `{"kind":"<kind>","id":"<id>"}` with nonempty UTF-8
 strings containing neither NUL nor LF. Include only facts required by the
 group: relevant agent image digest, driver identity, accessible device
 identities, required passing host-probe result IDs, and last verified group
-digest (or seeded group digest before first verification). Sort facts bytewise
+digest (or seeded group digest before first verification). Every restart
+approval includes exactly one `{"kind":"accepted_attempts","id":"<sha256>"}`
+fact for that group. Its ID is the lowercase 64-character hex SHA-256 of the
+group's complete durable set of accepted attempt records, sorted bytewise by
+lowercase 36-character hyphenated attempt UUID. Encode each record as that
+UTF-8 UUID, one NUL byte, its current journal phase, one LF byte; concatenate
+and SHA-256 the bytes. The empty set hashes the empty
+byte sequence. Current phases are `accepted`, `activating`, `awaiting_startup`,
+`verifying`, `applied`, `failed`, `recovery_verifying`,
+`recovery_awaiting_startup`, `recovered`, and `uncertain`. An unknown phase,
+missing record, or incomplete inventory makes the fact indeterminate and
+blocks approval. An agent rejects a missing or mismatched fact before durable
+acceptance, including when the grant claims the empty set but its journal has
+an accepted attempt. The agent also refuses a new grant while any restart
+attempt of any group
+in its journal remains open. Accepted records cannot be pruned in RH05. If a
+complete authenticated inventory omits an accepted record known to the control
+plane, the host remains quarantined; omission is never revocation. Simultaneous
+loss of both the database and agent journal is outside the supported restore
+guarantee. The control plane constructs the
+fact only from complete authenticated current-connection inventory, never
+from a partial or restored database alone. An approval never offered to the
+agent is fenced by the control-plane-only `approval_review_id` and is not an
+agent prerequisite. Sort facts bytewise
 by `(kind,id)`; encode each as UTF-8 `kind`, one
 NUL byte, UTF-8 `id`, one LF byte; concatenate and SHA-256 that byte stream.
 When any choice has `source=deployment`, include exactly one additional fact

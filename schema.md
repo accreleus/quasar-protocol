@@ -2653,12 +2653,17 @@ supported restore guarantee.
 `host_config_approvals`: `id UUID PRIMARY KEY`, `host_id UUID NOT NULL REFERENCES
 hosts(id) ON DELETE CASCADE`, `group_key TEXT NOT NULL`, `revision BIGINT NOT NULL
 CHECK (revision >= 0)`, `approved_digest TEXT NOT NULL`, `prerequisites_digest
-TEXT NOT NULL`, `boot_incarnation UUID NOT NULL`, `expires_at TIMESTAMPTZ NOT
-NULL`, `state TEXT NOT NULL CHECK (state IN ('approved','offered',
+TEXT NOT NULL`, `boot_incarnation UUID NOT NULL`, `review_id UUID NOT NULL`,
+`expires_at TIMESTAMPTZ NOT NULL`, `state TEXT NOT NULL CHECK (state IN ('approved','offered',
 'cancel_pending','superseded','expired','accepted','revoked_unstarted'))`,
-`created_at TIMESTAMPTZ NOT NULL DEFAULT now()`. A partial unique index allows
-one live unstarted approval per `(host_id,group_key)` where state is `approved`,
-`offered` or `cancel_pending`. An edit to the group's
+`created_at TIMESTAMPTZ NOT NULL DEFAULT now()`, unique
+`(host_id,group_key,review_id)` for deterministic replay lookup. A partial unique index allows
+one live unstarted approval per **host** across groups where state is `approved`,
+`offered` or `cancel_pending`; this covers the waiting grant before an agent offer.
+The host-row lock and a recheck of this index plus the open restart-attempt index
+serialize the handoff to an offered attempt. An unoffered grant is not recorded
+as `host_config_attempts.phase='offered'`. `review_id` is the durable replay identity for
+this approval even after the current review token rotates. An edit to the group's
 source, value or prerequisite supersedes it; an unrelated safe edit preserves
 it. Cancellation or supersession fences further grants in the database before
 revocation is sent. Only confirmed nonacceptance releases the idle restriction
@@ -2666,6 +2671,73 @@ before execution. A lost revocation response retains `cancel_pending` and the
 restriction until complete authenticated inventory settles whether acceptance
 occurred. Expiry is checked with the boot ID and prerequisite digest at dispatch,
 not just by a periodic sweep.
+The approval ID is the public attempt ID throughout waiting, cancellation and
+terminal unstarted reads; `host_config_attempts.id` takes that same value only
+at offer. A host-locked transaction inserts the `offered` attempt and changes
+approval state to `offered` before any send. After a process boot, old
+`approved` rows move to `cancel_pending` and retain their admission hold until
+complete authenticated current-connection journal inventory proves no record
+under their ID; a stopped-stack database restore may have erased a later offer.
+On a same-boot reconnect, `approved` may revoke locally and `offered` becomes
+`cancel_pending`. All transitions and review-ID rotations are atomic. Missing
+current token rows make preview and grants unavailable. Migration 0089 seeds
+tokens for existing restart groups with saved policy.
+Agent acceptance advances both rows to `accepted` atomically. Confirmed
+nonacceptance of an offered grant terminalizes the approval and writes the
+attempt's `revoked_unstarted` phase and `terminal_at` in the same transaction.
+If stopped-stack restore erased an accepted attempt, authenticated journal
+reconciliation recreates it under the approval's ID before releasing the gate.
+That transaction also moves a restored `cancel_pending` approval to `accepted`.
+The recreated row starts at the authenticated inventory phase and journal
+sequence. Later authenticated state or inventory updates only advance a legal
+phase edge and strictly increasing per-attempt `journal_sequence` (or repeat
+identical content at the same sequence), as required by `agent-api.md` §config
+policy journal. Older or conflicting reports are ignored or quarantine the
+host; they never clear `terminal_at`, release protection or rotate review IDs.
+Once set, `terminal_at` is never cleared. `failed` becomes terminal only after
+an explicit durable decision that recovery is impossible or after its authorized
+recovery reaches a proven terminal outcome; stale `failed` cannot terminalize
+an in-progress recovery.
+The approval row is the phase authority until acceptance or terminal
+nonacceptance; after acceptance the attempt row is authoritative.
+An invalidated approval with uncertain nonacceptance physically remains
+`cancel_pending`, indexed and held. `superseded` and `expired` are terminal only
+after confirmed nonacceptance, and project as `revoked_unstarted`.
+Every writer of approval state, attempt phase, protective restriction or review
+token—including grant, offer, acceptance, terminal outcome, cancellation,
+supersession, inventory, boot, expiry sweep and restriction release—locks in this order:
+host row, policy revision, groups and choices, all restart-group review-token
+rows in ascending `group_key`, then approval and attempt rows, then restrictions.
+No database lock is held across agent transport. A grant
+also checks protective restrictions owned by a terminal `uncertain` restart
+attempt, since that attempt has `terminal_at` set and is outside the open-attempt
+partial index.
+
+`host_approval_review_tokens`: `(host_id UUID REFERENCES hosts(id) ON DELETE
+CASCADE, group_key TEXT)` primary key,
+`review_id UUID NOT NULL`. The token is seeded when a restart group first gains
+saved policy and rotated to a fresh random UUID on every approval exit from
+waiting/offered and every accepted attempt terminal outcome. A token value is
+never reused for the same host/group within one boot: UUIDv4 generation is
+checked against durable issued IDs and retries a collision. Rotation and its
+triggering phase change commit in the same transaction. A grant locks this row
+`FOR UPDATE` before comparing the token and inserting the approval, and
+rechecks availability under that lock. The row survives ordinary
+restarts; the separate boot incarnation still changes on every process start.
+Review IDs for all restart groups on a host rotate together when an approval
+exits waiting/offered, an accepted restart attempt reaches terminal outcome,
+an unresolved protective restriction resolves, connection/journal authority
+changes, or complete authenticated inventory reconciliation opens disruptive
+availability; this rotation commits with the triggering transition. Unrelated safe
+next-session edits, ordinary session activity and unrelated owner holds do not
+rotate them. Existing grants remain governed by their reviewed facts, expiry,
+boot and connection, independent of the current token.
+`host_approval_review_issued`: `(host_id UUID REFERENCES hosts(id) ON DELETE
+CASCADE, group_key TEXT, review_id UUID)` primary key. Seed and rotation insert
+here in the same transaction as updating the current token; a uniqueness
+collision generates another UUIDv4. Rows survive ordinary process restarts;
+the separate boot-incarnation fence protects a stopped-stack database restore
+that rolls back this history.
 
 `host_config_attempts`: `id UUID PRIMARY KEY`, `host_id UUID NOT NULL REFERENCES
 hosts(id) ON DELETE CASCADE`, `group_key TEXT NOT NULL`, `approved_digest TEXT NOT
