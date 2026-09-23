@@ -8481,6 +8481,17 @@ bookkeeping, **not** proof of physical presence or absence. `GET
 /v1/admin/storage/homes` keeps its existing rows and pagination behavior.
 The OpenAPI route entry is staged with the handler so route drift remains green.
 
+Each claim item also includes `pending_home_operation: boolean`. `true` means an
+unresolved managed-home swap may have mounted this canonical target, even if
+the corresponding session is now terminal or absent. It is not proof that a
+mount exists. The flag is read from the durable claim hold; it is never inferred
+from `state_detail` or a heartbeat. The admin read does not expose the hold's
+session ID, token, time, mount, provider or ref. Existing filters, ordering,
+cursor, `state`, `conflict_reason`, and the legacy homes endpoint are unchanged.
+Older clients ignoring this additive item field retain their existing reads;
+the console must show the flag and direct the operator to the audited repair
+workflow in #347 when it remains after a reconnect or synthetic reap.
+
 `legacy_location_uncertain` means legacy rows are divergent, null-host or
 otherwise cannot establish one owner; `claim_owner_missing` means the claimed
 host was deleted; `location_mismatch` means a later known row names a host
@@ -8551,6 +8562,19 @@ without an agent home-absence signal, a claim-only uncertain reservation
 requires manual inspection and repair. An operator repair workflow is deferred
 to accreleus/quasar#347; RH05 never chooses or deletes a conflicting
 copy automatically.
+
+The 0090 pending-home hold independently
+blocks that canonical target's launch, swap, local launch, tombstone, GC pull,
+GC confirmation and claim release. `home_conflict` keeps its fixed message and
+reveals neither hold nor session identity to the caller. A successful swap or
+rollback callback cannot by itself clear a hold because the current callback
+does not identify the operation; the authenticated terminal report for the
+same historical session and owner host may clear it, including after a
+synthetic reap. A transport timeout, lost ack, heartbeat omission, reconnect
+reaper or host deletion does not. If terminal proof never arrives, the admin
+flag stays true for #347 audited repair. User or parent-app deletion returns
+its existing conflict envelope while a hold exists; it cannot cascade away
+the claim. No legacy homes endpoint request or response changes.
 
 `GET /v1/admin/hosts/{id}/images/cleanup` previews each managed image/version
 with its protected reason and fence generation. `POST` takes exact image/version

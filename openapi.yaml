@@ -7859,7 +7859,7 @@ components:
     AdminHomeClaim:
       type: object
       additionalProperties: false
-      required: [user_id, username, canonical_app_id, app_name, host_id, host_name, state, conflict_reason, materialized_at, recorded_host_ids]
+      required: [user_id, username, canonical_app_id, app_name, host_id, host_name, state, conflict_reason, materialized_at, recorded_host_ids, pending_home_operation]
       properties:
         user_id: { type: string, format: uuid }
         username: { type: [string, "null"] }
@@ -7872,6 +7872,7 @@ components:
           type: [string, "null"]
           enum: [legacy_location_uncertain, claim_owner_missing, location_mismatch, gc_pending, null]
         materialized_at: { type: [string, "null"], format: date-time }
+        pending_home_operation: { type: boolean, description: An unresolved managed-home swap may have mounted this canonical target; this is not proof of a current mount. }
         recorded_host_ids:
           type: array
           items: { type: string, format: uuid }

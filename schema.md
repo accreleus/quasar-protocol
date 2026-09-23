@@ -2741,6 +2741,61 @@ advanced within `BIGINT`.
 | 0092 `host_image_success_history` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL REFERENCES image_catalog(id) ON DELETE CASCADE`, `current_version TEXT NOT NULL`, `previous_version TEXT NULL`, `verified_at TIMESTAMPTZ NOT NULL`, `PRIMARY KEY (host_id,image_id)` | Prior successful managed-image version changes only after a newer version is verified prepared. Separate FKs keep retention history when the current `host_images` inventory row is removed or refreshed. Unknown prior history stays unknown and cleanup fails closed. |
 | 0093 `host_image_operation_fences` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL REFERENCES image_catalog(id) ON DELETE CASCADE`, `generation BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0)`, `state TEXT NOT NULL CHECK (state IN ('idle','removing'))`, `attempt_id UUID NULL`, `PRIMARY KEY (host_id,image_id)` | Separate FKs allow a fence before `host_images` inventory exists. Requirement writers increment generation; launches take a shared lock without incrementing it. `removing` blocks ready/launch until verified re-ensure. |
 
+**0090 managed-home recovery hold.**
+`managed_home_claims` also has nullable `pending_swap_session_id UUID`,
+`pending_swap_token UUID`, and `pending_swap_started_at TIMESTAMPTZ`, with a
+named CHECK requiring all three NULL or all three non-NULL. The session ID is
+historical identity, deliberately not a foreign key: synthetic session reaping,
+session deletion, restart and host deletion must not erase an uncertain mount.
+The hold's historical session ID and random token are internal CAS identities;
+the hold relationship is never sent to an agent or exposed in an API, event,
+trace, log or diagnostic export. Existing session APIs retain their own session
+IDs. There is no new session state or agent wire field. Presence of all three
+columns is a durable
+**pending-home hold**; it does not assert the target was mounted. The existing
+claim owner, state, conflict reason and `materialized_at` retain their signed
+meanings. The 0090 down migration drops the claim table with these columns.
+
+Before resolving or sending a managed-home `session_swap_app`, the control plane
+atomically records the target claim's hold under the session row (when live),
+claim row, then home row lock order. It records the exact target canonical
+parent, user, owner host and session. A second swap to a claim with any hold is
+refused until that hold is resolved; an independent target claim may acquire its
+own hold. Claim-only targets are covered. A local resolution failure before any
+send, a transport path that proves no delivery, or an explicit authenticated
+agent rejection can clear only the same token on the same claim. Timeout, lost
+ack, disconnect, callback ambiguity and crash never prove non-acceptance and
+leave the hold. The hold survives ordinary `state_detail` changes, Stop,
+`ReapHostExceptRunning`, heartbeat omission reaping and terminal session row
+deletion. Reapers may change the session's public state but must not release the
+claim hold.
+
+Current `session_state` swap callbacks carry no operation identity. A
+`running`/`swapping`, `swap complete` or `rolled back` callback, including a
+repeated or out-of-order one, therefore cannot clear the target hold even when
+it changes the session's executable app identity. An authenticated terminal
+`session_state` from the claim's owner host for the exact historical session
+ID proves that session no longer mounts any target; under session (if present)
+then claim lock, it may CAS-clear holds for that session and host, including
+after a prior synthetic reap. A synthetic terminal transition, heartbeat list,
+host deletion, claim conflict or stale callback from another host never clears
+one. If no such proof arrives, only audited operator repair (#347) can clear
+it. A cleared token is never reused. New launch, swap or local launch of a
+held canonical home is refused with the same privacy-safe `home_conflict` as
+other uncertain ownership; the signed claim owner is not reassigned.
+
+Tombstone, agent GC pull and GC confirmation treat a held claim as in use even
+if its session row is terminal, missing, or still names the old app. They lock
+the claim before the home row and refuse tombstoning/reaping/deleting that
+home or releasing its claim while the hold is present. Host deletion preserves
+the hold when its existing 0090 trigger changes ownership to
+`conflict/claim_owner_missing`. User or canonical-parent deletion must refuse
+while any of its claims has a hold; cascade may not erase this evidence.
+Deleting a derived tile alone does not delete its parent's claim or hold and
+keeps its existing active-session guard. These guards also apply to direct SQL
+deletion through 0090 triggers, rather than relying
+only on HTTP handlers. A failed safety check leaves data and claim unchanged.
+
 0090 also adds nullable `sessions.managed_home_id UUID` and `sessions.managed_home_mount_sha256
 TEXT CHECK (managed_home_mount_sha256 ~ '^[0-9a-f]{64}$')`. Both are written together before sending
 the matching session assignment; named CHECK
