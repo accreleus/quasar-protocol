@@ -2770,6 +2770,36 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: "Old agents only: restart_required when a restart-class knob changed with live sessions and restart_confirm != true (body carries live_sessions). RH05-capable agents save the edit with 200 instead." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /v1/admin/hosts/{id}/policy:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin]
+      summary: Read typed host configuration policy and independent evidence views (RH05).
+      x-required-role: admin
+      responses:
+        "200": { description: Policy view., content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicy" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: Atomically edit typed policy choices by expected revision (RH05).
+      description: >-
+        Validates the whole edit before persistence. A successful edit commits choices, a
+        monotone revision and reconciliation obligation in one transaction; offline intent is
+        saved as pending. A stale edit does not write and returns the current view and changed
+        keys. A relevant edit supersedes an unstarted idle approval.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicyPatch" } } }
+      responses:
+        "200": { description: Saved policy view., content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicy" } } } }
+        "400": { description: validation_failed or unsupported_source., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: stale_revision with current view and changed keys., content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicyConflict" } } } }
   /v1/admin/hosts/{id}/readiness-overrides/{check_id}:
     parameters:
       - { $ref: "#/components/parameters/PathId" }
