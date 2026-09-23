@@ -291,6 +291,32 @@ A node must prove it's allowed to join before it can register.
 On reconnect, `auth` is `{ "node_secret": "<issued-earlier>" }` and `node_name` must match.
 The control plane replies `registered` (below) or `{type:"error", ...}` and closes on auth failure.
 
+**RH05 managed-home terminal proof (optional, additive):** a cleanup-capable
+agent includes `"terminal_home_cleanup_v1": true` in this `register` message.
+Absent or false means unsupported. The control plane binds this assertion to
+the authenticated **connection epoch**, not a prior `agent_version` string or
+stored host value; every reconnect replaces it. Older agents register as
+before and continue their existing session behavior, but their terminal
+reports cannot automatically clear RH05 pending-home holds. The admin claim
+flag remains visible until qualified proof or audited repair. The control
+plane never treats a `source_commit` or version comparison alone as proof.
+
+An agent may advertise true only if it obeys this guarantee for every session:
+it removes and verifies absence of **all** original and swapped source
+containers before emitting terminal `session_state{stopped|failed}` or an
+`ack{ok:false}` that claims a command was rejected without side effects. It
+retains local home references until that cleanup succeeds. A fatal swap must
+tear down the current source before reporting `failed`; an abandoned or
+panicked runner must inspect and remove its containers before reporting
+`failed` or freeing references. If cleanup cannot be verified, the agent
+withholds terminal proof and retains protection; it must not send `failed`
+merely because a runner thread ended. On startup it reconciles orphaned
+containers and any queued pre-capability terminal reports before advertising
+true; an old queued report cannot acquire the new capability by replaying on
+a newer connection. These requirements are verified by agent tests for fatal
+swap and abandoned-runner paths. This is a behavioral change for agents that
+advertise the capability, not a change to `session_state` or ack JSON shape.
+
 **Optional `images` array (image-management P2 amendment).** The agent may include
 `"images": [{ "image_id": "steam", "version": "2026.08.07", "state": "ready" }, ...]` — the
 managed catalog images it actually has (verified against its docker daemon, by `image_id`s it
@@ -1366,15 +1392,17 @@ does not change the reservation; see `schema.md`):
   path). **Roll back when possible; only fail the session when rollback is impossible.**
 
 **RH05 #341 managed-home recovery hold:**
-No field or ack changes here. These running swap callbacks do not echo the
+These running swap callbacks do not echo the
 `session_swap_app.id`, so a repeated or out-of-order completion or rollback
 cannot prove which managed-home target operation has finished. The control
 plane retains a durable target-claim hold across such callbacks and synthetic
-session reaping. Only its proof of no command delivery, an explicit matching
-`ack{ok:false}`, an authenticated terminal `session_state` for the exact
-historical session on the claim owner host, or audited repair may clear that
-hold. An ack timeout is not rejection. This protection is internal to the
-control plane and requires no behavior change from older agents.
+session reaping. The original assigned home has the same hold. Only proven
+no-delivery before socket handoff, a matching negative ack from a connection
+advertising `terminal_home_cleanup_v1`, a terminal `session_state` from that
+capability's authenticated owner-host connection for the exact historical
+session, or audited repair may clear a hold. An ack timeout is not rejection;
+a late negative ack after control-plane restart has no in-memory command-to-
+hold correlation. Older agents' terminal reports retain holds for repair.
 
 ### `session_display_update` — live render resolution / UI scale / external resolution (session-display-update; session-display-stream, approved 2026-08-16)
 > *Additive amendment. New downstream message; no existing message, field, or ack contract

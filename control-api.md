@@ -1465,7 +1465,10 @@ handed to tooling. Semantics:
 - **Reaping**: `users.ephemeral_expires_at` (nullable; non-null = throwaway) marks the row;
   a reaper deletes expired ephemeral users at boot and on an interval, and the existing
   user-delete cascade removes their sessions and device bindings. A reaped identity's token
-  stops working immediately. A crashed test run cannot leave an identity behind.
+  stops working immediately. RH05 keeps an expired identity with a durable pending-home
+  hold for audited repair: the reaper skips that user individually and continues its batch.
+  An expired token is unusable while its held identity remains. A crashed test run that
+  created a managed home can therefore leave an identity until the hold is resolved.
 - **Response shape** is compatible with `POST /v1/auth/login`, plus `storage_keys` — the
   three web-SPA localStorage entries ready for injection by browser-automation tooling.
 
@@ -2539,7 +2542,8 @@ Admin-only. Removes an app from the catalog entirely.
   migration `0014`). *(Phase 2: its **entitlements** cascade away too — `entitlements.app_id` is
   `ON DELETE CASCADE`. An entitlement to an app that no longer exists has no meaning, and leaving
   one behind would silently re-grant access if the id were ever reused.)*
-- **Errors:** `404 not_found` (no such app); `409 conflict` (in use by a non-terminal session).
+- **Errors:** `404 not_found` (no such app); `409 conflict` (in use by a non-terminal session
+  or a canonical managed-home hold awaiting cleanup proof or audited repair).
 
 ### Runtime presets *(UI-P3, admin)*
 A **runtime preset** is a reusable container configuration many apps inherit instead of
@@ -8482,15 +8486,18 @@ bookkeeping, **not** proof of physical presence or absence. `GET
 The OpenAPI route entry is staged with the handler so route drift remains green.
 
 Each claim item also includes `pending_home_operation: boolean`. `true` means an
-unresolved managed-home swap may have mounted this canonical target, even if
+unresolved original assignment or managed-home swap may have mounted this
+canonical target, even if
 the corresponding session is now terminal or absent. It is not proof that a
 mount exists. The flag is read from the durable claim hold; it is never inferred
 from `state_detail` or a heartbeat. The admin read does not expose the hold's
 session ID, token, time, mount, provider or ref. Existing filters, ordering,
 cursor, `state`, `conflict_reason`, and the legacy homes endpoint are unchanged.
-Older clients ignoring this additive item field retain their existing reads;
-the console must show the flag and direct the operator to the audited repair
-workflow in #347 when it remains after a reconnect or synthetic reap.
+Older clients ignoring this additive item field retain their existing reads.
+The #341 admin claim console SHOULD show the flag and direct the operator to
+the audited repair workflow in #347 when it remains after a reconnect or
+synthetic reap; any rendering follows `design_handoff_v3/` and is visually
+verified. The API field remains authoritative even if that UI work is deferred.
 
 `legacy_location_uncertain` means legacy rows are divergent, null-host or
 otherwise cannot establish one owner; `claim_owner_missing` means the claimed
@@ -8563,18 +8570,32 @@ requires manual inspection and repair. An operator repair workflow is deferred
 to accreleus/quasar#347; RH05 never chooses or deletes a conflicting
 copy automatically.
 
-The 0090 pending-home hold independently
-blocks that canonical target's launch, swap, local launch, tombstone, GC pull,
-GC confirmation and claim release. `home_conflict` keeps its fixed message and
-reveals neither hold nor session identity to the caller. A successful swap or
-rollback callback cannot by itself clear a hold because the current callback
-does not identify the operation; the authenticated terminal report for the
-same historical session and owner host may clear it, including after a
-synthetic reap. A transport timeout, lost ack, heartbeat omission, reconnect
-reaper or host deletion does not. If terminal proof never arrives, the admin
-flag stays true for #347 audited repair. User or parent-app deletion returns
-its existing conflict envelope while a hold exists; it cannot cascade away
-the claim. No legacy homes endpoint request or response changes.
+The 0090 pending-home hold independently blocks a new session's launch, swap
+or local launch of that canonical target, plus its tombstone, GC pull, GC
+confirmation and claim release. A swap by the **same** session into an
+already-held canonical target may reuse the existing hold without replacing
+its token; rejection of that later command does not release the earlier hold.
+`home_conflict` keeps its fixed message and reveals neither hold nor session
+identity to the caller. A successful swap or rollback callback cannot clear a
+hold because the current callback does not identify the operation. Only a
+terminal report on the claim-owner host's authenticated connection with
+`terminal_home_cleanup_v1` may clear that historical session's holds, including
+after a synthetic reap; a late such report changes no public session state,
+event, reservation or materialization. A current/older agent without the
+capability, timeout, lost ack, heartbeat omission, reconnect reaper or host
+deletion leaves the admin flag true for #347 audited repair. The signed admin
+host-delete path may tombstone a held home but retains a null-host conflict
+claim and hold; the null-host janitor never deletes that claim.
+
+`DELETE /v1/users/{id}` and `DELETE /v1/apps/{id}` return HTTP `409` with
+`ErrorEnvelope.error.code="conflict"` and fixed message
+`Managed home cleanup is pending`
+when deleting the user or canonical parent would cascade a held claim. An
+expired ephemeral-user reaper skips that user alone and continues other users.
+Neither deletion may erase the hold; derived-tile-only deletion keeps the
+canonical parent claim and its existing active-session guard. Direct SQL
+deletion raises named SQLSTATE `QH001` instead of silently skipping a cascade.
+No legacy homes endpoint request or response changes.
 
 `GET /v1/admin/hosts/{id}/images/cleanup` previews each managed image/version
 with its protected reason and fence generation. `POST` takes exact image/version

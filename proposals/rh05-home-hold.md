@@ -1,166 +1,205 @@
-# RH05 #341 proposed recovery addendum: durable home-operation hold
+# RH05 #341 recovery addendum: durable managed-home hold
 
-**Status:** proposal for Opus review and explicit owner sign-off. This branch is
-not the published contract. The exact candidate frozen diff is in `schema.md`,
-`control-api.md` and `openapi.yaml` in this worktree. It builds on the
-owner-signed #341 home-claim and mount-binding contract at `cb752156`.
+**Status:** local proposal for fresh Opus review and explicit owner sign-off.
+This branch is not the published contract. The exact candidate frozen diff is
+in `schema.md`, `control-api.md`, `agent-api.md` and `openapi.yaml` on top of the
+owner-signed #341 pin `cb752156`. No shared database has applied 0090. The
+candidate extends #341's reserved 0090 migration, not 0091 (#342), and does
+not rewrite a deployed migration.
 
 ## Failure and scope
 
-`session_swap_app` leaves `sessions.app_id` on the old app until a callback.
-The current in-memory target and `state_detail='swapping'` protect the target
-only while the session row remains nonterminal. `ReapHostExceptRunning` can
-turn a `stopping` row into `failed` on reconnect; heartbeat omission can also
-terminalize it. Neither is authenticated proof that the agent stopped using
-the target home. The synthetic terminal state erases the durable detail, and
-the old app ID does not identify the target. Tombstone or GC can then run.
-
-The addendum stores a target-specific hold on its existing canonical claim.
-It changes no agent message, endpoint path, public session state, placement
-rule, or home materialization proof. It does not make a callback without an
-operation ID prove which swap completed. Claims remain owned by the same host.
+A swap target lives only in memory while `sessions.app_id` still names the old
+app. A reconnect or heartbeat reaper can make the session terminal and erase
+`state_detail='swapping'` without agent teardown proof, exposing that target
+to tombstone and GC. The original assigned managed home has the same gap once
+the session is synthetically terminal. Existing agent `failed` reports also
+cannot be accepted as unmount proof: fatal swap currently reports failure
+before teardown, and an abandoned runner may report failure while its
+container remains. This addendum protects both original and swap-target
+canonical claims, and makes cleanup evidence an explicit agent capability.
 
 ## Exact 0090 schema addition
 
-Extend the unpublished 0090 up migration; do not insert a new migration before
-0091 or alter any schema that has been deployed. 0090 currently belongs to
-#341; 0087, 0088, 0089, 0091, 0092 and 0093 are reserved for their tickets.
+Extend `managed_home_claims` in the unpublished 0090 up migration:
 
 ```sql
 ALTER TABLE managed_home_claims
-  ADD COLUMN pending_swap_session_id uuid,
-  ADD COLUMN pending_swap_token uuid,
-  ADD COLUMN pending_swap_started_at timestamptz,
-  ADD CONSTRAINT managed_home_claims_pending_swap_ck CHECK (
-    (pending_swap_session_id IS NULL AND pending_swap_token IS NULL
-      AND pending_swap_started_at IS NULL)
+  ADD COLUMN pending_home_session_id uuid,
+  ADD COLUMN pending_home_token uuid,
+  ADD COLUMN pending_home_started_at timestamptz,
+  ADD CONSTRAINT managed_home_claims_pending_home_ck CHECK (
+    (pending_home_session_id IS NULL AND pending_home_token IS NULL
+      AND pending_home_started_at IS NULL)
     OR
-    (pending_swap_session_id IS NOT NULL AND pending_swap_token IS NOT NULL
-      AND pending_swap_started_at IS NOT NULL)
+    (pending_home_session_id IS NOT NULL AND pending_home_token IS NOT NULL
+      AND pending_home_started_at IS NOT NULL)
   );
-CREATE INDEX managed_home_claims_pending_swap_session_idx
-  ON managed_home_claims (pending_swap_session_id)
-  WHERE pending_swap_session_id IS NOT NULL;
+CREATE INDEX managed_home_claims_pending_home_session_idx
+  ON managed_home_claims (pending_home_session_id)
+  WHERE pending_home_session_id IS NOT NULL;
 ```
 
-No FK links the marker to `sessions`: session reaping/deletion cannot erase
-it. The token is a random UUID used for internal compare-and-swap, never a
-wire field or exported identifier. The hold's historical session ID and token
-are absent as hold metadata from API responses, events, traces, logs and
-diagnostic exports; existing session APIs keep their own IDs. The
-preexisting claim PK bounds one hold
-per canonical user/home; multiple target claims may hold the same session.
-This addition does not change `state`, `conflict_reason`, `materialized_at`,
-the host-delete trigger, or legacy backfill. The existing 0090 down migration
-drops the table and therefore the new columns and index.
+The three columns can instead be part of the original `CREATE TABLE`; the
+resulting schema is identical. No FK links the marker to `sessions`, so a
+synthetic terminal state or session deletion cannot erase it. The claim's
+existing `host_id` remains the owner; there is no second host field. The
+random token is internal CAS identity, not sent on the wire or exported.
+The hold's historical session relationship is absent from API responses,
+events, traces, logs and diagnostics; existing session resources retain
+normal session IDs. Claim state, conflict reason and `materialized_at` retain
+their signed meanings. The partial index supports qualified late terminal
+reconciliation when the session row is gone.
+The first accepted assigned-to-running transition may still materialize the
+original claim under its signed mount-binding proof; the hold remains until
+qualified cleanup proof.
 
-Add 0090 `BEFORE DELETE` guards on `managed_home_claims`, `users` and canonical
-`apps`: if a matching claim has a non-NULL pending token, refuse the delete.
-This prevents direct SQL or existing hard-delete endpoints from cascading
-away the only recovery marker. The HTTP user/parent-app deletion paths map
-this guard to their existing 409 conflict envelope. Deleting a derived tile
-alone does not cascade the canonical parent's claim; its existing active-
-session guard still applies. Host deletion may proceed under the signed host
-trigger; it leaves the marker on a null-host conflict, requiring #347 repair.
+0090 adds three `BEFORE DELETE` triggers and `_fn` functions:
 
-## State transitions and evidence
+| Table | Trigger | Guard |
+| --- | --- | --- |
+| `managed_home_claims` | `rh05_guard_managed_home_claim_delete` | Refuse direct or cascading deletion of a held claim. |
+| `users` | `rh05_guard_user_delete_home_hold` | Refuse deletion while any of that user's claims is held. |
+| `apps` | `rh05_guard_parent_app_delete_home_hold` | Refuse canonical parent deletion while any claim for it is held; a tile-only deletion leaves the parent claim. |
 
-| Event | Claim hold | Session/public outcome | Reason |
-| --- | --- | --- | --- |
-| Managed-home swap target selected | Set `(session, token, started_at)` in claim transaction before mount resolution/send | `state_detail='swapping'` remains advisory | Protects claim-only and live homes while app ID still names old app. |
-| Mount resolution fails before any send | Clear matching token | Swap errors | Agent could not receive target payload. |
-| Send proves no delivery or authenticated agent rejects | Clear matching token | Swap rejects | Exact local token and no acceptance proof. |
-| Send timeout, lost ack, disconnect or process crash | Retain | Existing response/retry semantics | Acceptance/mount is uncertain. |
-| Accepted running, swapping, complete or rolled-back callback | Retain | Existing app ID/detail transitions may occur | Callback has no swap operation ID; duplicate/out-of-order delivery is ambiguous. |
-| Operator Stop, reconnect reap, heartbeat omission, synthetic terminal or session deletion | Retain | Existing session outcome | Control-plane transition is not proof of unmount. |
-| Authenticated terminal `session_state` from claim owner for exact historical session | CAS-clear matching session/host holds | Existing terminal or late terminal processing | Agent reports the session ended; no target remains mounted by that session. |
-| Host deletion or missing agent | Retain | Claim may become `conflict/claim_owner_missing` | No negative mount evidence. |
-| #347 audited operator repair | Clear under documented inspection and CAS | Separate workflow | Only recovery when no authenticated terminal proof arrives. |
+Each function locks affected claims in ascending
+`(user_id,canonical_app_id)` order and, if any has a non-NULL token, uses
+`RAISE EXCEPTION USING ERRCODE='QH001', MESSAGE='managed home operation pending'`.
+It returns `OLD` for an allowed DELETE; it **never returns NULL** to skip a
+foreign-key cascade. HTTP handlers map only `QH001` to their existing
+`409 conflict` envelope. The 0090 down migration drops all three triggers
+and functions, then the partial index and table, after the sessions binding
+columns and signed host-delete trigger. It never deletes `user_homes` or
+backing data. 0087, 0088, 0089 and 0091–0093 remain owned by other tickets.
 
-The terminal callback handler must process a late authenticated terminal for
-the marker even if a synthetic reap already made the session row terminal;
-it must not reverse or re-notify that public session transition. It checks the
-authenticated reporting host against the claim owner, historical session ID
-and token under the session row (if present) then claim lock. An untrusted
-HTTP caller, another host, heartbeat list, swap callback, stale negative ack,
-or detached callback cannot clear a marker. A terminal report for a session
-ID that has never been reused is evidence that the reporting agent no longer
-mounts any of that session's targets, whether the report was delayed before
-or after the swap; a pre-swap terminal means the agent could not subsequently
-accept the swap for that same session. A resolved token is never reused.
-The pre-dispatch and ack paths compare the exact token so a late failure for
-an older request cannot clear a newer hold.
+## Agent proof capability
 
-**Conservative cost:** a successful managed-home swap can retain a hold while
-the session remains alive; another launch/swap of the same canonical home and
-home deletion are refused until authenticated terminal proof or #347 repair.
-This is necessary with the current callback wire and is visible to admins.
-If the product requires earlier release, a separately reviewed operation ID
-echo or authoritative mount inventory is needed; this proposal does not
-silently infer completion from an ambiguous callback.
+An agent may set optional `register.terminal_home_cleanup_v1=true` only if it
+removes and verifies absence of every original and swapped source container
+**before** terminal `session_state{stopped|failed}` and holds home refs until
+cleanup succeeds. An `ack{ok:false}` for assign/swap must also certify that
+command caused no home side effect. Fatal swap tears down before reporting
+failure. Abandoned or panicked runners verify/remediate containers before
+reporting failure or freeing refs; if cleanup cannot be proved, they withhold
+terminal proof and keep protection. Startup reconciles orphan containers and
+queued pre-capability terminal events before advertising true, so an old event
+cannot inherit a new capability on replay. Agent tests must exercise both
+fatal-swap and abandoned-runner paths.
 
-## Interface and compatibility examples
+The control plane binds the capability to the authenticated connection epoch,
+not to a version string, stored host field, or previous registration. Missing
+or false means unsupported and every reconnect replaces the value. Older
+agents keep their existing wire and session behavior, but their terminal
+reports cannot automatically clear holds. This has a visible compatibility
+cost: managed-home reuse or cleanup may need #347 audited repair until the
+host is upgraded and a qualified terminal is observed. The admin claim read
+shows the hold; no API falsely reports cleanup as proved.
 
-`GET /v1/admin/storage/home-claims` adds one required boolean per item, with
-all existing filters/cursors and state meanings unchanged:
+## State and evidence matrix
+
+| Event | Hold outcome | Proof boundary |
+| --- | --- | --- |
+| Original managed-home assignment | Set with `sessions.managed_home_id` and digest in one dispatch transaction before `session_assign`. | Commit precedes send; no physical-use claim. |
+| Managed-home swap target selected | Set under session/claim/home locks before mount resolution or `session_swap_app`. | Covers claim-only targets and old `sessions.app_id`. |
+| Same session targets an already-held canonical home | Reuse existing token/time; never replace or clear on this later command's failure. | Allows tile-to-tile and A→T→A→T without another writer. |
+| Other session targets a held canonical home | Refuse generic `home_conflict`; unrelated canonical homes proceed. | Single writer despite synthetic terminal session. |
+| Local failure before send; no authenticated connection at send time; failure before frame handed to socket | CAS-clear only newly created matching token. | No delivery possible. |
+| Socket write error after handoff, timeout, lost ack, disconnect or crash | Retain. | Delivery/acceptance uncertain. |
+| Negative ack from cleanup-capable connection and exact in-memory command→token correlation | CAS-clear only newly created matching token; original claim reservation remains. | Rejection promises no home side effect. |
+| Negative ack after restart or for reused old token | Retain. | No durable correlation; token never reused. |
+| Running, swap complete or rollback callback | Retain. | Callback lacks operation ID, so repeated/out-of-order result is ambiguous. |
+| Stop, reconnect/offline/heartbeat reap, restart or session deletion | Retain. | Control-plane terminal is not unmount proof. |
+| Authenticated terminal from cleanup-capable connection, reporting host equals non-NULL claim host and existing session host | CAS-clear all that historical session's holds in ordered claim locks. | Agent certifies all its source containers are gone. |
+| Late qualified terminal after synthetic terminal/deleted row | Change matching hold columns only. | No session rewrite/event/reservation/materialization. |
+| Old/unknown agent terminal, wrong-host terminal, NULL claim host, or failed cleanup | Retain for #347. | No qualified proof. |
+| Host deletion | Tombstone its homes, set affected claims `conflict/claim_owner_missing` with NULL owner, retain holds. | Null-host janitor may remove row, never claim. |
+
+`session_state` has no swap operation ID, so successful/rolled-back swap
+callbacks cannot clear a target hold. The same session can carry holds on
+several canonical claims after multiple swaps. A cleanup-capable terminal
+report clears them together; this is safe because session IDs are never
+reused. A terminal event generated before a swap means that same agent could
+not subsequently accept a swap for that stopped session. No terminal report
+from a pre-capability agent counts, even if its message is later replayed.
+
+## Transaction, API and deletion rules
+
+Session rows if present (ascending ID) precede claim rows in ascending
+`(user_id,canonical_app_id)` order, then `user_homes`. If the session row is
+gone, the partial index locates its held claims before ordered locks. This
+order covers terminal cleanup, user/app deletion, #347 repair, launch,
+tombstone and GC. No network operation runs while DB locks are held.
+Tombstone, GC pull and GC confirmation refuse a held canonical home even if
+its session is terminal/missing or still names an old app. The signed admin
+host-delete path is an explicit exception: it can tombstone while preserving
+the claim and hold as a NULL-host conflict. Null-host janitor cleanup never
+releases that claim. User and canonical-parent hard deletion refuse while
+held; unheld claims retain signed cascade behavior. Tile-only deletion keeps
+the parent claim and existing active-session guard.
+
+`GET /v1/admin/storage/home-claims` adds required boolean
+`pending_home_operation`. It means *may have mounted*, not *currently mounted*,
+and reveals no hold session, token, source path, mount or provider. Filters,
+order, cursor, state and conflict reason are unchanged. The #341 admin console
+SHOULD show the flag with the `design_handoff_v3/` visual verification path;
+the API is authoritative if UI work is deferred. Legacy
+`GET /v1/admin/storage/homes` remains unchanged. Ordinary launch refusal
+uses the signed fixed `409 home_conflict` message, with no hold details.
+
+`DELETE /v1/users/{id}` and `DELETE /v1/apps/{id}` use HTTP 409 with
+`ErrorEnvelope.error.code="conflict"` and fixed message
+`Managed home cleanup is pending` for a held user or canonical parent. The expired ephemeral-user
+reaper skips held users one by one while continuing its batch; their tokens
+expire as before, but identity removal waits for proof or #347 repair. This
+amends the prior unconditional-reap wording. Strict older API clients need
+regeneration for the new required admin boolean; clients that ignore unknown
+JSON item fields continue reading. Older agents require no new message
+shape, but absent cleanup capability leaves holds unresolved.
+
+Example admin item:
 
 ```json
 {"items":[{"user_id":"00000000-0000-4000-8000-000000000011","username":"test-user","canonical_app_id":"00000000-0000-4000-8000-000000000021","app_name":"Test App","host_id":"00000000-0000-4000-8000-000000000031","host_name":"test-role","state":"reserved","conflict_reason":null,"materialized_at":null,"recorded_host_ids":[],"pending_home_operation":true}],"next_cursor":null}
 ```
 
-The flag means *may have mounted*, not *currently mounted*. No token, session
-ID, provider/ref or mount path appears. A caller attempting to launch a held
-canonical home receives the existing `409 home_conflict` fixed message, which
-does not reveal the hold. `GET /v1/admin/storage/homes` is unchanged and still
-cannot show claim-only uncertainty. An older API client that ignores unknown
-JSON object keys can read the item; a strict client must regenerate from the
-additive OpenAPI field. Older agents keep their existing swap/terminal wire
-behavior; they do not have to understand the marker. If they never report an
-authenticated terminal, the hold remains for repair. An old control plane
-must not be used against a migrated 0090 DB because it cannot enforce the new
-hold; the migration-compatible rollback ref must include this behavior.
-
-## Transaction and refusal rules
-
-Use the signed lock order: session row if present, then target claim, then
-`user_homes`. No network call while DB locks are held. The per-user advisory
-lock serializes first claims; target hold creation and host/placement checks
-commit before dispatch. Every launch, swap and local launch checks the target
-claim hold in its reservation transaction. A held target returns generic
-`home_conflict` before derived-tile `home_not_provisioned`. A second swap to a
-different target may proceed only if its own claim is safe; the earlier hold
-continues to protect its target. Tombstone, GC pull and GC confirmation check
-the target claim's hold, regardless of the session row's current state or app
-ID. A stale GC confirmation cannot bypass the claim lock or delete the hold.
+An old control plane must never be deployed against a database migrated to
+this 0090: it cannot enforce holds. A rollback ref must embed this migration
+and protection. No live host, image or user data is modified by this draft.
 
 ## Acceptance tests for #341 implementation
 
-Use real ephemeral Postgres and operator/session seams; deterministic transport
-adapters control ack/callback order. These are required in addition to the
-already signed #341 tests:
+Use real ephemeral Postgres for lock/concurrency and a deterministic transport
+adapter for delivery order; run agent tests in the sanctioned Rust container:
 
-1. Target claim and hold commit before dispatch; tombstone and GC pull refuse
-   during mount resolution and after a lost ack, including claim-only target.
-2. A second session launch and same/different-session swap to the held target
-   refuse without leaking the first session or host; unrelated canonical home
-   still works independently.
-3. Stop, restart, reconnect `ReapHostExceptRunning`, heartbeat omission and
-   session-row deletion retain hold and admin flag; no GC confirmation release.
-4. Duplicate and out-of-order `swap complete`/`rolled back`/ordinary running
-   callbacks never clear the hold. A late explicit reject cannot clear a newer
-   token. Pre-send failure and explicit matching rejection clear safely.
-5. Authenticated matching terminal callback clears exact matching holds once,
-   even after synthetic reap. Wrong host/session and duplicate terminal do not
-   affect another hold. Terminal public state is not replayed.
-6. Host deletion leaves hold on null-host conflict; user/parent deletion fails
-   closed; tile-only deletion preserves its parent claim. Direct SQL guards
-   are exercised on the isolated DB.
-7. Admin pagination and filters return `pending_home_operation` correctly;
-   legacy homes endpoint and ordinary `home_conflict` envelope remain stable.
-8. A concurrent launch/tombstone/GC race observes the same claim lock order;
-   one safe outcome commits with no deadlock or second writer.
+1. Original assignment writes binding+hold before dispatch. Synthetic
+   reconnect/heartbeat/offline reap and row deletion retain the hold; launch,
+   tombstone and GC pull/confirm refuse until qualified proof.
+2. Swap target commits hold before mount resolution; claim-only and live homes
+   stay protected during delay, lost ack, Stop and synthetic terminal.
+3. Concurrent second launch/swap into a held target refuses without leaking
+   host/session detail; unrelated canonical home proceeds. Same-session
+   tile-to-tile and A→T→A→T reuse the token; reject of later swap leaves it.
+4. No-connection/before-socket failure clears only a new token. Post-handoff
+   write error, timeout, lost ack and late negative ack after restart retain.
+5. Duplicate/out-of-order swap completion/rollback/ordinary running never
+   clear. Qualified matching terminal clears exact session holds once, even
+   after synthetic reap. Wrong host, NULL owner, missing capability and old
+   queued terminal do not; late proof changes no public session side effect.
+6. Agent fatal-swap test verifies source teardown and ref retention before
+   terminal report. Panicked/abandoned runner test verifies container absence
+   before terminal and no ref release/report when cleanup is uncertain.
+7. Direct SQL held-claim/user/parent delete raises `QH001` (never silently
+   skips cascade); tile-only delete retains parent claim. Ephemeral reaper
+   skips held user and continues deleting independent expired users.
+8. Host deletion tombstones held home, leaves NULL-host conflict and hold;
+   null-host janitor can remove its row but never claim. GC/host-delete race
+   preserves the hold.
+9. Admin pagination/filter read shows boolean without private identifiers;
+   legacy homes read and generic refusal stay stable. Pre-capability agent
+   keeps hold visible after terminal; capable agent clears after verified
+   cleanup.
 
-No local test proves physical unmount or multi-host absence. Live acceptance
-requires the combined migration-capable integration ref (0087+0088+0090),
-both GPU test roles, isolated test data, exact source/image/schema identities,
-and separate authorization for deployed-stack or backing-home mutation.
+Local tests do not prove physical unmount or multi-host absence. Live acceptance
+requires combined 0087+0088+0090 migration-capable integration ref, both GPU
+test roles, isolated data, exact source/image/schema identities, and separate
+authorization before stack or backing-home mutation.

@@ -690,7 +690,9 @@ paths:
         "409":
           description: >-
             In use by an active session (pre-existing), OR (Phase 3) the app has derived tiles and
-            ?delete_derived=true was not sent - the body then carries `derived_tiles`.
+            ?delete_derived=true was not sent - the body then carries `derived_tiles`, OR (RH05)
+            deleting the canonical parent would cascade a pending-home hold. The RH05 refusal
+            uses ErrorEnvelope code `conflict` and a fixed managed-home-pending message.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   # ─── admin: runtime presets (UI-P3) ──────────────────────────────────────
   /v1/admin/runtime-presets:
@@ -1860,13 +1862,14 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       tags: [users]
-      summary: "Delete a user (admin). (Not yet in control-api.md prose.)"
+      summary: "Delete a user (admin); RH05 refuses while a pending-home hold exists."
       x-required-role: admin
       responses:
         "204": { description: User deleted. }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   # ─── admin: images (catalog; P1 = read + sync only) ──────────────────────
   /v1/admin/images:
@@ -7872,7 +7875,7 @@ components:
           type: [string, "null"]
           enum: [legacy_location_uncertain, claim_owner_missing, location_mismatch, gc_pending, null]
         materialized_at: { type: [string, "null"], format: date-time }
-        pending_home_operation: { type: boolean, description: An unresolved managed-home swap may have mounted this canonical target; this is not proof of a current mount. }
+        pending_home_operation: { type: boolean, description: An unresolved original assignment or managed-home swap may have mounted this canonical target; this is not proof of a current mount. }
         recorded_host_ids:
           type: array
           items: { type: string, format: uuid }
