@@ -2449,20 +2449,51 @@ Only an owner releases its row. Any row restricts admission. Reason is a safe
 code derived from owner kind: manual/legacy/platform/idle_apply/recovery map
 respectively to manual_drain/legacy_drain/platform_apply/idle_configuration/
 configuration_recovery; reconciliation uses journal_reconciliation while
-pending or journal_quarantine if orphan inventory cannot be matched. Backfill existing
-manual/legacy cordons as manual or legacy owners. For each active platform run's
-`cordoned_hosts` entry, `was_cordoned = false` yields that run's platform row;
-`was_cordoned = true` preserves the preexisting manual/legacy owner and must
-not be misattributed to the run. Reconcile terminal runs still awaiting
-`cordons_restored_at`. `hosts.status = 'draining'` alone cannot identify
-an owner and must never authorize globally clearing a cordon. Existing platform
-cordon writers migrate to owner-scoped acquisition/release before the old boolean
-behavior is retired. `hosts.status` remains the compatibility/liveness projection:
+pending or journal_quarantine if orphan inventory cannot be matched. Backfill a
+legacy restriction for **every host currently draining**, even if an active or
+terminal-unrestored platform run recorded `was_cordoned = false`. That flag is a
+snapshot of status when the run first inspected the host, not proof that the
+run is its sole current owner: an administrator could have explicitly drained
+the host later, and the old schema cannot distinguish those histories. For
+every `was_cordoned = false` entry of an active or terminal-unrestored run,
+create that run's separate platform row **regardless of the host's current
+status**. In this historical backfill only, `was_cordoned = true` does not
+create a platform row and never proves a current manual hold by itself. A new
+post-0088 platform run acquires its own platform row for every host it holds,
+regardless of `was_cordoned`; an admin uncordon cannot release that run's hold.
+After 0088, reconciling a terminal run with
+`cordons_restored_at IS NULL` means only releasing that run's own platform rows
+and then stamping `cordons_restored_at`; it performs no direct
+`hosts.status` write: status is recomputed from remaining restriction rows and
+connection state in the same transaction as the row release. It never
+releases a manual/legacy row, and never re-imposes a `was_cordoned = true`
+cordon. This supersedes the direct status-writing restore and admin-cordon
+put-back promise in the 0076/0084 sections for every run reconciled after
+0088. No old status-writing restore path may run once 0088 is applied.
+Releasing a platform row never clears the legacy row; an admin explicitly
+uncordons it after reviewing the host. This conservative backfill can leave
+hosts unavailable after platform release even when the platform run was their
+only owner. When 0088 arrives during a platform apply run, **every host still
+`draining` when the migration executes is expected to retain a `legacy_drain`
+hold** until
+an operator reviews and uncordons it; release notes must say so. This is
+visible, deliberate safety behavior, not a successful automatic uncordon.
+A historical `was_cordoned = true` on a host now online or offline does not
+recreate a manual restriction: in the old schema, a non-draining status means
+the drain was already lifted by an admin or lost to a disconnect (the Phase 3
+limitation), and the old flag cannot re-establish current intent. Thus this
+rule deliberately supersedes 0084's put-back promise. The legacy backfill is
+idempotent insert-if-absent on `(host_id,owner_kind,owner_id)`; simultaneous
+active and terminal-unrestored runs each retain their own platform row.
+`hosts.status = 'draining'` alone cannot identify a unique owner and must never
+authorize globally clearing a cordon. Platform cordon writers and restore
+paths migrate to owner-scoped acquisition/release at 0088. `hosts.status`
+remains the compatibility/liveness projection:
 draining while restricted, otherwise online/offline per connection. The scheduler
 reads the restriction set under the selected host row lock in the reservation
 transaction; it cannot reserve after an idle restriction wins that lock.
 The reconciliation gate transition and its row reason update commit together.
-Backfilled manual/legacy rows use migration time as `created_at`; the original
+Backfilled legacy rows use migration time as `created_at`; the original
 cordon time cannot be reconstructed.
 
 ### 0089 — boot fence, approvals, attempts and journal inventory

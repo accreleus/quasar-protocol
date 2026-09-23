@@ -8300,11 +8300,23 @@ and `journal_quarantine` if inventory cannot be matched.
 The array sorts by owner kind alphabetically, then `created_at` ascending,
 then internal owner ID ascending as a stable tie-break; the ID is never served.
 Clients render unknown future codes as a generic admission hold; a new server
-code requires a contract amendment. Backfilled manual/legacy `created_at` is
+code requires a contract amendment. Backfilled legacy `created_at` is
 the migration time, not the original cordon time, and the console labels it
 accordingly. `status` retains its existing liveness/compatibility meaning:
 `draining` while restricted, otherwise online/offline according to connection
 state. An empty restriction array never makes an offline host schedulable.
+For migration 0088, every host still `draining` receives a visible
+`legacy_drain` restriction even if an in-flight platform run also owns it.
+Releasing that run never releases the legacy hold; an operator reviews and
+uncordons it explicitly. A platform apply that delivers 0088 can leave every
+host it cordoned with this legacy hold after the run completes. The older
+platform restore promise to directly write `hosts.status` and put back
+`was_cordoned=true` drains is superseded for runs reconciled after 0088:
+restore releases only the run's own restriction rows, recomputes the `status`
+projection from remaining rows and connection state, then records completion
+in the same transaction.
+The old status cannot distinguish a later administrator drain from the run's
+drain, so this conservative result is visible rather than silently reopened.
 
 **Existing drain/uncordon endpoint semantic amendment:** A successful drain
 acquires the fixed manual owner even when the host is already `draining` for
