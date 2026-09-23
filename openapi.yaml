@@ -2834,7 +2834,8 @@ paths:
         nonacceptance terminalizes the offered attempt and approval together;
         a restored accepted journal record reconstructs a missing attempt
         under the approval ID and advances a restored cancel_pending approval
-        to accepted in the same transaction before the inventory gate opens.
+        to accepted in the same transaction before the inventory gate opens;
+        the attempt takes the authenticated journal phase and sequence.
         The approval
         decides public phase until acceptance or terminal nonacceptance; the
         attempt decides thereafter.
@@ -2843,9 +2844,11 @@ paths:
         while a live approval exists returns attempt_conflict with current.
         Host-wide unique-index conflicts also return attempt_conflict. A terminal
         uncertain attempt with an unresolved protective restriction blocks grants.
-        Every restart-group review token rotates on a host disruptive approval
-        exit, accepted terminal outcome, protective restriction resolution or
-        connection/journal authority change. Unrelated safe next-session edits,
+        Every restart-group review token rotates when an approval leaves
+        approved/offered/cancel_pending, an accepted restart attempt reaches a
+        terminal outcome, an unresolved disruptive admission hold resolves,
+        connection/journal authority changes, or complete authenticated
+        reconciliation opens disruptive availability. Unrelated safe next-session edits,
         ordinary sessions and unrelated owner holds preserve it; rotation alone
         does not revoke another live approval.
         An offered attempt becomes cancel_pending and stays protected until
@@ -5311,7 +5314,7 @@ components:
       type: object
       required: [available, revision, content_sha256, resolved, prerequisites_sha256, prerequisites, approval_boot_incarnation, approval_review_id, remedy]
       properties:
-        available: { type: boolean, description: False while a live disruptive grant/attempt or unresolved protective uncertain attempt exists on this host; identical replay of an existing grant uses its original request and may still return 202. }
+        available: { type: boolean, description: "False for unavailable conditions including a live disruptive grant/attempt, unresolved disruptive admission hold, incomplete authenticated current-connection journal reconciliation, or missing current review-token row. Every condition is bound by the prerequisite digest or rotates the review ID when availability opens. Identical replay of an existing grant uses its original request and may still return 202." }
         revision: { $ref: "#/components/schemas/RH05Revision" }
         content_sha256: { $ref: "#/components/schemas/RH05Digest" }
         resolved: { type: object, additionalProperties: true, description: Exact resolved values proposed for this group. }
@@ -5320,7 +5323,7 @@ components:
           type: array
           items: { $ref: "#/components/schemas/RH05Prerequisite" }
         approval_boot_incarnation: { type: string, format: uuid, description: Persisted token for the current process boot. }
-        approval_review_id: { type: string, format: uuid, description: Present even when unavailable but grants nothing then. Stable during a live waiting/offered grant; all restart-group IDs on the host rotate on grant exit, accepted restart terminal outcome, protective restriction resolution, connection/journal authority change, or complete authenticated reconciliation opening disruptive availability. Fresh UUIDs are never reused for this host/group in this boot. }
+        approval_review_id: { type: string, format: uuid, description: Present even when unavailable but grants nothing then. Stable during a live waiting/offered grant; all restart-group IDs on the host rotate when an approval leaves approved/offered/cancel_pending, an accepted restart attempt reaches a terminal outcome, an unresolved disruptive admission hold resolves, connection/journal authority changes, or complete authenticated reconciliation opens disruptive availability. Fresh UUIDs are never reused for this host/group in this boot. }
         remedy: { type: [string, "null"] }
     IdleApplyRequest:
       type: object
@@ -5341,7 +5344,7 @@ components:
             Digest input is each UTF-8 kind, NUL, id, LF. NUL and LF are forbidden
             within either field. Agent rechecks these facts before durable acceptance.
         approval_boot_incarnation: { type: string, format: uuid, description: Must match the reviewed preview and persisted current process boot. }
-        approval_review_id: { type: string, format: uuid, description: Must match the current server-issued token for a new grant; all restart-group IDs on the host rotate on grant exit, accepted restart terminal outcome, protective restriction resolution, connection/journal authority change, or complete authenticated reconciliation opening disruptive availability. Fresh UUIDs are never reused for this host/group in this boot. }
+        approval_review_id: { type: string, format: uuid, description: Must match the current server-issued token for a new grant; all restart-group IDs on the host rotate when an approval leaves approved/offered/cancel_pending, an accepted restart attempt reaches a terminal outcome, an unresolved disruptive admission hold resolves, connection/journal authority changes, or complete authenticated reconciliation opens disruptive availability. Fresh UUIDs are never reused for this host/group in this boot. }
         expires_at: { type: string, format: date-time }
     IdleApplyAttempt:
       type: object

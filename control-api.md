@@ -8201,8 +8201,9 @@ values, the sorted prerequisite facts and digest, the current
 candidate is unavailable until complete authenticated current-connection
 journal inventory reconciles. The review ID stays stable when a grant is
 created and while it remains waiting or offered. All restart-group review IDs
-on this host rotate when a grant exits those phases, an accepted restart attempt
-reaches a terminal outcome, a protective restriction resolves, connection or
+on this host rotate when an approval leaves `approved`/`offered`/`cancel_pending`,
+an accepted restart attempt reaches a terminal outcome, an unresolved disruptive
+admission hold resolves, connection or
 journal authority changes, or complete authenticated inventory reconciliation
 opens disruptive availability. Each rotation issues a fresh random UUID never reused
 for that host and group within the same boot. Every rotation commits in the same
@@ -8417,9 +8418,9 @@ current review ID but different body while a live approval exists returns
 map to that response. A new grant also rejects a terminal `uncertain` attempt
 whose protective restriction remains unresolved. A live grant makes the
 preview unavailable for a second grant. A host disruptive lifecycle change
-rotates review IDs for **all** restart groups on that host: an approval exits
-waiting/offered, an accepted restart attempt reaches a terminal outcome, an
-unresolved protective restriction resolves, connection/journal authority
+rotates review IDs for **all** restart groups on that host: an approval leaves
+`approved`/`offered`/`cancel_pending`, an accepted restart attempt reaches a terminal outcome, an
+unresolved disruptive admission hold resolves, connection/journal authority
 changes, or complete authenticated inventory reconciliation opens disruptive
 availability. Rotation commits with that change. An unrelated safe next-session
 edit, ordinary session activity or unrelated owner hold leaves the IDs stable.
@@ -8433,7 +8434,8 @@ been offered and accepted after the database snapshot. It becomes
 `cancel_pending` and keeps its own restriction until complete authenticated
 current-connection journal inventory proves its ID absent; a found journal
 record is reconciled as accepted work: the restored `cancel_pending` approval
-and its matching attempt become `accepted` in the same transaction. A same-boot reconnect may revoke an
+becomes `accepted`, while its matching attempt takes the authenticated journal
+phase and sequence (`accepted` or later), in the same transaction. A same-boot reconnect may revoke an
 `approved` row locally because offer always commits first; an `offered` row
 becomes `cancel_pending` until journal proof. Boot and reconnect rotate the
 review ID in the same transaction as those transitions.

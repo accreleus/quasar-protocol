@@ -2693,7 +2693,9 @@ sequence. Later authenticated state or inventory updates only advance a legal
 phase edge and strictly increasing per-attempt `journal_sequence` (or repeat
 identical content at the same sequence), as required by `agent-api.md` §config
 policy journal. Older or conflicting reports are ignored or quarantine the
-host; they never clear `terminal_at`, release protection or rotate review IDs.
+host: a lower sequence is ignored; the same sequence with different content,
+or an illegal phase edge, quarantines the host. Neither case clears
+`terminal_at`, releases protection or rotates review IDs.
 Once set, `terminal_at` is never cleared. `failed` becomes terminal only after
 an explicit durable decision that recovery is impossible or after its authorized
 recovery reaches a proven terminal outcome; stale `failed` cannot terminalize
@@ -2716,8 +2718,8 @@ partial index.
 `host_approval_review_tokens`: `(host_id UUID REFERENCES hosts(id) ON DELETE
 CASCADE, group_key TEXT)` primary key,
 `review_id UUID NOT NULL`. The token is seeded when a restart group first gains
-saved policy and rotated to a fresh random UUID on every approval exit from
-waiting/offered and every accepted attempt terminal outcome. A token value is
+saved policy and rotated for the host-wide disruptive lifecycle triggers below.
+A token value is
 never reused for the same host/group within one boot: UUIDv4 generation is
 checked against durable issued IDs and retries a collision. Rotation and its
 triggering phase change commit in the same transaction. A grant locks this row
@@ -2725,8 +2727,8 @@ triggering phase change commit in the same transaction. A grant locks this row
 rechecks availability under that lock. The row survives ordinary
 restarts; the separate boot incarnation still changes on every process start.
 Review IDs for all restart groups on a host rotate together when an approval
-exits waiting/offered, an accepted restart attempt reaches terminal outcome,
-an unresolved protective restriction resolves, connection/journal authority
+leaves `approved`/`offered`/`cancel_pending`, an accepted restart attempt reaches terminal outcome,
+an unresolved disruptive admission hold resolves, connection/journal authority
 changes, or complete authenticated inventory reconciliation opens disruptive
 availability; this rotation commits with the triggering transition. Unrelated safe
 next-session edits, ordinary session activity and unrelated owner holds do not
