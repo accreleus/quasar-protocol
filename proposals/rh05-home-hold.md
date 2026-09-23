@@ -102,8 +102,10 @@ terminal after cleanup even when CP already reaped it. The ID is durably
 retired **before or atomically with** terminal emission; later assign/swap
 commands for it are rejected without side effects, across restart. A stop
 for an already-retired ID resends terminal. A stop for an ID never recorded
-first durably retires it, then sends `stopped`: earlier-epoch frames are gone
-and assign/swap/stop are serialized per ID on the current epoch. Agent tests
+first durably retires it, then sends `stopped`. The recorded/retired check and
+retirement are atomic under per-ID serialization across startup reconciliation
+and **all** connection epochs; a delayed assign/swap read before a socket
+drop is still rejected if processed after retirement. Agent tests
 cover fatal swap, abandoned runner, startup recovery, stop-after-reap, lost
 terminal, lost assign, repeat stop and retired-ID rejection.
 
@@ -133,7 +135,7 @@ terminal proof or #347 repair if the agent is later downgraded.
 | Negative ack after restart or for reused old token | Retain. | No durable correlation; token never reused. |
 | Running, swap complete or rollback callback | Retain. | Callback lacks operation ID, so repeated/out-of-order result is ambiguous. |
 | Stop, reconnect/offline/heartbeat reap, restart or session deletion | Retain. | Control-plane terminal is not unmount proof. |
-| Capable reconnect with held session already terminal or absent at control plane | CP sends `session_stop` on the new epoch and repeats at capped interval while hold remains. | Stop ack is not proof; only the returning qualified terminal clears. |
+| Capable registration or periodic same-epoch scan finds a held session terminal or absent at control plane | CP sends `session_stop` on the active epoch and repeats at capped interval while hold remains. | Catches a running row reaped by the first heartbeat after registration; stop ack is not proof. |
 | Capable agent receives stop for retired or never-recorded ID | Resend qualified terminal, or durably retire never-recorded ID then send `stopped`. | Recovers lost terminal and assign lost after socket handoff. |
 | Authenticated terminal from cleanup-capable connection, reporting host equals non-NULL claim host and existing session host | CAS-clear all that historical session's holds in ordered claim locks. | Agent certifies all its source containers are gone. |
 | Late qualified terminal after synthetic terminal/deleted row | Change matching hold columns only. | No session rewrite/event/reservation/materialization. |
@@ -148,10 +150,12 @@ reused. A terminal event generated before a swap means that same agent could
 not subsequently accept a swap for that stopped session because capable
 agents durably retire terminal IDs. No terminal report from a pre-capability
 agent counts, even if its message is later replayed.
-After each capable registration, the control plane groups held claims by
-historical session ID and sends one `session_stop` per ID on that epoch when
-the session row is terminal or gone. It repeats at a capped interval while
-the hold remains regardless of stop ack, and repeats after later reconnects.
+After each capable registration **and periodically while that epoch remains
+active**, the control plane rescans all held claims, groups them by historical
+session ID and sends one `session_stop` per ID on that epoch when its row is
+terminal or gone. It repeats at a capped interval while the hold remains
+regardless of stop ack, and repeats after later reconnects. This includes a
+running row that becomes terminal only at the first post-register heartbeat.
 There is no new wire shape or terminal ack. A null-host claim has no safe
 target and remains for audited repair.
 If a synthetically terminal control-plane row still has a live agent runner,
@@ -245,7 +249,10 @@ adapter for delivery order; run agent tests in the sanctioned Rust container:
    after synthetic reap. Wrong host, NULL owner, missing capability and old
    queued terminal do not; late proof changes no public session side effect.
    Drop the first terminal frame, then reconnect or retry `session_stop` and
-   prove the repeated qualified terminal clears only that hold.
+   prove the repeated qualified terminal clears only that hold. Also lose a
+   terminal for a running row, reconnect while the row still says running,
+   let the first heartbeat reconcile it to terminal, and verify the periodic
+   scan on the **same connection** sends stop and clears only that hold.
 6. Agent fatal-swap test verifies source teardown and ref retention before
    terminal report. Panicked/abandoned runner test verifies container absence
    before terminal and no ref release/report when cleanup is uncertain.
@@ -254,7 +261,8 @@ adapter for delivery order; run agent tests in the sanctioned Rust container:
    assign after socket handoff so the ID was never recorded, then send stop:
    agent retires it and reports `stopped`. Repeat stop for an already-retired
    ID resends terminal; later assign/swap is rejected without side effects.
-   Per-ID serialization prevents assign/stop reorder on one epoch.
+   Per-ID recorded/retired check and retirement are atomic across startup and
+   all epochs, including an assign read before an earlier socket drop.
 7. Direct SQL held-claim/user/parent delete raises `QH001` (never silently
    skips cascade); tile-only delete retains parent claim. Ephemeral reaper
    prefilters held user and catches a racing `QH001` per row while continuing

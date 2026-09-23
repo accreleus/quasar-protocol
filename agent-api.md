@@ -331,16 +331,18 @@ emission**. A retired ID never accepts a later `session_assign` or
 without side effects. Assign, swap and stop are serialized per session ID.
 On a repeated `session_stop` for a retired ID, the agent resends the same
 qualified terminal without side effects. On `session_stop` for an ID it never
-recorded, it durably retires that ID first, then sends `stopped`: frames from
-an earlier connection epoch are gone, and commands on the current epoch are
-processed in order for that ID, so a later assign/swap is rejected. This
-repeated stop path recovers a lost terminal frame or an assign/swap command
+recorded, it durably retires that ID first, then sends `stopped`. The
+recorded/retired check and retirement are atomic under per-ID serialization
+covering startup reconciliation and commands from **all** connection epochs;
+an assign or swap processed later, including one read before an earlier
+socket drop, is rejected without side effects. This repeated stop path
+recovers a lost terminal frame or an assign/swap command
 lost after socket handoff without adding a message or ack field. This makes a
 delayed pre-swap terminal valid negative evidence for that same ID. Agent
 tests cover fatal swap, abandoned runner, startup reconciliation, stop after
 control-plane reap, lost terminal, lost assign, repeated stop and retired-ID
-rejection. This
-is a behavioral change for agents that advertise the capability, not a change
+rejection. This is a behavioral change for agents that advertise the
+capability, not a change
 to `session_state` or ack JSON shape.
 
 **Optional `images` array (image-management P2 amendment).** The agent may include

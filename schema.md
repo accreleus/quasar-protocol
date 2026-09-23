@@ -2818,14 +2818,16 @@ session ID is never reused, so a pre-swap terminal means that agent could not
 subsequently accept a swap for that same session. Clearing is idempotent.
 
 Stop, `ReapHostExceptRunning`, heartbeat omission, offline sweep, restart and
-session-row deletion never clear a hold. After each cleanup-capable agent
-registration, the control plane sends `session_stop` on that authenticated
-connection epoch for every held session on that claim owner host whose
-session row is terminal or gone. It groups multiple claims for one session
-ID, retries stop while the hold remains on the same epoch at a capped interval
-regardless of its ack, and repeats the scan after each capable reconnect until a qualified terminal
-clears the hold; a stop ack alone never clears it. A late or repeated terminal
-is processed through the hold-only path above. This also recovers an
+session-row deletion never clear a hold. After cleanup-capable registration
+**and at a capped interval while that authenticated connection epoch remains
+active**, the control plane rescans all held claims on that owner host whose
+session row is terminal or gone and sends `session_stop` on the current epoch.
+It groups multiple claims for one session ID and retries while the hold
+remains regardless of stop ack, including sessions that become terminal
+**after** registration through heartbeat reconciliation, synthetic reaping or
+row deletion. It also scans after later capable reconnects until a qualified
+terminal clears the hold; a stop ack alone never clears it. A late or repeated
+terminal is processed through the hold-only path above. This also recovers an
 assignment/swap lost after socket handoff when the agent never recorded the
 session ID. No stop is sent for a NULL-host claim. Session rows (when present,
 ascending ID) are locked before all affected claims in ascending
