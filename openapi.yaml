@@ -839,39 +839,6 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
-  /v1/admin/apps/{id}/placement:
-    parameters: [ { $ref: "#/components/parameters/PathId" } ]
-    get:
-      tags: [admin, apps]
-      summary: Read a canonical parent app's host placement policy (RH05).
-      x-required-role: admin
-      responses:
-        "200": { description: Placement view., content: { application/json: { schema: { $ref: "#/components/schemas/AppPlacement" } } } }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-    patch:
-      tags: [admin, apps]
-      summary: Replace a canonical parent app's placement selection with revision compare-and-swap (RH05).
-      description: >-
-        Derived tiles inherit their canonical parent's placement. all_eligible selects every
-        currently eligible host dynamically; fixed selects exactly host_ids, which may be empty.
-        A stale revision returns the current placement and changed host selection. Placement
-        changes serialize with launch reservations and image requirement fences. Editing a
-        derived tile returns 409 inherited_placement naming its canonical parent. Removing a
-        host immediately excludes new reservations while existing sessions and homes remain.
-      x-required-role: admin
-      requestBody:
-        required: true
-        content: { application/json: { schema: { $ref: "#/components/schemas/AppPlacementPatch" } } }
-      responses:
-        "200": { description: Updated placement., content: { application/json: { schema: { $ref: "#/components/schemas/AppPlacement" } } } }
-        "400": { $ref: "#/components/responses/ValidationFailed" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: stale_revision with current placement and changed hosts, or inherited_placement naming the parent app., content: { application/json: { schema: { $ref: "#/components/schemas/PlacementConflict" } } } }
-
   # ─── entitlements (Steam library discovery Phase 2) ──────────────────────
   # An entitlement is one fact: "this subject may see and launch this app".
   # These four admin routes are the ONLY way to widen visibility, which is what
@@ -1992,42 +1959,6 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
 
-  /v1/admin/hosts/{id}/images/cleanup:
-    parameters: [ { $ref: "#/components/parameters/PathId" } ]
-    get:
-      tags: [admin, images]
-      summary: Preview host image cleanup eligibility from current requirements (RH05).
-      description: >-
-        Advisory preview only. Required images include selected app placement, all container
-        references, pending ensure/template operations and the retained prior successfully
-        prepared version. Unknown or stale inventory fails closed. A preview cannot authorize
-        a later physical removal; POST rechecks under the per-host-image operation fence.
-      x-required-role: admin
-      responses:
-        "200": { description: Current cleanup preview., content: { application/json: { schema: { $ref: "#/components/schemas/HostImageCleanupView" } } } }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-    post:
-      tags: [admin, images]
-      summary: Start a fenced cleanup attempt for one host image and version (RH05).
-      description: >-
-        Rechecks current requirements under the image operation fence and returns a stable
-        attempt ID and generation token. The agent rechecks its local container/template
-        references and fence token under its per-image operation lock before removal. A new
-        requirement during removal stays pending and requires re-ensure before launch.
-      x-required-role: admin
-      requestBody:
-        required: true
-        content: { application/json: { schema: { $ref: "#/components/schemas/HostImageCleanupRequest" } } }
-      responses:
-        "200": { description: Removal attempt started or identical attempt returned., content: { application/json: { schema: { $ref: "#/components/schemas/HostImageCleanupAttempt" } } } }
-        "400": { $ref: "#/components/responses/ValidationFailed" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: Image still required, inventory uncertain or fence changed., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
-
   # ─── admin: settings / invites ───────────────────────────────────────────
   /v1/admin/settings:
     get:
@@ -2839,98 +2770,6 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: "Old agents only: restart_required when a restart-class knob changed with live sessions and restart_confirm != true (body carries live_sessions). RH05-capable agents save the edit with 200 instead." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
-  /v1/admin/hosts/{id}/policy:
-    parameters: [ { $ref: "#/components/parameters/PathId" } ]
-    get:
-      tags: [admin]
-      summary: Read typed host configuration policy and independent evidence views (RH05).
-      x-required-role: admin
-      responses:
-        "200": { description: Policy view., content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicy" } } } }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-    patch:
-      tags: [admin]
-      summary: Atomically edit typed policy choices by expected revision (RH05).
-      description: >-
-        Validates the whole edit before persistence. A successful edit commits choices, a
-        monotone revision and reconciliation obligation in one transaction; offline intent is
-        saved as pending. A stale edit does not write and returns the current view and changed
-        keys. A relevant edit supersedes an unstarted idle approval.
-      x-required-role: admin
-      requestBody:
-        required: true
-        content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicyPatch" } } }
-      responses:
-        "200": { description: Saved policy view., content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicy" } } } }
-        "400": { description: validation_failed or unsupported_source., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: stale_revision with current view and changed keys., content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicyConflict" } } } }
-  /v1/admin/hosts/{id}/policy/retry:
-    parameters: [ { $ref: "#/components/parameters/PathId" } ]
-    post:
-      tags: [admin]
-      summary: Explicitly retry a failed or exhausted host policy group (RH05).
-      description: A disruptive group requires a fresh scoped idle-apply approval; retry alone cannot authorize restart.
-      x-required-role: admin
-      requestBody:
-        required: true
-        content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicyRetryRequest" } } }
-      responses:
-        "200": { description: Retry obligation recorded., content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicy" } } } }
-        "400": { $ref: "#/components/responses/ValidationFailed" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/Conflict" }
-  /v1/admin/hosts/{id}/idle-apply:
-    parameters: [ { $ref: "#/components/parameters/PathId" } ]
-    post:
-      tags: [admin]
-      summary: Approve one reviewed restart-scope policy group for idle application (RH05).
-      description: >-
-        Approval binds group revision, resolved digest, prerequisite identities and current
-        control-plane boot. A stable attempt ID is returned. An owner-scoped admission hold
-        waits for authoritative zero active and local sessions and conflicting preparation;
-        waiting never stops sessions. Missing inventory remains pending. Agent acceptance,
-        rather than command delivery, starts execution.
-      x-required-role: admin
-      requestBody:
-        required: true
-        content: { application/json: { schema: { $ref: "#/components/schemas/IdleApplyRequest" } } }
-      responses:
-        "202": { description: Approval and stable waiting attempt recorded, or identical pending attempt returned., content: { application/json: { schema: { $ref: "#/components/schemas/IdleApplyAttempt" } } } }
-        "400": { $ref: "#/components/responses/ValidationFailed" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: approval_superseded, approval_expired or attempt_conflict., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
-  /v1/admin/hosts/{id}/idle-apply/{attempt_id}/cancel:
-    parameters:
-      - { $ref: "#/components/parameters/PathId" }
-      - name: attempt_id
-        in: path
-        required: true
-        schema: { type: string, format: uuid }
-    post:
-      tags: [admin]
-      summary: Fence and cancel an idle-apply attempt if it has not durably started (RH05).
-      description: >-
-        Cancellation first fences further grants. A lost revocation response leaves admission
-        restricted until authenticated journal inventory proves nonacceptance. After durable
-        acceptance, cancellation waits for a safe terminal or recovery point and cannot
-        claim that execution never started. Other owners' admission holds remain intact.
-      x-required-role: admin
-      responses:
-        "200": { description: Confirmed cancelled before durable acceptance., content: { application/json: { schema: { $ref: "#/components/schemas/IdleApplyAttempt" } } } }
-        "202": { description: Cancelling; revocation or journal confirmation remains pending and admission stays restricted., content: { application/json: { schema: { $ref: "#/components/schemas/IdleApplyAttempt" } } } }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: cancel_too_late with current attempt., content: { application/json: { schema: { $ref: "#/components/schemas/IdleApplyConflict" } } } }
   /v1/admin/hosts/{id}/readiness-overrides/{check_id}:
     parameters:
       - { $ref: "#/components/parameters/PathId" }
