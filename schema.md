@@ -2660,7 +2660,12 @@ transaction; an offered approval becomes `cancel_pending` and retains its
 restriction until authenticated nonacceptance. Agent-side final checks remain
 the authority for actual device accessibility and most recent probe outcome.
 When the authenticated current socket disconnects, the same host-locked
-fence deletes its projection and applies those supersession/rotation rules.
+fence clears the journal gate's connection incarnation, sets the gate to
+`pending`, deletes its hardware projection and applies those
+supersession/rotation rules. The reconciliation restriction remains or is
+recreated until a new authenticated connection completes inventory. A late
+write from the disconnected socket cannot match the cleared gate, and no
+preview can use its old active snapshot.
 A displaced old socket cannot delete the new connection's projection.
 On reconnect the pending gate fences every old review and the old
 connection-bound hardware projection; a new passing report must establish
