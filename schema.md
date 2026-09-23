@@ -2804,7 +2804,26 @@ plus revision/digest readback; restart proof is startup verification after resta
 `host_journal_reconciliation`: `host_id UUID PRIMARY KEY REFERENCES hosts(id) ON
 DELETE CASCADE`, `boot_incarnation UUID NOT NULL`, `connection_incarnation UUID
 NULL`, `state TEXT NOT NULL CHECK (state IN ('pending','complete','quarantined'))`,
-`completed_at TIMESTAMPTZ NULL`, `continuation_cursor TEXT NULL`. On every new
+`completed_at TIMESTAMPTZ NULL`, `continuation_cursor TEXT NULL`.
+Migration 0089 also creates internal
+`host_journal_active_snapshots(host_id UUID REFERENCES hosts(id) ON DELETE
+CASCADE, group_key TEXT, connection_incarnation UUID NOT NULL, kind TEXT CHECK
+(kind IN ('seeded','verified')), digest TEXT NOT NULL, observed_at TIMESTAMPTZ
+NOT NULL, PRIMARY KEY(host_id,group_key))`. Its rows are an authenticated
+current-connection projection, not a new source of applied proof. After
+validating every inventory page and its stable header, the control plane
+replaces the host's snapshot rows in the **same host-locked transaction** that
+opens the gate. Preview uses a row only when its connection equals the complete
+gate's current connection. A missing row leaves the restart candidate
+unavailable; `seeded` supplies `seeded_group_digest` and `verified`
+supplies `last_verified_group_digest`. A different digest or kind on a later
+authenticated inventory is a relevant prerequisite change: supersede an
+unstarted approval and rotate all host restart review IDs in that same
+transaction, retaining an offered grant's restriction until nonacceptance
+proof. This projection does not overwrite `host_setting_groups.applied_digest`
+or convert `seeded` into application evidence. On boot/reconnect, the gate
+closes before any old snapshot row can be used.
+On every new
 control-plane boot and relevant agent reconnect, this gate is pending until the
 authenticated agent's **complete** journal inventory, including attempts absent
 from the database, is consumed. Inventory must have bounded pages or continuation

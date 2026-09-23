@@ -2397,9 +2397,14 @@ For Automatic hardware, `accessible_device.id` is lowercase SHA-256 of UTF-8
 unprefixed decimal GPU index and the other fields are the exact reported
 nonempty strings. `host_probe_result.id` is lowercase SHA-256 of UTF-8
 `media_probe_gpu<N>\0<observed_at>\0host_probe\0pass\n`, using the
-exact nonempty `observed_at` string in the passing readiness check. The
-agent recomputes both against its own accessible device inventory and latest
-successful real media host probe immediately before accepting the grant.
+exact nonempty `observed_at` JSON string in the passing readiness check.
+The control plane extracts this string directly from the stored JSONB check
+without parsing or reformatting it; the agent hashes the same string it sent.
+Both fact objects are included in the sorted `prerequisites` and its digest.
+The agent recomputes both against its own accessible device inventory and
+**most recent** real media host probe for that GPU immediately before accepting
+the grant. That most recent result must itself be `pass`; a later failed,
+skipped or indeterminate probe rejects the old passing result.
 It rejects a path it cannot open or a result whose device identity no longer
 matches, even if the control plane saw a later database receipt time. The
 control plane uses database receipt times only to exclude pre-connection

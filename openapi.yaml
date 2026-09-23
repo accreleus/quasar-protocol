@@ -5315,7 +5315,7 @@ components:
       type: object
       required: [available, revision, content_sha256, resolved, prerequisites_sha256, prerequisites, approval_boot_incarnation, approval_review_id, remedy]
       properties:
-        available: { type: boolean, description: "False for unavailable conditions including a live disruptive grant/attempt, unresolved disruptive admission hold, incomplete authenticated current-connection journal reconciliation, missing current review-token row, or missing current-connection Automatic hardware evidence. Every condition is bound by the prerequisite digest or rotates the review ID when availability opens. Identical replay of an existing grant uses its original request and may still return 202." }
+        available: { type: boolean, description: "False for unavailable conditions including a live disruptive grant/attempt, unresolved disruptive admission hold, incomplete authenticated current-connection journal reconciliation or active group snapshot, missing current review-token row, or missing current-connection Automatic hardware evidence. Every condition is bound by the prerequisite digest or rotates the review ID when availability opens. Identical replay of an existing grant uses its original request and may still return 202." }
         revision: { $ref: "#/components/schemas/RH05Revision" }
         content_sha256: { $ref: "#/components/schemas/RH05Digest" }
         resolved: { type: object, additionalProperties: true, description: Exact resolved values proposed for this group. }

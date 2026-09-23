@@ -8199,7 +8199,15 @@ candidate: availability/remedy, desired revision, content digest, exact resolved
 values, the sorted prerequisite facts and digest, the current
 `approval_boot_incarnation`, and a server-issued `approval_review_id`. A
 candidate is unavailable until complete authenticated current-connection
-journal inventory reconciles. The review ID stays stable when a grant is
+journal inventory reconciles.
+The inventory's active snapshot for this restart group is persisted only as
+an internal current-connection projection when the complete gate opens. A
+missing projection leaves approval unavailable. Its `seeded` or `verified`
+kind and digest enter the reviewed prerequisites as
+`seeded_group_digest` or `last_verified_group_digest`; a changed snapshot
+supersedes only a relevant unstarted approval and rotates review IDs under the
+host lock. A seed never claims application.
+The review ID stays stable when a grant is
 created and while it remains waiting or offered. All restart-group review IDs
 on this host rotate when an approval exits `approved` or `offered` for
 `cancel_pending` or a terminal state, or exits `cancel_pending` for a terminal state,
