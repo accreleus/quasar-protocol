@@ -4749,6 +4749,10 @@ every other action key off the ids, which are still present on every item.
 Marks the home for GC (`gc_after = now()`); the janitor reaps the backing store
 asynchronously. `202` accepted; `404` unknown; `409 home_in_use` if a live session of that
 (user, app) currently mounts it.
+Under RH05 claim enforcement this also blocks that user's launches of the
+canonical app and derived tiles with `409 home_conflict` until confirmed reap
+(after the existing 24-hour grace) or audited operator repair (#347). Data is
+not moved, merged or deleted by a later launch.
 
 ### `GET /v1/me/storage` — the caller's own usage
 ```json
@@ -4787,6 +4791,11 @@ deleted (`ON DELETE SET NULL`, migration 0009) — can never be revived, so it i
 once. The same predicate guards `gc-confirm`, so a row is never offered and then refused. Host-unpinned
 (`host_id IS NULL`) tombstones are never returned here — no agent owns them; the control-plane
 janitor row-deletes those directly.
+**RH05 semantic amendment:** once claim enforcement is active, launch, swap
+and local launch never revive a tombstone, including during the 24-hour grace.
+The grace remains a minimum delay before agent reaping; its former revival
+purpose is superseded. A null-host tombstone remains blocked until audited
+repair (#347), because agent `gc-confirm` cannot attest its backing store.
 ```json
 { "homes": [ { "id": "…", "provider": "volume", "ref": "quasar-home-…" } ] }
 ```
@@ -4805,6 +4814,9 @@ This guard makes a confirm a **no-op** for a home that was *revived* (a launch c
 `gc_after` between the agent's pull and its confirm) or *relocated* to another host — the
 live row survives, and the agent's reap of a now-stale backing store is harmless (its reap is
 idempotent). Response:
+Under RH05 claim enforcement the revival arm above is unreachable: no launch
+may clear `gc_after` after tombstoning. The host/age guard remains for older
+in-flight work, and the claim CAS rule below governs ownership release.
 ```json
 { "deleted": 2 }
 ```
@@ -4905,6 +4917,9 @@ Nesting an extra field inside the error object is the existing idiom (`live_sess
 > smuggled in here.
 
 **`409 home_not_provisioned`** — *new.*
+
+RH05 canonical claim conflicts, including a tombstoned parent home, take
+precedence and return `409 home_conflict`; see the RH05 claim amendment below.
 
 A derived tile **provisions nothing**. The launch path resolves the home read-only: it requires a
 live `user_homes` row for `(caller, parent, host)` and **never creates one**. A create-on-miss here
@@ -8346,6 +8361,77 @@ excludes new reservations while existing sessions finish and homes/images stay.
 Session launch, swap and local launch enforce canonical placement/home locality;
 an existing home is a hard host constraint, and conflicting/unknown locations
 return repair-required `home_conflict` without exposing another user's data.
+
+`GET /v1/admin/storage/home-claims` is an admin-only, paginated diagnosis of
+canonical `(user, parent app)` ownership, including reserved or conflicting
+claims with no current `user_homes` row. Exact optional filters are `user_id`,
+`app_id` (a derived tile ID resolves to its canonical parent), `host_id`
+(the claim owner only), and `state`; unknown well-formed IDs return an empty
+page. `limit` defaults to 50 and accepts 1–100. Invalid UUID, state, limit or
+cursor returns `400 validation_failed`. Rows sort ascending by
+`(user_id,canonical_app_id)`; an opaque cursor resumes exclusively after that
+pair and is bound to the exact filter set, so using it with different filters
+returns 400. `next_cursor` is null at the end. The admin item contains those
+IDs, nullable resolved names, nullable owner host ID/name, claim state,
+`materialized_at`, a stable safe `conflict_reason` code or null, and sorted
+distinct `recorded_host_ids` from known `user_homes` rows, including tombstones.
+The admin item never includes provider, ref or mount path. Recorded IDs are
+bookkeeping, **not** proof of physical presence or absence. `GET
+/v1/admin/storage/homes` keeps its existing rows and pagination behavior.
+The OpenAPI route entry is staged with the handler so route drift remains green.
+
+`legacy_location_uncertain` means legacy rows are divergent, null-host or
+otherwise cannot establish one owner; `claim_owner_missing` means the claimed
+host was deleted; `location_mismatch` means a later known row names a host
+other than the claim owner; `gc_pending` means a known backing-store row is
+tombstoned but agent reaping has not been confirmed. These are stored safe
+codes, never raw paths or free-form details. `legacy_location_uncertain` or
+`location_mismatch` takes precedence over `claim_owner_missing`, which takes
+precedence over `gc_pending`; a tombstone cannot hide divergence. A unique legacy bookkeeping
+location backfills as `reserved`, since a row is not physical-home proof.
+An authenticated `session_state=running` for a session whose assigned host,
+canonical app and managed-home mount match the claim and a live `user_homes`
+row advances it to `materialized` and stamps `materialized_at`; this proves
+that the mount was used, not what data it contains. On later conflict, the
+timestamp is retained as historical use evidence, not current-location proof.
+A failed/stopped session
+never clears a committed claim, since it may have created data before failing.
+
+For launch, swap and local launch, `409 home_conflict` returns the ordinary
+`ErrorEnvelope` with fixed message `Managed home for <caller-visible canonical
+app name> needs operator review`. It includes no conflict reason, host IDs or
+names, claim state, recorded locations, path, another user's identity or
+session ID. When the pinned home host is eligible but currently lacks capacity,
+existing `503 capacity_exhausted` is returned generically without identifying
+whose work occupies it. Ranking, totals and refusal classification use the
+same home constraint and cannot leak another user's session details.
+Under RH05 claim enforcement, a canonical claim in `conflict` (including
+`gc_pending`) returns `home_conflict` **before** the derived-tile
+`home_not_provisioned` check, for ordinary launch, swap and local launch.
+Otherwise `home_not_provisioned` keeps its existing per-endpoint meaning:
+no live parent home on any host for a derived-tile ordinary launch, or no
+live home on the pinned host for swap and local launch. A tombstoned row is
+known even though
+it is not live.
+
+A tombstoned known home is never revived by an RH05 launch, swap or local
+launch, at any point inside or after the 24-hour grace: the request returns
+`home_conflict` and a uniquely owned claim becomes
+`conflict/gc_pending` until the exact backing store is confirmed reaped or an
+explicit operator repair. Agent-authenticated `gc-confirm` removes its exact
+past-grace tombstoned `user_homes` row; in the **same transaction**, the
+control plane may compare-and-swap delete the matching claim only when it is
+still `conflict/gc_pending` on the calling host, the exact tombstoned row was
+confirmed reaped, and no other known rows or active/pending
+sessions exist for the canonical `(user,app)`, and no divergent/uncertain
+location remains. Otherwise the claim persists for review. A GC confirm is
+negative evidence for that exact reaped backing store only, never proof that
+another host has no copy. A reservation that rolled back before commit left no
+persisted claim to release. After commit, no automatic release on failure;
+without an agent home-absence signal, a claim-only uncertain reservation
+requires manual inspection and repair. An operator repair workflow is deferred
+to accreleus/quasar#347; RH05 never chooses or deletes a conflicting
+copy automatically.
 
 `GET /v1/admin/hosts/{id}/images/cleanup` previews each managed image/version
 with its protected reason and fence generation. `POST` takes exact image/version
