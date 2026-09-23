@@ -8295,14 +8295,28 @@ the host remains unavailable for new sessions and that group shows
 plane never sends its pending desired value through the legacy map; that
 older agent cannot restore a typed active snapshot.
 
-`POST /v1/admin/hosts/{id}/policy/retry` takes `{"group":"<key>"}`. A
-transient exhausted group can retry with bounded backoff; invalid intent is not
-retryable. Success is `200` with the typed view; an unknown group is
-`400 validation_failed`, and a group not waiting for Retry (pending, applied,
-rejected as invalid, or restart scope) is `409 conflict` with no write. A disruptive retry needs fresh scoped approval. Typed errors include
+`POST /v1/admin/hosts/{id}/policy/retry` takes `{"group":"<key>"}` and re-arms
+one next-session group whose transient retry budget is exhausted: its `status`
+is `failed` and its `remedy` starts with the code `retry_exhausted`. Success is
+`200` with the typed view, the group `pending` again at the current desired
+revision with a fresh bounded backoff budget. Retry grants no approval and
+proves no application. Its other responses are exactly: `400
+validation_failed` for a malformed body or a `group` that is not a catalog
+policy group; `404 not_found` for an unknown host; and `409 conflict` for a
+group not waiting for Retry, meaning status `pending`, `applied`,
+`upgrade_required` or `uncertain`, status `failed` with any other remedy code
+(the host rejecting invalid intent is `validation_failed`), or any
+restart-scope group whatever its status. Every non-`200` response writes
+nothing. Invalid intent is never retried; change the setting instead. A
+restart-scope group is never re-armed by Retry; it proceeds only through a
+fresh scoped approval via `POST /v1/admin/hosts/{id}/idle-apply`.
+
+Across the typed policy routes, group remedy codes and route errors include
 `unsupported_source`, `upgrade_required`, `group_execution_unavailable`,
-`attempt_conflict`, `retry_exhausted` and
-`recovery_uncertain`.
+`attempt_conflict`, `retry_exhausted` and `recovery_uncertain`. Each route
+returns only the error responses its own section names; Retry returns none of
+these as a response, and `retry_exhausted` is only the remedy code that makes
+a group eligible for Retry.
 
 ### Existing settings PATCH and restart: explicit behavior amendment
 
