@@ -2496,14 +2496,18 @@ NULL CHECK (phase IN ('offered','accepted','activating','awaiting_startup',
 TIMESTAMPTZ NULL`, `terminal_at TIMESTAMPTZ NULL`, `recovery_attempted BOOLEAN NOT
 NULL DEFAULT false`, `error_code TEXT NULL`, `error_detail TEXT NULL`, unique
 `(host_id,group_key,id)`. A partial unique index on **`host_id` alone** where
-`scope = 'restart'` and phase is `offered`, `accepted`, `activating`,
-`awaiting_startup`, `verifying`, `recovery_verifying` or
-`recovery_awaiting_startup` allows only one open disruptive attempt per host
-across all groups. Next-session groups retain independent progress. A
-per-host/group index would allow simultaneous restarts. Terminal
-phases are `applied`, `failed`, `recovered`, `uncertain` and
-`revoked_unstarted`; `uncertain` is terminal for retry accounting but keeps a
-protective admission restriction until resolved. A recovery transition retains
+`scope = 'restart' AND terminal_at IS NULL` allows only one open disruptive
+attempt per host across all groups. `failed` records the original candidate
+failure but leaves `terminal_at` NULL while the one authorized recovery is
+undecided or running. Dispatch also requires completed journal reconciliation
+and no protective restriction; a restored ledger cannot silently open a second
+restart. The agent independently excludes concurrent restart operations.
+Next-session groups retain independent progress. A per-host/group index would
+allow simultaneous restarts. `terminal_at` is set only for `applied`,
+`recovered`, `revoked_unstarted`, a `failed` attempt for which recovery is
+finally impossible, or `uncertain`. An `uncertain` attempt is terminal for
+retry accounting but keeps a protective admission restriction until resolved.
+A recovery transition retains
 the requested choice's original failure in `error_code`/`error_detail` and the
 group's failed status; `recovered` records restoration of the last verified
 configuration, never application of the requested choice.

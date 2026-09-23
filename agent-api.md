@@ -2269,8 +2269,9 @@ state instead of activating again.
 
 For an intentional candidate restart, the agent fsyncs `awaiting_startup`
 **before** requesting process exit. On the first boot finding that marker,
-the agent **first fsyncs `verifying`**, consuming the marker, and only then
-reads back startup state. It reports `applied` only if that readback shows the
+the journal bootstrap **first fsyncs `verifying`**, consuming the marker before
+loading or initializing the candidate runtime, and only then reads back
+startup state. It reports `applied` only if that readback shows the
 candidate active and verification succeeds. A failed readback or verification
 marks the original attempt `failed` before recovery. A boot finding bare
 `activating` or `verifying` also marks it `failed`: a crash during readback
@@ -2282,7 +2283,8 @@ exact last verified group, only when safe. It fsyncs `recovery_verifying`
 **before** activation. If recovery requires an intentional process restart,
 it fsyncs `recovery_awaiting_startup` before requesting exit. On the first
 boot finding that marker, the agent **first fsyncs `recovery_verifying`**,
-consuming the marker, and only then reads back startup state. It verifies the
+consuming the marker before loading or initializing the recovery runtime,
+and only then reads back startup state. It verifies the
 last verified group only if that readback shows the group active, without
 another activation. A failed readback or verification marks the attempt
 `uncertain`. A boot finding bare `recovery_verifying` also marks it
@@ -2293,6 +2295,10 @@ original failure; it never marks the requested choice applied. Failed
 recovery or missing proof becomes `uncertain` and retains protective
 admission. Recovery cannot replace a platform image or repair a binary,
 runtime or mount. Unrelated safe edits remain separate for later reconciliation.
+The agent serializes candidate activation, recovery activation and any other
+restart-scope policy attempt under one host-wide operation lock. It refuses a
+new restart-scope offer while an accepted attempt awaits recovery or remains
+uncertain, even if the control-plane ledger was restored from an older backup.
 
 Every control-plane restart changes `boot_incarnation` and expires **all
 unstarted** approvals before dispatch. Every agent reconnect invalidates old

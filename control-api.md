@@ -8190,6 +8190,13 @@ Browser reachability remains outside host readiness.
 per-atomic-group `desired_revision`, `applied_revision`, `desired_digest`,
 `scope` (`next_session|restart`), `status` (`pending|applied|failed|upgrade_required|uncertain`),
 resolved value/source, evidence time/freshness and actionable reason/remedy.
+For each restart group, `approval_preview` supplies a server-derived reviewed
+candidate: availability/remedy, desired revision, content digest, exact resolved
+values, and the sorted prerequisite facts and digest. It is null for
+next-session groups. The operator sends this tuple to idle apply with a chosen
+expiry; the server rechecks it under the approval transaction. A stale preview
+returns a conflict, never approval of changed facts. The preview is an
+observation, not a grant or proof that the configuration has applied.
 Preparation and readiness are separate fields. `source` is
 `automatic|deployment|explicit`; only explicit carries a typed `value`.
 Deployment preserves the agent's existing environment/device-detection baseline.

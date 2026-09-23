@@ -5068,7 +5068,7 @@ components:
         evidence_id: { type: [string, "null"] }
     HostPolicyGroup:
       type: object
-      required: [desired_revision, applied_revision, desired_digest, scope, status, fresh, remedy]
+      required: [desired_revision, applied_revision, desired_digest, scope, status, fresh, remedy, approval_preview]
       properties:
         desired_revision: { $ref: "#/components/schemas/RH05Revision" }
         applied_revision:
@@ -5083,6 +5083,9 @@ components:
         remedy: { type: [string, "null"], description: Actionable reason when pending, failed, upgrade required or uncertain. }
         next_retry_at: { type: [string, "null"], format: date-time }
         attempt_id: { type: [string, "null"], format: uuid }
+        approval_preview:
+          oneOf: [ { $ref: "#/components/schemas/HostPolicyApprovalPreview" }, { type: "null" } ]
+          description: Server-derived reviewed restart candidate; null for next-session groups or when evidence is unavailable.
     HostPolicyEvidenceView:
       type: object
       description: Independent evidence status. Preparation, configuration application and readiness do not imply one another.
@@ -5138,6 +5141,19 @@ components:
       properties:
         kind: { type: string, pattern: "^[^\\x00\\n]+$" }
         id: { type: string, pattern: "^[^\\x00\\n]+$" }
+    HostPolicyApprovalPreview:
+      type: object
+      required: [available, revision, content_sha256, resolved, prerequisites_sha256, prerequisites, remedy]
+      properties:
+        available: { type: boolean }
+        revision: { $ref: "#/components/schemas/RH05Revision" }
+        content_sha256: { $ref: "#/components/schemas/RH05Digest" }
+        resolved: { type: object, additionalProperties: true, description: Exact resolved values proposed for this group. }
+        prerequisites_sha256: { $ref: "#/components/schemas/RH05Digest" }
+        prerequisites:
+          type: array
+          items: { $ref: "#/components/schemas/RH05Prerequisite" }
+        remedy: { type: [string, "null"] }
     IdleApplyRequest:
       type: object
       additionalProperties: false
