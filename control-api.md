@@ -8800,3 +8800,88 @@ with `409` and a current reason. Stale preview and unknown/offline inventory
 never authorize removal. Runtime inventory confirms success; duplicate requests
 are idempotent. A newly required image during removal stays pending and must be
 re-ensured before launch reports it ready. Cleanup never deletes a user home.
+
+**RH05 #343 selected managed-image preparation and Retry.** The placement
+read always includes `managed_image_id` (catalog image ID or null) matched
+against the **frozen adopted** registry ref or local tag for the canonical
+app's effective image: `runtime_spec.image` when nonempty, otherwise its
+linked runtime preset's `image`, exactly as session launch resolves it. Null
+means no matching adopted managed image; an app
+with a nonempty image ref is then unmanaged. A derived tile returns its
+canonical parent's effective image. This avoids classifying a pinned adopted
+older digest by the mutable catalog's current digest. Older clients ignore
+the additive field; existing placement fields and revision semantics do not
+change. `hosts[].reason` is a safe open code: `unmanaged_image`, `no_image`,
+`on_demand`, `not_required`, `awaiting_preparation`, `preparing`,
+`preparation_failed`, `inventory_unknown`, or, once 0093 fences exist,
+`removing`; unknown future codes render generically. `prepared` on an
+unselected host is an observation only, not a requirement. An absent image
+report gives false; no current inventory gives null. `preparation_failed`
+applies to a current selected non-lazy adoption with a matching failed report
+and permits Retry. `on_demand` is intentional lazy behavior, not a failure.
+This narrows the pre-RH05 P3 "ensure-everywhere" wording for non-lazy adopted images: the
+existing Ensurer prepares the immutable adopted version only on hosts selected
+by at least one enabled app using that exact adopted image reference. Enabled
+means both a derived tile and its canonical parent are enabled. Dynamic
+`all_eligible` selection includes every enrolled host, offline hosts included
+as durable intent for reconnect. An adopted image with no enabled app is not
+pre-pulled, including a fresh install before any app exists or a suspended
+provider app. The
+requirement is the union across canonical apps and derived tiles (tiles inherit
+their parent's host selection), including custom apps that share an adopted
+managed image. A custom image with no matching adoption remains unmanaged and
+retains its existing placement/launch behavior. `lazy:true` retains its
+on-demand first-launch behavior: selection controls where, lazy controls when.
+Its placement reason is `on_demand`; a missing image is not an eager failure.
+Adoption, pinning, and manual/notify/auto
+catalog update policy are unchanged; preparing cannot re-adopt a new version.
+Saving placement or receiving an ensure ack does not prove preparation. A
+matching authenticated ready inventory report does. Failure of one required
+image leaves other image work independent. Removing the last requirement stops
+new preparation and leaves the cached image; only explicit cleanup may remove
+it. Placement, adoption and enrollment edits, reconnect, and bounded periodic
+reconciliation re-read current requirements. A delayed dispatch rechecks the
+current requirement and adopted identity before sending anything. A
+`pulling`/`building` report is in-progress evidence only for the current
+authenticated connection. Registration demotes an omitted old in-progress
+row to absent and re-dispatches if still required; old agents with no wholesale
+inventory also get an idempotent ensure for such stale progress. A current
+`failed` row is not rearmed by periodic scans or a control-plane restart;
+only a new adopted version, a fresh authenticated `absent` report, or explicit
+Retry resumes it. Re-selecting the same failed version alone does not clear
+the failure. An untouched upgrade keeps each enabled canonical app's
+`all_eligible` placement, so existing selected hosts receive the same old
+`image_ensure`/`image_build`/`image_state` messages; agents need no new image
+wire capability. `host_image_success_history` advances only after matching
+ready evidence for a newly adopted version. Update/auto adoption compare
+versions, so a digest-only catalog sync cannot alias that retention history.
+The P3 uninstall is also an explicit image-removal path; its best-effort
+removal must obey #344's pending/reference/retention fence once 0093 lands.
+
+`POST /v1/admin/hosts/{id}/images/{image_id}/retry` is admin-only and returns
+`202` with no body after scheduling one retry through the existing Ensurer
+(pull or template build). It requires an online host, a current selected
+non-lazy adopted image and `host_images.state=failed` at that adopted version;
+an empty legacy reported version matches the current adopted version, as in
+placement. It resets only that host/image's bounded retry budget and writes
+an admin activity `image.retry` row with image and host IDs, never the ref or
+failure detail. Repeated concurrent Retry requests return `202` merged into
+the pending host/image operation; they do not start another budget. `202`
+means scheduled, never prepared; the
+operator reads `GET /v1/admin/images` and the app placement view for progress.
+Unknown host or catalog image is `404 not_found`; catalog image not adopted is
+`404 not_installed`. Malformed host UUID or image ID outside 1–128 characters
+is `400 validation_failed`. `409 conflict` has fixed safe messages: `Host is
+offline; retry after reconnect`, `Image is not required on this host`, `Lazy
+image downloads at first launch`, `Image is not failed for the adopted version`,
+or `Image cleanup is in progress; retry after it finishes`. A current
+`pulling`/`building` report gives the not-failed message. Once 0093 exists,
+Retry takes the shared image-operation fence and refuses `removing`; delayed
+dispatch rechecks the same fence. Every non-202 response writes nothing.
+The scheduled Retry and automatic backoff timer are process-local, not durable:
+a control-plane restart before dispatch loses them and leaves the reported
+failure; the operator can Retry again. A started pull is reconciled from agent
+inventory at reconnect. This deliberate bound prevents a failed current
+version from looping across restarts. Removing placement or re-adopting before
+delayed execution suppresses stale work. Legacy clients ignore this additive
+endpoint and keep their existing image read/launch behavior.
