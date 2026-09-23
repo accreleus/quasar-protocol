@@ -841,6 +841,38 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /v1/admin/apps/{id}/placement:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin, apps]
+      summary: Read canonical app host selection and observed preparation/readiness.
+      description: Derived tiles return the parent placement with inherited_from set.
+      x-required-role: admin
+      responses:
+        "200": { description: Placement., content: { application/json: { schema: { $ref: "#/components/schemas/AppPlacement" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin, apps]
+      summary: Replace canonical app host selection at an expected revision.
+      description: >-
+        Invalid selection is 400 validation_failed. A stale revision is 409 stale_revision
+        with the current placement. A derived tile is 409 inherited_placement with its
+        parent ID. Removal immediately excludes new reservations while existing sessions finish and homes/images stay.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AppPlacementPatch" } } }
+      responses:
+        "200": { description: Updated placement., content: { application/json: { schema: { $ref: "#/components/schemas/AppPlacement" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Stale revision or inherited placement., content: { application/json: { schema: { $ref: "#/components/schemas/PlacementConflict" } } } }
+
   # ─── entitlements (Steam library discovery Phase 2) ──────────────────────
   # An entitlement is one fact: "this subject may see and launch this app".
   # These four admin routes are the ONLY way to widen visibility, which is what
