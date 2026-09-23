@@ -2566,21 +2566,57 @@ advanced within `BIGINT`.
 
 | Migration and relation | Columns and constraints | Meaning |
 |---|---|---|
-| 0090 `managed_home_claims` | `user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE`, `canonical_app_id UUID NOT NULL REFERENCES apps(id) ON DELETE CASCADE`, `host_id UUID NULL REFERENCES hosts(id) ON DELETE SET NULL`, `state TEXT NOT NULL CHECK (state IN ('reserved','materialized','conflict'))`, `materialized_at TIMESTAMPTZ NULL`, `conflict_reason TEXT NULL`, `PRIMARY KEY (user_id,canonical_app_id)`, `CHECK (state <> 'conflict' OR conflict_reason IS NOT NULL)` | One canonical claim per user and parent app. Lost-host ownership, conflict or uncertainty is a tombstone, never permission to assign another host. Existing `user_homes` remains the backing-store index with its own tombstone and GC behavior. |
+| 0090 `managed_home_claims` | `user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE`, `canonical_app_id UUID NOT NULL REFERENCES apps(id) ON DELETE CASCADE`, `host_id UUID NULL REFERENCES hosts(id) ON DELETE SET NULL`, `state TEXT NOT NULL CHECK (state IN ('reserved','materialized','conflict'))`, `materialized_at TIMESTAMPTZ NULL`, `conflict_reason TEXT NULL CHECK (conflict_reason IS NULL OR conflict_reason IN ('legacy_location_uncertain','claim_owner_missing','location_mismatch','gc_pending'))`, `PRIMARY KEY (user_id,canonical_app_id)`, `CHECK ((state='conflict') = (conflict_reason IS NOT NULL))`, `CHECK (state='conflict' OR host_id IS NOT NULL)`, `CHECK (state<>'materialized' OR materialized_at IS NOT NULL)` | One canonical claim per user and parent app. Lost-host ownership, conflict or uncertainty is a tombstone, never permission to assign another host. Existing `user_homes` remains the backing-store index with its own tombstone and GC behavior. |
 | 0091 `app_placement` | `app_id UUID PRIMARY KEY REFERENCES apps(id) ON DELETE CASCADE`, `mode TEXT NOT NULL CHECK (mode IN ('all_eligible','fixed'))`, `revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0)` | Canonical parent apps only. Backfill all existing canonical apps as `all_eligible`; derived tiles inherit parent placement and have no separate row. |
 | 0091 `app_placement_hosts` | `app_id UUID NOT NULL REFERENCES app_placement(app_id) ON DELETE CASCADE`, `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `PRIMARY KEY (app_id,host_id)` | Fixed placement may deliberately have zero hosts, meaning no eligible host. Removal and reservation lock the same placement row. |
 | 0092 `host_image_success_history` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL REFERENCES image_catalog(id) ON DELETE CASCADE`, `current_version TEXT NOT NULL`, `previous_version TEXT NULL`, `verified_at TIMESTAMPTZ NOT NULL`, `PRIMARY KEY (host_id,image_id)` | Prior successful managed-image version changes only after a newer version is verified prepared. Separate FKs keep retention history when the current `host_images` inventory row is removed or refreshed. Unknown prior history stays unknown and cleanup fails closed. |
 | 0093 `host_image_operation_fences` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL REFERENCES image_catalog(id) ON DELETE CASCADE`, `generation BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0)`, `state TEXT NOT NULL CHECK (state IN ('idle','removing'))`, `attempt_id UUID NULL`, `PRIMARY KEY (host_id,image_id)` | Separate FKs allow a fence before `host_images` inventory exists. Requirement writers increment generation; launches take a shared lock without incrementing it. `removing` blocks ready/launch until verified re-ensure. |
 
-Backfill 0090 from known `user_homes` locations only. Multiple or ambiguous
-legacy locations become `conflict`, not invented ownership. A first claim uses
-the unique key and retries a competing insert before assigning. A failed launch
-releases its claim only if it created an unmaterialized reservation **and**
-authoritative host evidence confirms no home exists. Materialized or uncertain
-claims persist. Deleting a user or canonical app cascades the claim but never
+Backfill 0090 from known `user_homes` locations only. A unique live legacy
+location becomes `reserved` on its known host, not `materialized`, because a
+bookkeeping row is not physical-home proof. Multiple, null-host or ambiguous
+locations become `conflict/legacy_location_uncertain`. A unique tombstoned
+location becomes `conflict/gc_pending` until agent reaping is confirmed; RH05
+launch, swap and local launch never revive it, including during the existing
+24-hour GC grace. A matching authenticated `session_state=running` for the
+same host, canonical app and managed-home mount, with a live `user_homes`
+row, is the only automatic `reserved` → `materialized` transition. It stamps
+`materialized_at` but does not prove what data exists inside the mount. If
+the claim later conflicts, that timestamp remains historical evidence of a
+previously used mount, not proof of current location or contents.
+
+0090 includes a `BEFORE DELETE ON hosts` trigger that changes every affected
+claim to `conflict/claim_owner_missing` and clears its host,
+then permits the host FK's `ON DELETE SET NULL`. This preserves CHECK
+invariants on direct SQL deletion as well as the admin delete path. A later
+known location different from the owner becomes `conflict/location_mismatch`
+under per-user serialization. Conflict reason precedence is
+`legacy_location_uncertain` or `location_mismatch` over `claim_owner_missing`
+over `gc_pending`: tombstoning one row does not erase evidence of divergence
+or a lost owner. Tombstoning a uniquely owned known home marks its claim
+`conflict/gc_pending` in the same transaction; the launch ban closes the race
+with an agent GC pull.
+
+Agent-authenticated `gc-confirm` on the exact past-grace tombstone may delete
+its `user_homes` row and CAS-delete the matching claim in **one transaction**
+only if it is still `conflict/gc_pending` on the calling host, no other known
+home row, active/pending session, divergent location or uncertain operation
+remains, and the exact backing store was confirmed reaped. Otherwise the claim
+persists. A null-host tombstone is janitor-cleaned without agent proof and
+leaves its claim for audited operator repair (#347). A claim-only reservation
+from a failed committed launch has no general agent home-absence signal and
+is never automatically released. A rolled-back reservation left no committed
+claim. Any future general release requires authoritative negative evidence
+and CAS proving the same attempt created the still-reserved claim. The down
+migration drops its own trigger before the table and never deletes
+`user_homes` or backing data.
+
+The unique `(user_id,canonical_app_id)` key serializes first claims; a
+competing insert retries before assigning. A failed launch never creates a
+second owner. Deleting a user or canonical app cascades the claim but never
 deletes an existing `user_homes` tombstone or backing store. Swap and local
 launch apply canonical placement and claim checks before changing executable
-app identity; neither can create a second home.
+app identity.
 
 The image fence serializes cleanup with the union of selected app requirements,
 all container references, pending ensure/template operations and the retained
