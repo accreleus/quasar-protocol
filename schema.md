@@ -2667,6 +2667,19 @@ recreated until a new authenticated connection completes inventory. A late
 write from the disconnected socket cannot match the cleared gate, and no
 preview can use its old active snapshot.
 A displaced old socket cannot delete the new connection's projection.
+Migration 0089 also records the bounded current-connection heartbeat list in
+`host_idle_inventory(host_id UUID PRIMARY KEY REFERENCES hosts(id) ON DELETE
+CASCADE, connection_incarnation UUID NOT NULL, running_sessions JSONB NOT NULL
+CHECK (jsonb_typeof(running_sessions)='array'), reported_at TIMESTAMPTZ NOT
+NULL DEFAULT now())`. Only an authenticated heartbeat with an explicit
+`running_sessions` array may replace it under the host lock while its socket
+matches a pending or complete journal gate. A missing list is unknown, not an
+empty list. At most 1024 nonempty IDs of at most 64 bytes are admitted;
+an oversized or malformed list is unknown. Boot, reconnect and current-socket disconnect clear the row in
+the same host-locked fence; old-socket writes cannot restore it. A status
+read treats the list as current only when its connection equals the complete
+gate, its database receipt is after registration and at most 30 seconds old.
+This is operator wait evidence, never independent permission to execute.
 On reconnect the pending gate fences every old review and the old
 connection-bound hardware projection; a new passing report must establish
 new evidence. Any inventory that both reveals acceptance and changes a

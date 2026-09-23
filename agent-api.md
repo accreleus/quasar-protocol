@@ -625,6 +625,15 @@ unchanged. This sentence exists so a `codec` scope is not added later without a 
 Sent every `heartbeat_interval_ms`. Updates `hosts.last_heartbeat_at`. `running_sessions` lets
 the control plane reconcile its view against the agent's ground truth (detect orphans both ways).
 Missing N consecutive heartbeats ⇒ host `offline`, its sessions `failed`, reservations released.
+For RH05 idle waiting, an explicit `running_sessions` array is the current
+agent's complete list of its live managed and local Quasar sessions on this
+socket. The control plane accepts it into internal `host_idle_inventory` only
+when the authenticated connection incarnation matches the pending or complete
+journal gate. An absent/null list, stale heartbeat, lost socket or older agent
+is unknown for idle status, never an empty list. Assigned, starting and
+stopping control-plane rows are counted separately because they may not yet
+or no longer appear in this running list. The later executor must recheck
+quiescence locally before durable acceptance; the heartbeat alone is advisory.
 
 `gpu_vram` *(NEW, #383, optional, additive)* — a live per-GPU memory sample, `index` matching the
 GPU's index in the `capacity` report. `used_mb` / `free_mb` are each **optional**: an omitted or
@@ -2405,7 +2414,13 @@ Invalid fields leave Automatic unresolved. The agent and
 control plane reject NUL in any field; `\0` denotes byte 0x00 and `\n`
 denotes byte 0x0A in these encodings. `host_probe_result.id` is lowercase SHA-256 of UTF-8
 `media_probe_gpu<N>\0<accessible_device.id>\0<connection_incarnation>\0host_probe\0pass\n`,
-where the device ID is the lowercase digest above and the connection ID is
+where `media_probe_gpu<N>` is an RH05 Automatic-only exception to the
+general readiness rule that consumers do not key on check IDs: the agent
+MUST keep this exact ID for its GPU media-floor probe. `<N>` in that ID
+binds the check to `capacity.gpus[].index` and, when `blocks` is present,
+must equal `blocks.gpu_index`. A renamed or missing check leaves Automatic
+unresolved. Codec checks such as `media_probe_gpu<N>_av1` never qualify.
+The device ID is the lowercase digest above and the connection ID is
 the lowercase hyphenated UUID from this socket's `registered.connection_incarnation`
 (§registration, above), freshly minted by the control plane and bound by the
 agent to this authenticated WebSocket. A grant on another socket cannot
@@ -2413,8 +2428,10 @@ recompute this fact and is rejected. The
 passing readiness check still carries a nonempty ASCII RFC3339 `observed_at`
 from this agent process, but that timestamp is not in the fact ID; repeated
 passes on the same device during one connection do not invalidate a waiting
-approval. A later `fail`, `skip` or `unknown` outcome replaces the pass
-and makes the fact unavailable.
+approval. The reported last **definitive** result remains authoritative under
+the existing host-probe retention rule: an inconclusive later attempt keeps
+the prior pass and original `observed_at`; any subsequently reported status
+other than `pass` makes this fact unavailable.
 Both fact objects are included in the sorted `prerequisites` and its digest.
 For a restart group, `seeded_group_digest.id` or
 `last_verified_group_digest.id` is exactly the current active snapshot
@@ -2422,9 +2439,10 @@ digest carried in that group's authenticated inventory; its kind selects the
 fact kind. Before durable acceptance the agent recomputes this fact from its
 own current active snapshot, as well as both hardware facts from its
 accessible device inventory and
-**most recent** real media host probe for that GPU immediately before accepting
-the grant. That most recent readiness outcome must itself be `pass`; a
-later `fail`, `skip` or `unknown` rejects the old passing result.
+current retained definitive media host-probe result for that GPU immediately
+before accepting the grant. That reported result must be `pass`; an
+inconclusive later attempt does not clear a retained pass, while any
+subsequently reported non-pass result rejects the old passing fact.
 It rejects a path it cannot open or a result whose device identity no longer
 matches, even if the control plane saw a later database receipt time. The
 agent retains the device identity used by the probe and rejects a result from

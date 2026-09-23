@@ -8281,8 +8281,11 @@ with `encode_slots_total > 0` and a nonempty `render_node`; its
 `media_probe_gpu<N>` check must have `source=host_probe`, `status=pass`
 and a nonempty `observed_at`. The current connection's journal gate must
 also be complete. A device path merely
-seen in sysfs or a previous connection's report never qualifies. The check's GPU
-index must equal the selected GPU's reported index; missing driver identity
+seen in sysfs or a previous connection's report never qualifies. The exact
+`media_probe_gpu<N>` ID is reserved for this RH05 Automatic fact: `<N>` is the
+selected `capacity.gpus[].index`, and any `blocks.gpu_index` must agree.
+Codec-probe IDs with a suffix do not qualify; missing or renamed media-floor
+checks leave Automatic unresolved. Missing driver identity
 leaves Automatic unresolved. Multiple eligible GPUs are ambiguous unless an
 explicit render node selects exactly one of them. Existing encoder preference maps NVIDIA
 and AMD to `vulkan`, Intel to `va`; an unrecognized vendor is unresolved.
@@ -8291,8 +8294,9 @@ node. Explicit `render_node` must match the selected probed node when paired
 with Automatic encoder. A deployment choice still uses only its reported
 pre-policy baseline, even when another hardware key is Automatic.
 Within one connection, a repeated passing probe on the same device keeps
-the same `host_probe_result` fact; a later `fail`, `skip` or `unknown` result
-removes availability. On a relevant device/probe fact or availability change,
+the same `host_probe_result` fact. An inconclusive later attempt retains the
+last definitive pass and its original observation time; a subsequently
+reported non-pass result removes availability. On a relevant device/probe fact or availability change,
 the control plane supersedes a waiting approval, rotates host restart review
 IDs under the host lock, and moves an offered approval to `cancel_pending`
 with its restriction intact until authenticated nonacceptance. An agent
@@ -8487,6 +8491,18 @@ plus conflicting preparation and confirmed cleanup. Unknown inventory is never
 idle. No waiting deadline kills sessions. The agent's fsynced `accepted` journal
 record is the exact execution start; delivery and ack are not. A post-start
 edit is subsequent work.
+The `waiting` attempt's `remedy` reports why it is waiting using current
+authenticated heartbeat inventory plus persisted assigned/starting/running/
+stopping rows. Agent-reported IDs absent from those active rows are counted
+as local or untracked sessions; they are not discarded as idle. Missing,
+stale (over 30 seconds), offline or older-agent heartbeat inventory is
+reported as unknown. Current source-preparation states `queued`, `preparing`,
+`waiting_image`, `deferred` and `failed`, and pending/running host jobs show
+conflicting preparation or cleanup. A current `ready` or `disabled` report
+after terminal cleanup clears that reported blocker; absent current
+preparation evidence is unknown. Even an observed empty inventory does not make #338 execute:
+the later executor rechecks under admission and with the agent before any
+durable acceptance. An operator may cancel the waiting approval at any time.
 
 `POST /v1/admin/hosts/{id}/idle-apply/{attempt_id}/cancel` returns `200
 cancelled` only after confirmed agent nonacceptance. A lost revocation response
