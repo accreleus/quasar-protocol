@@ -2572,6 +2572,34 @@ advanced within `BIGINT`.
 | 0092 `host_image_success_history` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL REFERENCES image_catalog(id) ON DELETE CASCADE`, `current_version TEXT NOT NULL`, `previous_version TEXT NULL`, `verified_at TIMESTAMPTZ NOT NULL`, `PRIMARY KEY (host_id,image_id)` | Prior successful managed-image version changes only after a newer version is verified prepared. Separate FKs keep retention history when the current `host_images` inventory row is removed or refreshed. Unknown prior history stays unknown and cleanup fails closed. |
 | 0093 `host_image_operation_fences` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL REFERENCES image_catalog(id) ON DELETE CASCADE`, `generation BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0)`, `state TEXT NOT NULL CHECK (state IN ('idle','removing'))`, `attempt_id UUID NULL`, `PRIMARY KEY (host_id,image_id)` | Separate FKs allow a fence before `host_images` inventory exists. Requirement writers increment generation; launches take a shared lock without incrementing it. `removing` blocks ready/launch until verified re-ensure. |
 
+0090 also adds nullable `sessions.managed_home_id UUID` and `sessions.managed_home_mount_sha256
+TEXT CHECK (managed_home_mount_sha256 ~ '^[0-9a-f]{64}$')`. Both are written together before sending
+the matching session assignment; named CHECK
+`sessions_managed_home_binding_ck` requires both NULL or both non-NULL.
+The digest is SHA-256 of RFC 8785 canonical JSON for the exact managed-home
+entry the control plane injects into the `session_assign` mount array, including
+backing provider/ref and resolved container target; unrelated runtime-spec
+mounts are excluded. Neither ID nor digest is exposed. The dispatch transaction
+locks the session row before the claim (the global order below), then stores
+the selected live `user_homes.id` and this digest only after the claim
+and assigned host have been rechecked, **commits, then sends** the same payload.
+A crash after the row update but before send leaves no running evidence, so it
+cannot materialize a claim. The managed-home binding is immutable for a
+session ID after its first assignment send: a retry uses the identical mount
+payload or creates a new session ID. A `session_swap_app` never changes the
+binding; its target claim remains reserved because a rollback also reports
+`running` for the same session ID. Only the first accepted nonterminal-to-running
+state-machine transition for the original assignment can materialize a claim.
+Rejected/ignored, late terminal-session, swap, heartbeat and reconnect running
+reports are not evidence. This prevents an out-of-order running report for an
+earlier payload on the same host from proving a newer mount.
+Existing sessions backfill
+both columns NULL and cannot become RH05 materialization evidence retroactively.
+The home ID is a historical dispatch identity, deliberately not a foreign key:
+home GC may delete its `user_homes` row, and materialization independently
+requires that row to be live at the running transition.
+The 0090 down migration drops both columns before `managed_home_claims`.
+
 Backfill 0090 from known `user_homes` locations only. A unique live legacy
 location becomes `reserved` on its known host, not `materialized`, because a
 bookkeeping row is not physical-home proof. Multiple, null-host or ambiguous
@@ -2580,8 +2608,36 @@ location becomes `conflict/gc_pending` until agent reaping is confirmed; RH05
 launch, swap and local launch never revive it, including during the existing
 24-hour GC grace. A matching authenticated `session_state=running` for the
 same host, canonical app and managed-home mount, with a live `user_homes`
-row, is the only automatic `reserved` → `materialized` transition. It stamps
-`materialized_at` but does not prove what data exists inside the mount. If
+row, is the only automatic `reserved` → `materialized` transition. Decide
+materialization in the **same transaction** that first accepts the session's
+nonterminal-to-running state change. Under that session row lock, lock the
+existing claim row `FOR UPDATE`, then
+the live home row `FOR SHARE`. The authenticated reporting host must equal
+`sessions.host_id`, the claim's `host_id` and `user_homes.host_id`;
+`sessions.user_id` must be non-NULL and equal the claim's and home row's
+non-NULL `user_id`; the canonical parent of non-NULL `sessions.app_id` and
+non-NULL `user_homes.app_id` must equal the claim's `canonical_app_id`.
+The home row's ID must equal `sessions.managed_home_id`, its `gc_after` must
+be NULL, and the claim must still be `reserved`. Recompute the digest from
+that live row and the `home_container_path` resolved from the canonical
+parent (`parent_app_id ?? id`); it must
+equal `sessions.managed_home_mount_sha256`. If the app target or backing row
+changed since dispatch, the claim stays reserved. The running transition
+updates only an existing claim; it never inserts or revives one. This is the
+global lock order for the family: session rows (if needed, ascending ID) →
+claim row → `user_homes` row. The admin host-delete path first locks the host
+row `FOR UPDATE` to prevent new session reservations, then locks that host's
+nonterminal session rows `FOR UPDATE` in ID order, **before**
+tombstoning that host's homes and before the `DELETE` fires the claim tombstone
+trigger and later session FK cascade. Tombstone and
+GC-confirm paths lock the claim before the home row. A direct SQL host delete
+may deadlock against a running callback; PostgreSQL aborts one transaction,
+and the callback retries before accepting the state change. The claim is
+never materialized from a failed or ignored callback.
+An agent's bare session ID/state without this durable dispatch binding is
+insufficient.
+The transition stamps `materialized_at` but does not prove what data exists
+inside the mount. If
 the claim later conflicts, that timestamp remains historical evidence of a
 previously used mount, not proof of current location or contents.
 
