@@ -296,26 +296,43 @@ agent includes `"terminal_home_cleanup_v1": true` in this `register` message.
 Absent or false means unsupported. The control plane binds this assertion to
 the authenticated **connection epoch**, not a prior `agent_version` string or
 stored host value; every reconnect replaces it. Older agents register as
-before and continue their existing session behavior, but their terminal
-reports cannot automatically clear RH05 pending-home holds. The admin claim
-flag remains visible until qualified proof or audited repair. The control
-plane never treats a `source_commit` or version comparison alone as proof.
+before and continue signed legacy managed-home launch/swap behavior **without
+new RH05 holds**. Their terminal reports are not RH05 cleanup proof. The admin
+claim read exposes current capability and sticky unprotected legacy-dispatch
+status, so absence of a hold is never presented as verified safety. The
+control plane never treats a `source_commit` or version comparison alone as
+proof.
 
 An agent may advertise true only if it obeys this guarantee for every session:
 it removes and verifies absence of **all** original and swapped source
-containers before emitting terminal `session_state{stopped|failed}` or an
-`ack{ok:false}` that claims a command was rejected without side effects. It
+containers before emitting terminal `session_state{stopped|failed}`. It
 retains local home references until that cleanup succeeds. A fatal swap must
 tear down the current source before reporting `failed`; an abandoned or
 panicked runner must inspect and remove its containers before reporting
 `failed` or freeing references. If cleanup cannot be verified, the agent
 withholds terminal proof and retains protection; it must not send `failed`
-merely because a runner thread ended. On startup it reconciles orphaned
-containers and any queued pre-capability terminal reports before advertising
-true; an old queued report cannot acquire the new capability by replaying on
-a newer connection. These requirements are verified by agent tests for fatal
-swap and abandoned-runner paths. This is a behavioral change for agents that
-advertise the capability, not a change to `session_state` or ack JSON shape.
+merely because a runner thread ended. A negative ack for `session_assign` or
+`session_swap_app` instead guarantees **that rejected command caused no home
+side effect**; rejecting a swap does not tear down its live prior source.
+
+Before advertising true after startup, the agent durably inventories its
+previously held session IDs (recorded before a capable assignment is accepted
+or creates a container), reconciles every orphan source container and
+home reference, and excludes unsafe queued pre-capability terminal events.
+After registration it emits a qualified terminal `session_state{stopped|failed}`
+for every session ID whose containers or refs it cleaned up, including a
+session the control plane already reaped. `session_stop` for any session it
+holds likewise completes cleanup and emits a qualified terminal even if the
+control plane already marked that session terminal. If cleanup cannot be
+verified, it keeps the identity and refs pending and does not emit terminal.
+Once a terminal is emitted for a session ID, a durable retired-ID record
+prevents accepting any later `session_assign` or `session_swap_app` for that
+ID, across reconnect and restart; those commands are rejected without side
+effects. This makes a delayed pre-swap terminal valid negative evidence for
+that same ID. Agent tests cover fatal swap, abandoned runner, startup
+reconciliation, stop-after-control-plane-reap and retired-ID rejection. This
+is a behavioral change for agents that advertise the capability, not a change
+to `session_state` or ack JSON shape.
 
 **Optional `images` array (image-management P2 amendment).** The agent may include
 `"images": [{ "image_id": "steam", "version": "2026.08.07", "state": "ready" }, ...]` — the
@@ -1367,13 +1384,16 @@ These running swap callbacks do not echo the
 `session_swap_app.id`, so a repeated or out-of-order completion or rollback
 cannot prove which managed-home target operation has finished. The control
 plane retains a durable target-claim hold across such callbacks and synthetic
-session reaping. The original assigned home has the same hold. Only proven
-no-delivery before socket handoff, a matching negative ack from a connection
-advertising `terminal_home_cleanup_v1`, a terminal `session_state` from that
+session reaping **only when the dispatching connection epoch advertised
+`terminal_home_cleanup_v1`**. The original assigned home has the same
+conditional hold. Only proven no-delivery before socket handoff, a matching
+negative ack on the same command connection epoch, a terminal `session_state` from that
 capability's authenticated owner-host connection for the exact historical
 session, or audited repair may clear a hold. An ack timeout is not rejection;
 a late negative ack after control-plane restart has no in-memory command-to-
-hold correlation. Older agents' terminal reports retain holds for repair.
+hold correlation. Older agents do not create new RH05 holds and their terminal
+reports do not certify cleanup; their claim remains marked as historically
+unprotected.
 
 ### `session_display_update` — live render resolution / UI scale / external resolution (session-display-update; session-display-stream, approved 2026-08-16)
 > *Additive amendment. New downstream message; no existing message, field, or ack contract

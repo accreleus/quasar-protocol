@@ -8393,6 +8393,17 @@ from `state_detail` or a heartbeat. The admin read does not expose the hold's
 session ID, token, time, mount, provider or ref. Existing filters, ordering,
 cursor, `state`, `conflict_reason`, and the legacy homes endpoint are unchanged.
 Older clients ignoring this additive item field retain their existing reads.
+`home_cleanup_capability` is `supported` only while the claim owner has a
+current authenticated connection advertising `terminal_home_cleanup_v1`,
+`unsupported` while a current connection omits or denies it, and `unknown`
+while offline or the owner is NULL. It is current capability, **not** past
+cleanup proof. `legacy_unprotected_dispatch` is a sticky boolean: true for
+legacy-backfilled claims or managed-home dispatch on an unsupported connection,
+even after the host upgrades. False only means no such dispatch is recorded,
+not that data is absent or cleanup proved. Both are admin-only and expose no
+hold/session identity. Older agents continue signed managed-home launch and
+relaunch behavior without a new RH05 hold; their cleanup capability is visibly
+`unsupported` or `unknown`, and their dispatches set the sticky warning.
 The #341 admin claim console SHOULD show the flag and direct the operator to
 the audited repair workflow in #347 when it remains after a reconnect or
 synthetic reap; any rendering follows `design_handoff_v3/` and is visually
@@ -8469,7 +8480,8 @@ requires manual inspection and repair. An operator repair workflow is deferred
 to accreleus/quasar#347; RH05 never chooses or deletes a conflicting
 copy automatically.
 
-The 0090 pending-home hold independently blocks a new session's launch, swap
+The 0090 pending-home hold, created only for a command dispatched on a
+cleanup-capable authenticated connection epoch, independently blocks a new session's launch, swap
 or local launch of that canonical target, plus its tombstone, GC pull, GC
 confirmation and claim release. A swap by the **same** session into an
 already-held canonical target may reuse the existing hold without replacing
@@ -8480,9 +8492,11 @@ hold because the current callback does not identify the operation. Only a
 terminal report on the claim-owner host's authenticated connection with
 `terminal_home_cleanup_v1` may clear that historical session's holds, including
 after a synthetic reap; a late such report changes no public session state,
-event, reservation or materialization. A current/older agent without the
-capability, timeout, lost ack, heartbeat omission, reconnect reaper or host
-deletion leaves the admin flag true for #347 audited repair. The signed admin
+event, reservation or materialization. Timeout, lost ack, heartbeat omission,
+reconnect reaper or host deletion leaves an existing hold for #347 audited
+repair. An older agent does not create a new RH05 hold; its signed behavior
+and known synthetic-reap risk continue with `legacy_unprotected_dispatch=true`.
+The signed admin
 host-delete path may tombstone a held home but retains a null-host conflict
 claim and hold; the null-host janitor never deletes that claim.
 
@@ -8490,10 +8504,17 @@ claim and hold; the null-host janitor never deletes that claim.
 `ErrorEnvelope.error.code="conflict"` and fixed message
 `Managed home cleanup is pending`
 when deleting the user or canonical parent would cascade a held claim. An
-expired ephemeral-user reaper skips that user alone and continues other users.
+expired ephemeral-user reaper prefilters held users, skips each one, and
+handles a racing `QH001` in a per-user transaction or savepoint so other
+users continue.
 Neither deletion may erase the hold; derived-tile-only deletion keeps the
 canonical parent claim and its existing active-session guard. Direct SQL
 deletion raises named SQLSTATE `QH001` instead of silently skipping a cascade.
+The HTTP delete transaction locks affected sessions in ascending ID, then
+claims in ascending `(user_id,canonical_app_id)` order, checks holds, and only
+then tombstones homes and deletes the user/app. A refused delete commits no
+partial tombstone. Direct SQL may deadlock against a callback; PostgreSQL
+aborts one transaction for retry without partial deletion.
 No legacy homes endpoint request or response changes.
 
 `GET /v1/admin/hosts/{id}/images/cleanup` previews each managed image/version

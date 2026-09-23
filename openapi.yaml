@@ -7826,7 +7826,7 @@ components:
     AdminHomeClaim:
       type: object
       additionalProperties: false
-      required: [user_id, username, canonical_app_id, app_name, host_id, host_name, state, conflict_reason, materialized_at, recorded_host_ids, pending_home_operation]
+      required: [user_id, username, canonical_app_id, app_name, host_id, host_name, state, conflict_reason, materialized_at, recorded_host_ids, pending_home_operation, home_cleanup_capability, legacy_unprotected_dispatch]
       properties:
         user_id: { type: string, format: uuid }
         username: { type: [string, "null"] }
@@ -7840,6 +7840,8 @@ components:
           enum: [legacy_location_uncertain, claim_owner_missing, location_mismatch, gc_pending, null]
         materialized_at: { type: [string, "null"], format: date-time }
         pending_home_operation: { type: boolean, description: An unresolved original assignment or managed-home swap may have mounted this canonical target; this is not proof of a current mount. }
+        home_cleanup_capability: { type: string, enum: [supported, unsupported, unknown], description: Current authenticated owner connection's terminal cleanup capability; unknown when offline or owner is null. Not proof of historical cleanup. }
+        legacy_unprotected_dispatch: { type: boolean, description: Sticky warning for a legacy-backfilled home or managed-home dispatch without RH05 hold coverage; false does not prove physical absence. }
         recorded_host_ids:
           type: array
           items: { type: string, format: uuid }
