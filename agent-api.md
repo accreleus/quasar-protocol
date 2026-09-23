@@ -411,6 +411,35 @@ the agent's env): the control plane stores the latest map and returns it as `eff
 **latched** (the values the process is actually using), so a pending-restart discrepancy is
 visible by comparing `effective` against `resolved`. Absent ⇒ `effective` is null.
 
+`deployment_settings` *(RH05, optional for older agents)* is a separate,
+catalog-typed map of the agent's **pre-policy deployment baseline**. An agent
+advertising `config_policy_versions.deployment_baseline:1` MUST include it in
+the first `capacity` report on every authenticated connection. The agent resolves it from
+its current process environment and established device/default fallback logic,
+before applying any legacy override or RH05 policy snapshot. Every RH05-supported
+catalog key known to that agent is present unless resolution is indeterminate;
+newer agents may add keys. JSON
+`null` is valid only for a catalog-nullable key whose baseline is genuinely
+unset (for example an optional bitrate floor). Indeterminate resolution omits
+the affected key and makes any group needing it unavailable; `null` for a
+non-nullable key is malformed. `render_node`
+uses the configured value, as in `effective_settings`, rather than an internal
+canonical path. The agent sends the map in its first authenticated `capacity`
+report on each connection and sends it again if its baseline changes. An older
+agent omits it. The control plane must not derive this map from the legacy
+`effective_settings` report, catalog display defaults, a previous connection or
+a previous process. Validate needed keys after parsing their catalog types;
+unknown extra keys neither invalidate nor enter a group's baseline digest. A
+missing or invalid needed value is unavailable evidence, never permission to
+guess a deployment value. A present malformed later report invalidates the
+earlier report even on the same connection.
+For version 2, `capacity.config_policy_accepted_groups` acknowledges the
+validated `registered` group echo after durable ownership-marker fsync;
+`capacity.config_policy_legacy_map_applied_id` acknowledges the exact
+`settings_delivery_id` of a complete legacy-owned `config_update.settings`
+map after durable application. The latter is the per-connection admission
+gate, not GPU `capacity_detection`; see the RH05 connection rules below.
+
 `codecs` *(NEW, multi-codec, optional, additive; **reworded by amendment 12, #296**)* is the
 **host codec set**: the union of `gpus[].codecs` over the GPUs with `encode_slots_total > 0` (a
 render-node pin reports every other GPU with zero slots, so a pinned host's set is its one GPU's).
@@ -2029,49 +2058,257 @@ This additive amendment governs typed host settings and reviewed idle apply. Exi
 retain their shapes unless an optional field is specified below. In particular,
 `config_update` remains the carrier for `console_config` and `source_policies` on
 RH05-capable connections. For those messages `settings:null` means **preserve** the
-current settings snapshot; `settings:{}` clears the legacy sparse overrides.
+current settings snapshot; `settings:{}` clears the legacy sparse overrides
+for keys still owned by the legacy writer (all keys on an old connection).
 Omission of `settings` also preserves the snapshot. The Steam source-policy
 revision and acknowledgement rules above remain independent of RH05.
+On version 2 connections, each complete non-null legacy settings map carries a
+`settings_delivery_id` UUID. Re-sending an ID must carry the identical map;
+a changed map gets a new ID. Older agents ignore the optional ID.
 
 ### Capability and connection identity
 
-An agent advertises `"config_policy_versions":{"typed_settings":1,
-"execution_journal":1,"idle_apply":1,"preparation_observation":1}` on
-`register`, alongside the existing `source_policy_versions` object. Each member
-is an independently versioned positive integer; omission means unsupported.
-The control plane replaces the advertisement on every registration. RH05 settings
-execution requires `typed_settings:1` and `execution_journal:1`; a restart-scope
-offer additionally requires `idle_apply:1`. Preparation observation is separate
-and cannot be inferred from a settings capability. Unknown versions do not imply
-support for version 1.
+An agent advertises `"config_policy_versions":{"typed_settings":2,
+"execution_journal":1,"idle_apply":1,"preparation_observation":1,
+"deployment_baseline":1},"config_policy_groups":["idle_timeout_secs"]` on
+`register`, alongside the existing `source_policy_versions` object. Each
+version member is independently versioned; omission means unsupported.
+`typed_settings:2` requires a sorted, unique `config_policy_groups` array of
+group keys: `hardware` owns `encoder`, `render_node` and `cuda_device`;
+every other catalog key names its own group. The advertisement is replaced on
+each authenticated registration; the accepted echo binds writer ownership for
+that connection.
+The control plane ignores unknown names and echoes its provisional accepted
+subset in `registered`; it persists that set as confirmed ownership only after
+the agent fsyncs its durable ownership marker and acknowledges it on the
+current authenticated connection. The agent binds ownership **only** to the
+validated echo. An absent echo means no newly typed-owned
+groups and a legacy settings map is accepted subject to durable prior
+ownership. An empty array owns no new typed groups. An invalid or missing
+advertisement with version 2 permits no typed offers and legacy delivery only
+for groups the agent has never durably typed-owned.
+If an echo is present but invalid, the agent applies **no** non-null legacy
+settings on that connection, preserves its prior overlay, reports
+`ownership_echo_invalid` as a bounded `config_policy_feature_error`, then
+closes the connection with exponential reconnect backoff. The
+control plane treats that report as unresolved ownership and blocks admission.
+The control plane accepts a group only when it is known and the agent advertised
+`execution_journal:1`, `deployment_baseline:1`, and (for the catalog-defined restart scope)
+`idle_apply:1`. The agent rejects an echo unless it is a sorted, unique subset
+of its own advertised group array. Rejected echoes grant no new typed ownership.
+Version 1 was never released. A `typed_settings:1` advertisement grants no
+typed ownership or offers, and such an agent must accept the legacy map.
+#335 moves to version 2 before integration. A version 2 agent may
+advertise only the groups it implements or retains durably; #335 initially advertises only
+`idle_timeout_secs`, and #336 expands the set. The control plane supports
+version 2; version 1 and unknown versions do not imply support for it.
+Typed execution requires `execution_journal:1`; a restart-scope offer also
+requires `idle_apply:1`. Preparation observation is separate. Deployment-source
+offers also require `deployment_baseline:1`; the control plane reports an
+otherwise typed-capable group lacking that member as `upgrade_required`.
+An agent includes every group with a started nonterminal local attempt in its
+advertisement even if it no longer implements new offers for that group. The
+control plane echoes a known such group for recovery and ownership protection
+regardless of new-offer capability. If that group cannot execute a new offer,
+the agent reports `group_execution_unavailable` in a bounded
+`config_policy_feature_error` with the group name. The control plane parks
+the obligation as `upgrade_required` and sends no further offer for that group
+on this connection. A new registration may retry after capability returns.
+It does not send non-null legacy settings on an RH05
+connection until complete authenticated journal inventory resolves this set.
+
+A version 2 agent advertises a group only after it has durably seeded that
+group's active snapshot from the last complete legacy overlay it applied for
+those keys, including deployment-baseline resolution for absent keys. The seed
+is the catalog-typed value actually latched by the running process, including
+restart-class keys; receipt of an overlay alone is insufficient. It is
+**unverified** RH05 state, never applied proof. Until a verified snapshot
+exists, the durable seed is the active snapshot for manual restart retention
+and the one safe recovery target. Its digest is bound in a
+`{"kind":"seeded_group_digest","id":"<sha256>"}` prerequisite in place of
+`last_verified_group_digest`. The seed digest is lowercase SHA-256 of RFC 8785
+canonical JSON for `{group,resolved_settings}`, where `resolved_settings` is
+the full catalog-typed active group map (including permitted JSON nulls).
+The agent reports it in authenticated journal inventory `active_snapshots`;
+the control plane cannot invent it from legacy display projections. Verified recovery to that seed reports
+`recovered` with the original failure, never `applied` for the desired
+candidate. A seeded restart-scope group shows `pending` and needs idle
+approval for its first RH05 verified apply. An agent upgraded from a
+version without a durable legacy overlay first advertises an empty group array;
+the control plane sends the full legacy sparse map (including `{}`), the agent
+fsyncs it before applying it, then reconnects when the host is session-idle to
+advertise its now-seeded groups. This seed reconnect is bounded to one automatic
+retry per process boot; afterward it remains pending with an actionable remedy.
+A version 2 agent atomically fsyncs **every** accepted complete legacy overlay
+before applying it. Adding a group in a later agent version uses the latest
+such durable overlay before
+the group enters the advertisement. The control plane cannot switch a group
+to the typed writer merely because the binary claims implementation support.
+After validating an accepted group echo, the agent fsyncs an
+`ever_accepted_typed` marker for each newly owned group before applying a
+typed offer. This marker survives reconnect and process restart; a seed alone
+does not set it. There is no automatic handback in RH05.
+
+On **every** version 2 connection the control plane sets its 0087 per-host
+settings gate to the current connection UUID, completes authenticated journal
+inventory, then sends one **initial** complete legacy-owned settings map, including
+`{}`, with a fresh `settings_delivery_id`. The agent fsyncs the complete map
+before applying it, composes the legacy and durable typed snapshots, and sends
+a current-connection capacity with `config_policy_legacy_map_applied_id` equal
+to that ID. The control plane clears only that connection's gate
+after the exact ID arrives on its still-current authenticated socket. Earlier
+capacity may report baseline and GPU observations but cannot lift the gate;
+a later report omitting the ID does not reclose a cleared gate. A
+lost map, failed fsync, wrong ID, displaced socket, or interrupted seed leaves
+admission gated. The agent accepts no session assignment or local launch
+before map application and complete journal reconciliation. With no durable
+legacy overlay, it advertises an empty group set and makes its bounded idle
+reconnect to advertise seeded groups only after the map is applied. The
+settings seed is distinct from `capacity_detection`, which continues to report
+only GPU detection.
+Before 0089, #335 consumes the complete paged inventory for its supported
+next-session group. Finished `applied`, `recovered` and `revoked_unstarted`
+entries are history, never orphans; their high-water revision still fences
+offers. A matching unfinished entry is tracked on this connection until a
+durable terminal report; a different unfinished entry, or any `uncertain`
+entry, keeps admission gated with a repair remedy. A different unfinished
+entry may clear that gate after its safe durable terminal report arrives on
+the current connection and its active snapshot is reconciled; an `uncertain`
+entry cannot clear it this way. The agent journal is #335's durable
+execution-start record. The control plane records pending intent in the 0087
+group row and writes applied revision/digest/evidence only after matching
+verified active readback. Once 0089 exists, the durable attempt and journal
+reconciliation rows replace this limited connection-memory handling.
+Later legacy edits send new complete maps with new delivery IDs. They do not
+reclose the already cleared initial admission gate; their application remains
+visible through a later effective report and never counts as RH05 proof.
+While the initial gate is closed, a changed complete map supersedes the stored
+`settings_delivery_id` under the host lock before send. Only the latest ID
+may clear that gate; an earlier acknowledgement is stale. The control plane
+may retransmit an identical map with the same ID after a bounded wait, or
+close the socket and renegotiate. The agent applies and acknowledges a
+retransmitted ID idempotently. A lost map or acknowledgement is never inferred
+from a later capacity report.
 
 For an authenticated registration the control plane adds two required UUID strings
-to `registered` when it supports RH05:
+to `registered` when it supports RH05. It also echoes accepted
+`config_policy_groups` for version 2:
 
 ```json
 {
   "type": "registered", "host_id": "<uuid>", "heartbeat_interval_ms": 5000,
-  "boot_incarnation": "<uuid>", "connection_incarnation": "<uuid>"
+  "boot_incarnation": "<uuid>", "connection_incarnation": "<uuid>",
+  "config_policy_groups": ["idle_timeout_secs"]
 }
 ```
 
 `boot_incarnation` is newly minted on **every control-plane process start**;
 `connection_incarnation` is newly minted for each authenticated agent WebSocket.
 The existing enrollment-only `node_secret` rule is unchanged. An old control plane
-omits these fields, in which case the agent accepts no RH05 grant. A new control
+omits the identities, in which case the agent accepts no RH05 grant. A control
+plane without the version 2 group echo grants no new typed ownership; the agent
+still protects its durably owned groups and accepts legacy values only for
+never-owned keys. A new control
 plane sends no RH05 offer unless the advertised versions and these identities
 were established on the current connection. The authenticated socket, not a JSON
 host ID, determines the reporting host.
 
-The control plane selects **one settings writer per connection**. A legacy agent
-receives sparse `config_update.settings` as before. On an RH05 settings connection,
-only the RH05 offer below changes host settings; `config_update` may still deliver
-`console_config` or `source_policies` with `settings:null` (or omitted). The
-agent ignores any non-null legacy `config_update.settings` on that connection,
-including `{}`, and reports a feature error. The control plane does not send the
-legacy `restart` command for an RH05 settings operation. Legacy
+On a version 2 connection, `capacity.config_policy_accepted_groups` is a
+sorted, unique array exactly equal to the valid `registered` echo. The agent
+sends it only after fsyncing every newly owned group's
+`ever_accepted_typed` marker. The control plane compares it with its
+current-connection echo before storing confirmed accepted groups and extending
+the host's durable ever-owned union; a missing, malformed, mismatched or
+displaced-socket acknowledgement leaves ownership unresolved and admission
+gated. A later capacity can retry the same acknowledgement. For an
+empty echo the array is `[]`. The separate
+`capacity.config_policy_legacy_map_applied_id` is the exact UUID of the
+current connection's complete `config_update.settings` delivery. It is sent
+only after that map was fsynced and applied, and is required before admission
+on every version 2 connection. Neither
+field is inferred from `effective_settings`, report order or an agent's claimed
+binary version. An old control plane ignores these additive capacity fields.
+
+Feature errors outside a specific offer use the agent-to-control-plane message
+`{"type":"config_policy_feature_error","code":"ownership_echo_invalid",
+"group":null,"connection_incarnation":"<uuid>"}`. A rejected legacy key
+uses `code:"attempt_conflict"` and its group name. An agent that retains a
+group but cannot run a new offer sends `code:"group_execution_unavailable"`
+with that group, which parks the obligation as `upgrade_required` for this
+connection without retrying. If an offer races ahead of this report, the
+agent rejects it before durable acceptance with the same code and group;
+that rejection also parks the obligation for this connection. `group` is null or a known
+group key; `code` is a bounded token, and the authenticated socket determines
+the host. These reports are operational diagnostics, never application proof.
+The control plane processes messages from each authenticated socket serially
+in receive order; in particular, a fresh `capacity.deployment_settings`
+report sent before a baseline-change rejection is ingested first.
+
+The control plane selects **one settings writer per key on each connection**.
+A legacy or version 1 agent receives sparse `config_update.settings` as before.
+For version 2, the control plane sends typed offers only for currently
+confirmed capable groups and sends the full sparse legacy override map for
+**never-owned** keys in `config_update.settings`. When constructing the
+initial map before acknowledgement, it also excludes groups in the current
+connection's provisional echo. A group is typed-owned when
+it is in the provisional echo, current confirmed echo **or** durable ever-owned set; a
+smaller echo cannot return it to the legacy writer.
+That map is a projection of saved choices: explicit becomes its legacy value,
+deployment is absent. Automatic has no legacy projection; an unowned Automatic
+key is omitted, falls back to deployment through the legacy writer, and its group is
+`upgrade_required`. Other unowned explicit overrides are still sent, including
+on the first connection. No unsupported choice is claimed applied.
+The agent atomically replaces the legacy-owned overlay on each such map (including
+`{}`), re-resolving cleared keys from its deployment baseline, while preserving
+the durable active snapshots of typed-owned groups. It then composes the two
+disjoint sets before session launch. If a map contains a typed-owned key, the
+agent filters and rejects that key with `attempt_conflict`, applies the
+independent never-owned keys, and acknowledges its delivery ID only after
+that filtered map is durably applied. Neither writer may silently overwrite
+the other's keys. `settings:null` or omission preserves both
+sets while `console_config` and `source_policies` continue on `config_update`.
+A group that has ever become typed-owned remains durably typed-owned on that
+agent until an explicit verified handback protocol is introduced; RH05 defines
+no automatic handback. This includes a group with no open attempt and one with
+a started nonterminal attempt. A missing or smaller echo never authorizes
+legacy writes to its keys. The agent filters out and rejects those keys with
+`attempt_conflict` while applying independent unowned keys from the legacy map;
+it preserves the typed group's active snapshot and reports the disagreement.
+From #335 onward the marker and active-snapshot store are group-generic: an
+older version 2 binary must restore and compose every durable active snapshot
+whose catalog keys it understands, even when it cannot execute new offers for
+that group. It advertises every sticky group for ownership reconciliation.
+An unknown catalog key in a sticky group prevents admission rather than
+silently falling back to the deployment value.
+The control plane does not project a pending typed desire into a legacy map
+for such a group after a downgrade. A control plane unable to echo a durable
+typed group requires re-upgrade or explicit operator repair; it cannot claim
+that group's desired value applied. Before complete journal inventory, it
+sends no non-null legacy settings and treats ownership as unresolved. An
+`uncertain` attempt retains its protective admission hold across rollback.
+On a control plane without RH05 registration identities, the agent uses the
+older full legacy map only for keys that have never been durably typed-owned;
+sticky typed groups retain their active snapshot and reject their legacy keys.
+It accepts no typed grant from that control plane. The control plane never sends
+a legacy `restart` command for a typed-owned group; never-owned keys
+retain their established legacy restart behavior. Legacy
 `capacity.effective_settings` remains an informational effective map and is
 never RH05 application evidence.
+If a pre-RH05 agent, a version 1 agent or an agent advertising an unknown
+`typed_settings` version reconnects to an RH05 control plane after a group became
+typed-owned, it cannot restore that group's durable active snapshot. The
+control plane withholds admission, omits its pending desired value from the
+legacy map, and shows `upgrade_required` with an actionable re-upgrade or
+repair remedy. A pre-RH05 control-plane downgrade cannot enforce this rule
+and is outside the supported schema-floor rollback path.
+Any legacy or standalone restart on **any** connection takes the same
+host-wide operation lock as typed candidate activation and recovery. The agent
+rejects it while **any-scope** attempt is `accepted`, `activating`,
+`awaiting_startup`, `verifying`, `failed` with recovery undecided,
+`recovery_verifying`, `recovery_awaiting_startup` or `uncertain`. It replies
+`ack ok:false` with `attempt_conflict` and does not exit. The control plane also
+refuses to send it while any such open/uncertain attempt exists. Neither
+side may use a legacy restart to interrupt a started RH05 attempt.
 
 ### Offer, result, revocation, and inventory wire
 
@@ -2086,6 +2323,18 @@ serialization of `{group,scope,revision,settings,resolved_settings}`. The
 `{"source":"explicit","value":<catalog-typed JSON value>}`;
 `resolved_settings` contains the exact effective value proposed for every key
 in that group, including deployment and automatic resolutions. The agent
+identifies a candidate by `(revision, content_sha256)`, not revision alone: a
+fresh attempt at the same revision with a different digest after a changed
+deployment baseline is valid only if all current prerequisites pass **and**
+`group`, `scope` and `settings` are byte-identical to the journaled candidate
+at that revision. Only deployment-resolved values in `resolved_settings` and
+their prerequisite facts may differ; any other equal-revision difference is
+`attempt_conflict`. A revision below the agent's high-water mark is rejected.
+The journal retains `(group,scope,settings)` at each group's high-water
+revision across terminal results, revocation and compaction; a digest alone
+cannot enforce the equal-revision fence.
+The attempt ID still fences replay of an already accepted attempt, and a
+restored high-water revision is never lowered. The agent
 independently resolves and validates the candidate; a content or resolution
 mismatch rejects the offer before acceptance. `prerequisites_sha256` binds the
 reviewed evidence and prerequisite identities in the offer's `prerequisites`
@@ -2093,8 +2342,27 @@ array. Each fact is `{"kind":"<kind>","id":"<id>"}` with nonempty UTF-8
 strings containing neither NUL nor LF. Include only facts required by the
 group: relevant agent image digest, driver identity, accessible device
 identities, required passing host-probe result IDs, and last verified group
-digest. Sort facts bytewise by `(kind,id)`; encode each as UTF-8 `kind`, one
+digest (or seeded group digest before first verification). Sort facts bytewise
+by `(kind,id)`; encode each as UTF-8 `kind`, one
 NUL byte, UTF-8 `id`, one LF byte; concatenate and SHA-256 that byte stream.
+When any choice has `source=deployment`, include exactly one additional fact
+`{"kind":"deployment_baseline","id":"<sha256>"}`. Its ID is the 64-character
+lowercase SHA-256 of RFC 8785 canonical JSON for a map containing **only** this
+group's keys whose source is deployment, with their parsed catalog-typed
+baseline values. A nullable key may carry JSON `null`; a missing, invalid or
+indeterminate needed value prevents an offer. Unknown extra reported keys are
+excluded. The control plane may use only a valid baseline reported on the
+authenticated current connection to resolve those choices and construct an
+offer or approval preview. The agent checks the baseline fact against its
+**current pre-policy baseline**, then independently resolves each deployment
+choice before it accepts the offer. A changed baseline rejects an unstarted
+grant with `deployment_baseline_changed`; the agent sends a fresh `capacity`
+baseline **before** the rejecting `config_policy_state` on the same ordered
+socket. On that rejection the control plane invalidates its stored baseline
+only if the relevant group projection still hashes to the rejected offer's
+baseline fact; a newer report already ingested remains current. An offer never
+silently substitutes a different candidate. The baseline fact proves only
+resolution, not application.
 The agent recomputes the digest and independently checks each exact fact
 against current accessible-device inventory and probe evidence immediately
 before durable acceptance. Any changed, missing, or indeterminate fact rejects
@@ -2226,6 +2494,7 @@ the **complete** authenticated journal, including entries absent from its databa
   "type": "config_policy_journal_inventory_page", "inventory_id": "<uuid>",
   "snapshot_id": "<uuid>", "cursor": null, "next_cursor": null,
   "revision_high_water": {"hardware": "12"},
+  "active_snapshots": {"hardware": {"kind": "seeded", "digest": "<sha256>"}},
   "entries": [
     {
       "attempt_id": "<uuid>", "host_id": "<uuid>", "group": "hardware",
@@ -2247,15 +2516,38 @@ the snapshot stable until completion or return an error that restarts inventory
 from the beginning. `revision_high_water` is the durable per-group maximum
 revision of every offer the agent has recorded, including terminal or revoked
 attempts; each value uses the decimal-string rule above. It is present and
-identical on every page, even when `entries` is empty. The control plane rejects
-changed snapshots, high-water maps, skipped cursors,
-duplicate entries with conflicting content, or a page from any connection other
+identical on every page, even when `entries` is empty.
+For version 2, `active_snapshots` is required on every page, including an
+empty `{}`; omission is a malformed page. It is identical on every page.
+Each group value is
+`{"kind":"seeded"|"verified","digest":"<sha256>"}` for its current durable
+active snapshot; a group without one is absent. A seeded digest uses the
+canonical form above; a verified digest is its verified `content_sha256`.
+After each complete inventory, an `applied` row remains a historical result
+until the agent's current active snapshot is compared. A different digest
+moves the group to `pending`. A matching **verified** active snapshot on the
+current connection restores `applied` when its digest and revision match the
+current desired candidate; a matching seed never establishes applied proof.
+The control plane rejects changed snapshots, high-water maps, active snapshot
+maps, skipped cursors, duplicate entries with conflicting content, or a page from any connection other
 than the current authenticated one. It does not treat a partial inventory as
 empty or complete. Live states received during inventory are reconciled by
 attempt ID and sequence after the complete snapshot; they never excuse a missing
 page. Only a completed inventory permits scheduling and restriction reconciliation.
 Historical grant IDs identify origin; current socket authentication authorizes
 the inventory and cannot be replaced by the historical IDs in JSON.
+
+Conformance cases include: lost initial legacy map, failed overlay fsync,
+stale/mismatched delivery ID and displaced-socket capacity; crash between
+ownership-marker fsync and acknowledgement with either component rolled back
+first; smaller echo for an ever-owned group; legacy map conflicting on one
+typed key while independent keys still apply; offline deployment edit with
+null digest followed by baseline resolution; baseline change racing an offer
+without discarding an already ingested newer report; equal-revision changed
+deployment digest versus changed settings; restart refused during every started
+phase of either scope; and database restore with the agent high-water mark
+above the database revision. Tests use real Postgres and durable temporary
+journals for the persistence and ordering claims.
 
 ### Durable start, restart recovery, and database restore
 
@@ -2277,6 +2569,19 @@ marks the original attempt `failed` before recovery. A boot finding bare
 `activating` or `verifying` also marks it `failed`: a crash during readback
 or verification cannot consume `awaiting_startup` again or activate the
 candidate a second time. The marker alone is never application proof.
+
+Deployment-source **desired** values re-resolve from the current process's
+pre-policy baseline; the last verified active snapshot remains separately
+latched until a new candidate is verified. At startup verification, after
+fsyncing `verifying`, a changed
+deployment-baseline projection for the approved group fails the attempt with
+`deployment_baseline_changed` before loading or claiming the candidate applied.
+The agent retains the original failure and follows the single safe recovery
+path to the last verified snapshot. On any other agent process restart, a
+changed baseline projection makes affected desired groups pending again; a
+restart-scope change requires a newly reviewed idle approval. A manual restart
+does not authorize the changed desired candidate. A next-session group may
+reconcile independently after current-connection baseline evidence arrives.
 
 After original failure, the agent may make **one** recovery activation of the
 exact last verified group, only when safe. It fsyncs `recovery_verifying`
@@ -2325,8 +2630,9 @@ protective hold until verified reconciliation or explicit repair. A waiting
 operation never kills sessions to reach idle and has no deadline that does so.
 
 **Existing-behavior amendment.** The older `config_update` and `restart`
-paragraphs above describe the legacy settings writer. On an RH05 connection,
+paragraphs above describe the legacy settings writer. For a typed-owned group,
 legacy PATCH still stores policy intent, but the RH05 offer/result path alone
-executes settings and proves application. A legacy `restart_confirm` does not
-approve RH05 idle apply. This amendment does not change console or Steam source
-policy delivery.
+executes settings and proves application. Unowned groups retain the legacy
+writer and its restart behavior. A legacy `restart_confirm` does not approve
+RH05 idle apply for a typed-owned group. This amendment does not change console
+or Steam source policy delivery.
