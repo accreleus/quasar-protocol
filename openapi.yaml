@@ -2802,6 +2802,27 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: "stale_revision with current view and changed keys, or upgrade_required with no write." , content: { application/json: { schema: { anyOf: [ { $ref: "#/components/schemas/HostPolicyConflict" }, { $ref: "#/components/schemas/ErrorEnvelope" } ] } } } }
+  /v1/admin/hosts/{id}/policy/retry:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [admin]
+      summary: Re-arm a next-session policy group whose transient retry budget is exhausted (RH05).
+      description: >-
+        Only a group in failed with the retry_exhausted remedy is retryable: it returns to pending
+        with a fresh bounded backoff budget and the current desired revision. Invalid intent the host
+        rejected is never retried; change the setting instead. A restart-scope group needs a fresh
+        scoped idle approval rather than Retry. Retry grants no approval and proves no application.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicyRetryRequest" } } }
+      responses:
+        "200": { description: Updated policy view., content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicy" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "conflict: the group is not waiting for Retry (pending, applied, rejected as invalid, or restart scope needing approval).", content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
   /v1/admin/hosts/{id}/readiness-overrides/{check_id}:
     parameters:
       - { $ref: "#/components/parameters/PathId" }

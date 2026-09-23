@@ -8297,7 +8297,9 @@ older agent cannot restore a typed active snapshot.
 
 `POST /v1/admin/hosts/{id}/policy/retry` takes `{"group":"<key>"}`. A
 transient exhausted group can retry with bounded backoff; invalid intent is not
-retryable. A disruptive retry needs fresh scoped approval. Typed errors include
+retryable. Success is `200` with the typed view; an unknown group is
+`400 validation_failed`, and a group not waiting for Retry (pending, applied,
+rejected as invalid, or restart scope) is `409 conflict` with no write. A disruptive retry needs fresh scoped approval. Typed errors include
 `unsupported_source`, `upgrade_required`, `group_execution_unavailable`,
 `attempt_conflict`, `retry_exhausted` and
 `recovery_uncertain`.
