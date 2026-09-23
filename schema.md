@@ -2636,6 +2636,13 @@ cordon time cannot be reconstructed.
 
 ### 0089 — boot fence, approvals, attempts and journal inventory
 
+Automatic hardware review may read the existing `gpus.updated_at`,
+`hosts.readiness_reported_at` and `hosts.last_registered_at` receipt times
+to reject device/probe reports retained from a previous authenticated
+connection. It does not infer accessibility from sysfs and adds no evidence
+column. The agent independently recomputes the device and media-probe fact
+identities at durable acceptance as specified in `agent-api.md`.
+
 `rh05_control_boot` is a singleton (`id BOOLEAN PRIMARY KEY CHECK (id)`,
 `incarnation UUID NOT NULL`, `started_at TIMESTAMPTZ NOT NULL`) in the **same
 database** as approvals. Every control-plane process start, including a start

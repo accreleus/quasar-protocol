@@ -8262,6 +8262,25 @@ Automatic is supported only for the encoder/render-node hardware group and needs
 accessible-device plus passing host-probe evidence. The current 39-key
 source/effect/evidence matrix is `quasar/docs/design/rh05-contract-proposal.md`;
 new catalog keys declare those properties before typed policy accepts them.
+For this group, the control plane treats the agent's current authenticated
+`capacity` as device evidence only when every selected GPU row is reported,
+has `encode_slots_total > 0`, a nonempty `render_node`, and
+`gpus.updated_at >= hosts.last_registered_at`. A passing
+`readiness` check `media_probe_gpu<N>` for that GPU must have
+`source=host_probe`, `status=pass`, a nonempty `observed_at`, and
+`hosts.readiness_reported_at >= hosts.last_registered_at`. Those database
+receipt times establish current-connection provenance; agent timestamps
+identify probe results but are not compared to the database clock. The
+current connection's journal gate must also be complete. A device path merely
+seen in sysfs or a previous connection never qualifies. The check's GPU
+index must equal the selected GPU's reported index; missing driver identity
+leaves Automatic unresolved. Multiple eligible GPUs are ambiguous unless an
+explicit render node selects exactly one of them. Existing encoder preference maps NVIDIA
+and AMD to `vulkan`, Intel to `va`; an unrecognized vendor is unresolved.
+Automatic render-node resolution chooses only that one probed accessible
+node. Explicit `render_node` must match the selected probed node when paired
+with Automatic encoder. A deployment choice still uses only its reported
+pre-policy baseline, even when another hardware key is Automatic.
 
 `PATCH /v1/admin/hosts/{id}/policy` takes
 `{"expected_revision":"12","changes":{"gop":{"source":"explicit","value":90}}}`.

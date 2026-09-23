@@ -2392,6 +2392,18 @@ before durable acceptance. Any changed, missing, or indeterminate fact rejects
 the grant without activation; sysfs presence alone cannot satisfy device
 accessibility. Scope is `next_session` or `restart`. Expiry is an RFC3339 UTC
 instant.
+For Automatic hardware, `accessible_device.id` is lowercase SHA-256 of UTF-8
+`gpu\0<N>\0<render_node>\0<driver_identity>\n`, where `<N>` is the
+unprefixed decimal GPU index and the other fields are the exact reported
+nonempty strings. `host_probe_result.id` is lowercase SHA-256 of UTF-8
+`media_probe_gpu<N>\0<observed_at>\0host_probe\0pass\n`, using the
+exact nonempty `observed_at` string in the passing readiness check. The
+agent recomputes both against its own accessible device inventory and latest
+successful real media host probe immediately before accepting the grant.
+It rejects a path it cannot open or a result whose device identity no longer
+matches, even if the control plane saw a later database receipt time. The
+control plane uses database receipt times only to exclude pre-connection
+reports; its clock and the agent's probe clock are not compared.
 
 ```json
 {
