@@ -1336,6 +1336,17 @@ does not change the reservation; see `schema.md`):
   **not** be restored; the session is terminal and its reservation is released (the normal `failed`
   path). **Roll back when possible; only fail the session when rollback is impossible.**
 
+**RH05 #341 managed-home recovery hold:**
+No field or ack changes here. These running swap callbacks do not echo the
+`session_swap_app.id`, so a repeated or out-of-order completion or rollback
+cannot prove which managed-home target operation has finished. The control
+plane retains a durable target-claim hold across such callbacks and synthetic
+session reaping. Only its proof of no command delivery, an explicit matching
+`ack{ok:false}`, an authenticated terminal `session_state` for the exact
+historical session on the claim owner host, or audited repair may clear that
+hold. An ack timeout is not rejection. This protection is internal to the
+control plane and requires no behavior change from older agents.
+
 ### `session_display_update` — live render resolution / UI scale / external resolution (session-display-update; session-display-stream, approved 2026-08-16)
 > *Additive amendment. New downstream message; no existing message, field, or ack contract
 > changes. An older agent that does not recognise `session_display_update` treats it as an
