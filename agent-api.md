@@ -626,8 +626,12 @@ Sent every `heartbeat_interval_ms`. Updates `hosts.last_heartbeat_at`. `running_
 the control plane reconcile its view against the agent's ground truth (detect orphans both ways).
 Missing N consecutive heartbeats ⇒ host `offline`, its sessions `failed`, reservations released.
 For RH05 idle waiting, an explicit `running_sessions` array is the current
-agent's complete list of its live managed and local Quasar sessions on this
-socket. The control plane accepts it into internal `host_idle_inventory` only
+agent's complete list of its live control-plane-managed sessions on this
+socket, including local-only console sessions that still have control-plane
+session rows. The existing orphan-stop rule in §Reconnection continues to
+apply to unknown IDs; their presence blocks idle until confirmed absent,
+without treating them as a new class of authorized local session.
+The control plane accepts the list into internal `host_idle_inventory` only
 when the authenticated connection incarnation matches the pending or complete
 journal gate. An absent/null list, stale heartbeat, lost socket or older agent
 is unknown for idle status, never an empty list. Assigned, starting and

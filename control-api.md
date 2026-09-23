@@ -8493,8 +8493,10 @@ record is the exact execution start; delivery and ack are not. A post-start
 edit is subsequent work.
 The `waiting` attempt's `remedy` reports why it is waiting using current
 authenticated heartbeat inventory plus persisted assigned/starting/running/
-stopping rows. Agent-reported IDs absent from those active rows are counted
-as local or untracked sessions; they are not discarded as idle. Missing,
+stopping rows, including local-only console sessions with control-plane rows.
+Agent-reported IDs absent from those active rows are untracked managed
+sessions: existing orphan-stop behavior applies, and they remain idle
+blockers until the agent confirms absence. Missing,
 stale (over 30 seconds), offline or older-agent heartbeat inventory is
 reported as unknown. Current source-preparation states `queued`, `preparing`,
 `waiting_image`, `deferred` and `failed`, and pending/running host jobs show

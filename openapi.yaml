@@ -5263,7 +5263,7 @@ components:
       properties:
         status: { type: string, description: Open evidence state; consumers retain unknown values. }
         observed_at: { type: [string, "null"], format: date-time }
-        remedy: { type: [string, "null"], description: "For waiting, names current session, local/untracked, preparation or unknown-inventory blockers; an empty observation never proves application." }
+        remedy: { type: [string, "null"], description: "For waiting, names current sessions (including local-only console), untracked managed sessions, preparation or unknown-inventory blockers; an empty observation never proves application." }
         detail: { type: object, additionalProperties: true }
     HostPolicy:
       type: object
