@@ -8270,17 +8270,17 @@ Automatic is supported only for the encoder/render-node hardware group and needs
 accessible-device plus passing host-probe evidence. The current 39-key
 source/effect/evidence matrix is `quasar/docs/design/rh05-contract-proposal.md`;
 new catalog keys declare those properties before typed policy accepts them.
-For this group, the control plane treats the agent's current authenticated
-`capacity` as device evidence only when every selected GPU row is reported,
-has `encode_slots_total > 0`, a nonempty `render_node`, and
-`gpus.updated_at >= hosts.last_registered_at`. A passing
-`readiness` check `media_probe_gpu<N>` for that GPU must have
-`source=host_probe`, `status=pass`, a nonempty `observed_at`, and
-`hosts.readiness_reported_at >= hosts.last_registered_at`. Those database
-receipt times reject pre-connection rows; the authenticated socket identity
-and journal gate establish current-connection authority. Agent timestamps
-identify probe results but are not compared to the database clock. The
-current connection's journal gate must also be complete. A device path merely
+For this group, the control plane uses only the internal `host_hardware_evidence`
+projection of **one** authenticated current-connection `capacity` report
+containing both GPU inventory and readiness checks. Its write takes the host
+lock, checks the journal gate's connection incarnation, and refuses a stale
+socket; the database `received_at` must be at or after
+`hosts.last_registered_at`. Generic retained `gpus` and `hosts.readiness`
+columns are not Automatic approval authority. A selected GPU must be reported
+with `encode_slots_total > 0` and a nonempty `render_node`; its
+`media_probe_gpu<N>` check must have `source=host_probe`, `status=pass`
+and a nonempty `observed_at`. The current connection's journal gate must
+also be complete. A device path merely
 seen in sysfs or a previous connection never qualifies. The check's GPU
 index must equal the selected GPU's reported index; missing driver identity
 leaves Automatic unresolved. Multiple eligible GPUs are ambiguous unless an
@@ -8290,6 +8290,16 @@ Automatic render-node resolution chooses only that one probed accessible
 node. Explicit `render_node` must match the selected probed node when paired
 with Automatic encoder. A deployment choice still uses only its reported
 pre-policy baseline, even when another hardware key is Automatic.
+Within one connection, a repeated passing probe on the same device keeps
+the same `host_probe_result` fact; a later failed or indeterminate probe
+removes availability. On a relevant device/probe fact or availability change,
+the control plane supersedes a waiting approval, rotates host restart review
+IDs under the host lock, and moves an offered approval to `cancel_pending`
+with its restriction intact until authenticated nonacceptance. An agent
+rejection of an offered grant likewise settles as `revoked_unstarted` only
+after durable nonacceptance proof. Existing media probes run at startup and
+on relevant device, driver, settings or failure triggers; an unchanged
+passing result does not churn waiting approval.
 
 `PATCH /v1/admin/hosts/{id}/policy` takes
 `{"expected_revision":"12","changes":{"gop":{"source":"explicit","value":90}}}`.

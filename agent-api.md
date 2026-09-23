@@ -2397,14 +2397,18 @@ For Automatic hardware, `accessible_device.id` is lowercase SHA-256 of UTF-8
 unprefixed decimal `capacity.gpus[].index`, `<render_node>` is the exact
 nonempty `capacity.gpus[].render_node`, and `<driver_identity>` is the exact
 nonempty `capacity.gpus[].driver_identity` (stored in the matching
-`gpus.render_node` and `gpus.driver_identity` columns). The agent and
+`gpus.render_node` and `gpus.driver_identity` columns and copied verbatim
+to the connection-fenced hardware projection). `<N>` must be non-negative.
+Invalid fields leave Automatic unresolved. The agent and
 control plane reject NUL in any field; `\0` denotes byte 0x00 and `\n`
 denotes byte 0x0A in these encodings. `host_probe_result.id` is lowercase SHA-256 of UTF-8
-`media_probe_gpu<N>\0<observed_at>\0host_probe\0pass\n`, using the
-exact nonempty decoded `observed_at` JSON string in the passing readiness
-check. The string must be ASCII RFC3339 and contain no NUL or LF.
-The control plane extracts this string directly from the stored JSONB check
-without parsing or reformatting it; the agent hashes the same string it sent.
+`media_probe_gpu<N>\0<accessible_device.id>\0<connection_incarnation>\0host_probe\0pass\n`,
+where the device ID is the lowercase digest above and the connection ID is
+the lowercase hyphenated UUID of the current authenticated socket. The
+passing readiness check still carries a nonempty ASCII RFC3339 `observed_at`
+from this agent process, but that timestamp is not in the fact ID; repeated
+passes on the same device during one connection do not invalidate a waiting
+approval. A later failed or indeterminate outcome makes the fact unavailable.
 Both fact objects are included in the sorted `prerequisites` and its digest.
 For a restart group, `seeded_group_digest.id` or
 `last_verified_group_digest.id` is exactly the current active snapshot

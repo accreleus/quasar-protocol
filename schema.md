@@ -2636,12 +2636,25 @@ cordon time cannot be reconstructed.
 
 ### 0089 — boot fence, approvals, attempts and journal inventory
 
-Automatic hardware review may read the existing `gpus.updated_at`,
-`hosts.readiness_reported_at` and `hosts.last_registered_at` receipt times
-to reject device/probe reports retained from a previous authenticated
-connection. It does not infer accessibility from sysfs and adds no evidence
-column. The agent independently recomputes the device and media-probe fact
-identities at durable acceptance as specified in `agent-api.md`.
+Migration 0089 creates internal
+`host_hardware_evidence(host_id UUID PRIMARY KEY REFERENCES hosts(id) ON DELETE
+CASCADE, connection_incarnation UUID NOT NULL, gpus JSONB NOT NULL CHECK
+(jsonb_typeof(gpus)='array'), readiness JSONB NOT NULL CHECK
+(jsonb_typeof(readiness)='array'), received_at TIMESTAMPTZ NOT NULL DEFAULT
+now())`. A write accepts one validated capacity report's GPU and readiness
+arrays in a host-locked transaction only if its authenticated socket's
+connection incarnation matches the journal gate. A report missing readiness
+or carrying invalid evidence clears this connection's projection; a stale
+socket cannot update or clear it. Every accepted report refreshes
+`received_at` on the database clock even when content is unchanged. Preview
+requires this row's connection to equal the complete gate's connection and
+`received_at >= hosts.last_registered_at`. Generic retained GPU/readiness
+columns may be overwritten by an old handler and never authorize Automatic
+review. A relevant projection fact or availability change supersedes a
+waiting approval and rotates all host restart review IDs in the same host
+transaction; an offered approval becomes `cancel_pending` and retains its
+restriction until authenticated nonacceptance. Agent-side final checks remain
+the authority for actual device accessibility and most recent probe outcome.
 
 `rh05_control_boot` is a singleton (`id BOOLEAN PRIMARY KEY CHECK (id)`,
 `incarnation UUID NOT NULL`, `started_at TIMESTAMPTZ NOT NULL`) in the **same
