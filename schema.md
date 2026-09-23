@@ -2435,13 +2435,21 @@ map never establishes RH05 applied proof.
 
 `host_admission_restrictions`: `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE
 CASCADE`, `owner_kind TEXT NOT NULL CHECK (owner_kind IN
-('manual','platform','idle_apply','recovery','legacy'))`, `owner_id UUID NOT NULL`,
-`reason TEXT NOT NULL`, `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`, primary
+('manual','platform','idle_apply','recovery','legacy','reconciliation'))`, `owner_id UUID NOT NULL`,
+`reason TEXT NOT NULL CHECK (reason IN ('manual_drain','legacy_drain',
+'platform_apply','idle_configuration','configuration_recovery',
+'journal_reconciliation','journal_quarantine'))`,
+`created_at TIMESTAMPTZ NOT NULL DEFAULT now()`, primary
 key `(host_id,owner_kind,owner_id)`. The fixed all-zero UUID is the sole manual
-owner ID; legacy uses a distinct fixed UUID; platform uses
+owner ID; legacy and reconciliation each use a distinct fixed UUID (the
+`host_id` key already scopes them per host); platform uses
 `platform_apply_runs.id`; idle/recovery use attempt IDs. An admin uncordon
 releases manual and legacy rows for that host, never platform or operation rows.
-Only an owner releases its row. Any row restricts admission. Backfill existing
+Only an owner releases its row. Any row restricts admission. Reason is a safe
+code derived from owner kind: manual/legacy/platform/idle_apply/recovery map
+respectively to manual_drain/legacy_drain/platform_apply/idle_configuration/
+configuration_recovery; reconciliation uses journal_reconciliation while
+pending or journal_quarantine if orphan inventory cannot be matched. Backfill existing
 manual/legacy cordons as manual or legacy owners. For each active platform run's
 `cordoned_hosts` entry, `was_cordoned = false` yields that run's platform row;
 `was_cordoned = true` preserves the preexisting manual/legacy owner and must
@@ -2453,6 +2461,9 @@ behavior is retired. `hosts.status` remains the compatibility/liveness projectio
 draining while restricted, otherwise online/offline per connection. The scheduler
 reads the restriction set under the selected host row lock in the reservation
 transaction; it cannot reserve after an idle restriction wins that lock.
+The reconciliation gate transition and its row reason update commit together.
+Backfilled manual/legacy rows use migration time as `created_at`; the original
+cordon time cannot be reconstructed.
 
 ### 0089 — boot fence, approvals, attempts and journal inventory
 
@@ -2461,7 +2472,10 @@ transaction; it cannot reserve after an idle restriction wins that lock.
 database** as approvals. Every control-plane process start, including a start
 after stopped-stack restore, atomically replaces this incarnation and expires
 all unstarted approvals **and reseeds every RH05 host's inventory gate to
-pending** in one transaction. Dispatch and RH05 scheduling stay disabled until
+pending with a reconciliation restriction row** in one transaction. A reconnect
+likewise acquires the reconciliation row while setting that host's gate pending;
+completion releases only that row, while quarantine retains it with reason
+`journal_quarantine`. Dispatch and RH05 scheduling stay disabled until
 it commits and the relevant host gate completes. An in-memory boot UUID cannot
 fence an approval resurrected by restore.
 Only one control-plane boot is active; live database rewind is outside the

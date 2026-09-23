@@ -3838,6 +3838,8 @@ bearer is `403`, before any host lookup, per §Authorization) and both return th
 > (§Platform releases). Canonical schema: `openapi.yaml` `Host`.
 
 ### `POST /v1/hosts/{id}/drain` — cordon a host
+RH05 owner-scoped semantics supersede the single-status rules below; see
+"Active admission reasons on the existing Host response".
 Marks an `online` host `draining`: the scheduler places **no new sessions** on it, while its
 existing sessions are allowed to finish (graceful) or are stopped now (force). The host stays
 `draining` (reachable, still heartbeating) until an admin uncordons it — it does **not**
@@ -3858,6 +3860,8 @@ auto-transition to `offline`.
 - **Errors:** `404 not_found` (no such host); `409 conflict` (host is `offline` — nothing to drain).
 
 ### `POST /v1/hosts/{id}/uncordon` — return a host to service
+RH05 owner-scoped semantics supersede the single-status rules below; see
+"Active admission reasons on the existing Host response".
 Returns a `draining` host to `online` so the scheduler may place on it again.
 ```json
 // 200 — host is back online
@@ -8276,6 +8280,46 @@ failure. Uncertain recovery keeps admission protected with a remedy. After a
 control-plane boot or supported stopped-stack restore, the full authenticated
 agent journal (including orphan attempts) is reconciled before an RH05 host can
 take assignments.
+
+### Active admission reasons on the existing Host response
+
+`Host.admission_restrictions` is an always-present array on existing Host
+reads, empty only when no owner-scoped admission hold exists. The journal
+inventory gate acquires a reconciliation hold in the same transaction that
+makes the gate pending, so no RH05 admission block exists outside this array.
+Each item has `owner_kind` (`manual|legacy|platform|idle_apply|recovery|
+reconciliation`), a stable safe `reason` (`manual_drain|legacy_drain|
+platform_apply|idle_configuration|configuration_recovery|
+journal_reconciliation|journal_quarantine`) and `created_at`. The server
+derives these codes from owner kind and reconciliation gate state; it never
+forwards free-form database reason text. No owner IDs, host addresses or user
+data appear. Manual, legacy, platform, idle and recovery owners map to their
+same-named reason; reconciliation uses `journal_reconciliation` while pending
+and `journal_quarantine` if inventory cannot be matched.
+
+The array sorts by owner kind alphabetically, then `created_at` ascending,
+then internal owner ID ascending as a stable tie-break; the ID is never served.
+Clients render unknown future codes as a generic admission hold; a new server
+code requires a contract amendment. Backfilled manual/legacy `created_at` is
+the migration time, not the original cordon time, and the console labels it
+accordingly. `status` retains its existing liveness/compatibility meaning:
+`draining` while restricted, otherwise online/offline according to connection
+state. An empty restriction array never makes an offline host schedulable.
+
+**Existing drain/uncordon endpoint semantic amendment:** A successful drain
+acquires the fixed manual owner even when the host is already `draining` for
+a platform, idle or recovery hold; repeated manual drain remains idempotent.
+`force:true` retains its existing session-stop behavior. An admin
+`POST /v1/hosts/{id}/uncordon` releases only manual/legacy owners. It returns
+HTTP 200 with `status:"draining"` if another owner remains, `status:"online"`
+if no hold remains and the agent is connected, or `status:"offline"` if no
+hold remains and the agent is absent. A host whose agent is disconnected and
+has no manual/legacy hold retains its existing `409` refusal. Neither a 200
+response nor an empty
+restriction array claims an offline host can accept sessions. The console
+refreshes the Host read after drain/uncordon and shows remaining reasons.
+The existing response envelope is unchanged; the older single-status prose
+above is superseded for RH05 owner-scoped admission.
 
 ### App placement, homes and explicit image cleanup
 
