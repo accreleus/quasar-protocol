@@ -8169,3 +8169,126 @@ host probe was inconclusive". They are separate vocabularies that agree on the o
 matters: neither blocks.) Cordon/drain
 stays a separate, operator-driven axis. Host readiness remains **host-local**: no readiness check
 claims that a browser can reach the host, and nothing here is evidence of it.
+
+## RH05 — desired host policy and selected apps (amendment 13)
+
+> Owner approval and explicit override of the Opus `CHANGES REQUIRED` verdict were
+> given 2026-09-23 for #334. Sol addressed the review findings in the matching
+> `quasar` proposal. This amendment adds typed admin resources. The RH05-agent
+> behavior of the existing settings PATCH changes **semantically** as stated
+> below; do not describe that part as additive.
+
+All new routes use `RequireAuth → RequireAdmin`; a non-admin bearer receives
+`403` before lookup. Configuration applied, app prepared and readiness are
+distinct observations. Save/receipt/legacy effective map does not prove applied.
+Browser reachability remains outside host readiness.
+
+### Typed host policy
+
+`GET /v1/admin/hosts/{id}/policy` returns `404 not_found` for an unknown host or
+`200` with decimal-string `revision`, `choices` keyed by catalog setting, and
+per-atomic-group `desired_revision`, `applied_revision`, `desired_digest`,
+`scope` (`next_session|restart`), `status` (`pending|applied|failed|upgrade_required|uncertain`),
+resolved value/source, evidence time/freshness and actionable reason/remedy.
+Preparation and readiness are separate fields. `source` is
+`automatic|deployment|explicit`; only explicit carries a typed `value`.
+Deployment preserves the agent's existing environment/device-detection baseline.
+Automatic is supported only for the encoder/render-node hardware group and needs
+accessible-device plus passing host-probe evidence. The current 39-key
+source/effect/evidence matrix is `quasar/docs/design/rh05-contract-proposal.md`;
+new catalog keys declare those properties before typed policy accepts them.
+
+`PATCH /v1/admin/hosts/{id}/policy` takes
+`{"expected_revision":"12","changes":{"gop":{"source":"explicit","value":90}}}`.
+Omission leaves a key unchanged. The whole request validates before persistence;
+invalid key/type/source/dependent combination returns `400 validation_failed` with
+no partial write. Stale revision returns `409 stale_revision` with the current
+view and changed keys. Success commits choices, monotone revision and durable
+reconcile obligation in one transaction, returns `200` with the new typed view,
+and reports offline work pending. Independent groups succeed/fail separately.
+Only an authenticated current connection observation matching group, revision
+**and** content digest can advance applied status. Older agents retain supported
+legacy settings but RH05-only choices show `upgrade_required`.
+
+`POST /v1/admin/hosts/{id}/policy/retry` takes `{"group":"<key>"}`. A
+transient exhausted group can retry with bounded backoff; invalid intent is not
+retryable. A disruptive retry needs fresh scoped approval. Typed errors include
+`unsupported_source`, `attempt_conflict`, `retry_exhausted` and
+`recovery_uncertain`.
+
+### Existing settings PATCH and restart: explicit behavior amendment
+
+The existing catalog and settings GET response shapes are unchanged. Legacy
+`resolved` remains a display projection. Legacy PATCH null removes a sparse
+override for **any** key and selects deployment, never Automatic;
+`abr_floor_kbps:null` is a clear, not a stored explicit JSON null. This corrects
+the conflicting nullable-null prose in the older PATCH section above.
+
+For an **RH05-capable agent**, a valid restart-class legacy PATCH serializes
+through the policy revision and returns the old `200` shape with
+`restart_triggered:false`, regardless of live sessions. `restart_confirm` is
+accepted for compatibility but grants no idle-apply approval and sends no
+restart. The old `409 restart_required` guard does not apply to this PATCH in
+RH05 mode. The typed group is pending, and `pending_restart` remains false until
+an approved restart starts. For an **older agent**, the old
+`409 restart_required`/`restart_confirm`/immediate-restart behavior remains; it
+provides no RH05 applied proof. This is a frozen-endpoint semantic amendment.
+
+Standalone `POST /v1/admin/hosts/{id}/restart` retains its existing response,
+offline `409 conflict` and live-session `409 restart_required`/`confirm` guard.
+On an RH05 agent it restarts only the last verified active configuration, never
+activates an unapproved candidate. Pending desired policy remains pending.
+`pending_restart` reflects an actual restart in flight and clears on verified
+reconnect; it is not configuration-applied status.
+
+### Idle apply, cancellation and recovery
+
+`POST /v1/admin/hosts/{id}/idle-apply` takes a group key, reviewed decimal-string
+revision, content digest and prerequisite digest. Success is `202` with stable
+`attempt_id` and `waiting`; mismatched review or another open disruptive
+attempt is `409 approval_superseded|attempt_conflict`. Approval binds only the
+reviewed disruptive group, its resolved values and relevant facts. An unrelated
+safe edit preserves it; a relevant edit supersedes it before durable acceptance.
+Every control-plane boot expires unstarted approval. A grant from an old boot
+or agent connection is rejected.
+
+Requesting idle apply acquires only its own admission restriction. It waits for
+assigned, starting, running and stopping sessions (including local sessions),
+plus conflicting preparation and confirmed cleanup. Unknown inventory is never
+idle. No waiting deadline kills sessions. The agent's fsynced `accepted` journal
+record is the exact execution start; delivery and ack are not. A post-start
+edit is subsequent work.
+
+`POST /v1/admin/hosts/{id}/idle-apply/{attempt_id}/cancel` returns `200
+cancelled` only after confirmed agent nonacceptance. A lost revocation response
+returns `202 cancelling` and retains protection. After acceptance it returns
+`409 cancel_too_late` with the current phase, then waits for safe completion or
+recovery. Completion releases only this attempt's restriction. Failure permits
+one authorized recovery to the last verified group, retaining the original
+failure. Uncertain recovery keeps admission protected with a remedy. After a
+control-plane boot or supported stopped-stack restore, the full authenticated
+agent journal (including orphan attempts) is reconciled before an RH05 host can
+take assignments.
+
+### App placement, homes and explicit image cleanup
+
+`GET /v1/admin/apps/{id}/placement` returns decimal-string `revision`, `mode`
+(`all_eligible|fixed`), `host_ids`, inherited parent if derived, and distinct
+selected/prepared/readiness states. `PATCH` takes
+`{"expected_revision":"3","mode":"fixed","host_ids":["<host-uuid>"]}`;
+invalid selection is `400 validation_failed`, stale edit `409 stale_revision`
+with current view, and a derived tile is `409 inherited_placement` naming its
+parent. Dynamic all-eligible includes newly eligible hosts. Removal immediately
+excludes new reservations while existing sessions finish and homes/images stay.
+Session launch, swap and local launch enforce canonical placement/home locality;
+an existing home is a hard host constraint, and conflicting/unknown locations
+return repair-required `home_conflict` without exposing another user's data.
+
+`GET /v1/admin/hosts/{id}/images/cleanup` previews each managed image/version
+with its protected reason and fence generation. `POST` takes exact image/version
+and preview generation. Required apps, any container, pending launch/image/
+template work, and the previous successfully prepared version block removal
+with `409` and a current reason. Stale preview and unknown/offline inventory
+never authorize removal. Runtime inventory confirms success; duplicate requests
+are idempotent. A newly required image during removal stays pending and must be
+re-ensured before launch reports it ready. Cleanup never deletes a user home.

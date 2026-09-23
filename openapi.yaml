@@ -839,6 +839,39 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /v1/admin/apps/{id}/placement:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin, apps]
+      summary: Read a canonical parent app's host placement policy (RH05).
+      x-required-role: admin
+      responses:
+        "200": { description: Placement view., content: { application/json: { schema: { $ref: "#/components/schemas/AppPlacement" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin, apps]
+      summary: Replace a canonical parent app's placement selection with revision compare-and-swap (RH05).
+      description: >-
+        Derived tiles inherit their canonical parent's placement. all_eligible selects every
+        currently eligible host dynamically; fixed selects exactly host_ids, which may be empty.
+        A stale revision returns the current placement and changed host selection. Placement
+        changes serialize with launch reservations and image requirement fences. Editing a
+        derived tile returns 409 inherited_placement naming its canonical parent. Removing a
+        host immediately excludes new reservations while existing sessions and homes remain.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AppPlacementPatch" } } }
+      responses:
+        "200": { description: Updated placement., content: { application/json: { schema: { $ref: "#/components/schemas/AppPlacement" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: stale_revision with current placement and changed hosts, or inherited_placement naming the parent app., content: { application/json: { schema: { $ref: "#/components/schemas/PlacementConflict" } } } }
+
   # ─── entitlements (Steam library discovery Phase 2) ──────────────────────
   # An entitlement is one fact: "this subject may see and launch this app".
   # These four admin routes are the ONLY way to widen visibility, which is what
@@ -1959,6 +1992,42 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
 
+  /v1/admin/hosts/{id}/images/cleanup:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin, images]
+      summary: Preview host image cleanup eligibility from current requirements (RH05).
+      description: >-
+        Advisory preview only. Required images include selected app placement, all container
+        references, pending ensure/template operations and the retained prior successfully
+        prepared version. Unknown or stale inventory fails closed. A preview cannot authorize
+        a later physical removal; POST rechecks under the per-host-image operation fence.
+      x-required-role: admin
+      responses:
+        "200": { description: Current cleanup preview., content: { application/json: { schema: { $ref: "#/components/schemas/HostImageCleanupView" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [admin, images]
+      summary: Start a fenced cleanup attempt for one host image and version (RH05).
+      description: >-
+        Rechecks current requirements under the image operation fence and returns a stable
+        attempt ID and generation token. The agent rechecks its local container/template
+        references and fence token under its per-image operation lock before removal. A new
+        requirement during removal stays pending and requires re-ensure before launch.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/HostImageCleanupRequest" } } }
+      responses:
+        "200": { description: Removal attempt started or identical attempt returned., content: { application/json: { schema: { $ref: "#/components/schemas/HostImageCleanupAttempt" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Image still required, inventory uncertain or fence changed., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+
   # ─── admin: settings / invites ───────────────────────────────────────────
   /v1/admin/settings:
     get:
@@ -2747,6 +2816,16 @@ paths:
     patch:
       tags: [admin]
       summary: Update per-host overrides (body is {overrides, restart_confirm} — 'settings' is ignored).
+      description: >-
+        RH05 legacy compatibility exception: this revisionless write serializes under the host
+        settings row and increments the same policy revision. A non-null value chooses explicit;
+        null chooses deployment, even if the prior source was automatic. Relevant unstarted
+        approval is superseded. For an RH05-capable agent a valid disruptive edit returns 200
+        with restart_triggered:false regardless of live sessions; restart_confirm is accepted
+        but does not approve or start an RH05 restart. The typed group remains pending and
+        pending_restart remains false until an approved restart actually begins. For an older
+        agent the previous restart_required guard and restart_confirm immediate-restart behavior
+        remain; its effective-settings map is not RH05 application proof.
       x-required-role: admin
       requestBody:
         required: true
@@ -2759,7 +2838,99 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: "restart_required — a restart-class knob changed with live sessions and restart_confirm != true (body carries live_sessions)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "409": { description: "Old agents only: restart_required when a restart-class knob changed with live sessions and restart_confirm != true (body carries live_sessions). RH05-capable agents save the edit with 200 instead." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /v1/admin/hosts/{id}/policy:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin]
+      summary: Read typed host configuration policy and independent evidence views (RH05).
+      x-required-role: admin
+      responses:
+        "200": { description: Policy view., content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicy" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: Atomically edit typed policy choices by expected revision (RH05).
+      description: >-
+        Validates the whole edit before persistence. A successful edit commits choices, a
+        monotone revision and reconciliation obligation in one transaction; offline intent is
+        saved as pending. A stale edit does not write and returns the current view and changed
+        keys. A relevant edit supersedes an unstarted idle approval.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicyPatch" } } }
+      responses:
+        "200": { description: Saved policy view., content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicy" } } } }
+        "400": { description: validation_failed or unsupported_source., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: stale_revision with current view and changed keys., content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicyConflict" } } } }
+  /v1/admin/hosts/{id}/policy/retry:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [admin]
+      summary: Explicitly retry a failed or exhausted host policy group (RH05).
+      description: A disruptive group requires a fresh scoped idle-apply approval; retry alone cannot authorize restart.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicyRetryRequest" } } }
+      responses:
+        "200": { description: Retry obligation recorded., content: { application/json: { schema: { $ref: "#/components/schemas/HostPolicy" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/admin/hosts/{id}/idle-apply:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [admin]
+      summary: Approve one reviewed restart-scope policy group for idle application (RH05).
+      description: >-
+        Approval binds group revision, resolved digest, prerequisite identities and current
+        control-plane boot. A stable attempt ID is returned. An owner-scoped admission hold
+        waits for authoritative zero active and local sessions and conflicting preparation;
+        waiting never stops sessions. Missing inventory remains pending. Agent acceptance,
+        rather than command delivery, starts execution.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/IdleApplyRequest" } } }
+      responses:
+        "202": { description: Approval and stable waiting attempt recorded, or identical pending attempt returned., content: { application/json: { schema: { $ref: "#/components/schemas/IdleApplyAttempt" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: approval_superseded, approval_expired or attempt_conflict., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /v1/admin/hosts/{id}/idle-apply/{attempt_id}/cancel:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - name: attempt_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [admin]
+      summary: Fence and cancel an idle-apply attempt if it has not durably started (RH05).
+      description: >-
+        Cancellation first fences further grants. A lost revocation response leaves admission
+        restricted until authenticated journal inventory proves nonacceptance. After durable
+        acceptance, cancellation waits for a safe terminal or recovery point and cannot
+        claim that execution never started. Other owners' admission holds remain intact.
+      x-required-role: admin
+      responses:
+        "200": { description: Confirmed cancelled before durable acceptance., content: { application/json: { schema: { $ref: "#/components/schemas/IdleApplyAttempt" } } } }
+        "202": { description: Cancelling; revocation or journal confirmation remains pending and admission stays restricted., content: { application/json: { schema: { $ref: "#/components/schemas/IdleApplyAttempt" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: cancel_too_late with current attempt., content: { application/json: { schema: { $ref: "#/components/schemas/IdleApplyConflict" } } } }
   /v1/admin/hosts/{id}/readiness-overrides/{check_id}:
     parameters:
       - { $ref: "#/components/parameters/PathId" }
@@ -2794,6 +2965,11 @@ paths:
     post:
       tags: [admin]
       summary: Restart the host's agent without changing overrides (host-observability-2).
+      description: >-
+        Retains its 200/409 live-session confirm guard on old and RH05-capable agents. An
+        RH05-capable agent restarts only the last verified active configuration; it never
+        activates an unapproved pending candidate. A pending policy group remains pending.
+        pending_restart reflects an actual restart in flight and clears on verified reconnect.
       x-required-role: admin
       requestBody:
         required: false
@@ -3796,7 +3972,7 @@ components:
       type: object
       required: [code, message]
       properties:
-        code: { type: string, description: "e.g. validation_failed, unauthorized, forbidden, not_found, conflict, session_quota_exceeded, home_in_use, home_not_provisioned, parent_app_disabled, profile_ineligible, profile_not_launchable_for_app, no_host_available, capacity_exhausted, host_not_ready, restart_required, rate_limited, internal. Open string, not an enum: new codes are additive and an unknown one falls through to a client's generic per-status branch." }
+        code: { type: string, description: "e.g. validation_failed, unauthorized, forbidden, not_found, conflict, session_quota_exceeded, home_in_use, home_not_provisioned, parent_app_disabled, profile_ineligible, profile_not_launchable_for_app, no_host_available, capacity_exhausted, host_not_ready, restart_required, stale_revision, unsupported_source, approval_superseded, approval_expired, attempt_conflict, cancel_too_late, retry_exhausted, home_conflict, placement_ineligible, inherited_placement, recovery_uncertain, rate_limited, internal. Open string, not an enum: new codes are additive and an unknown one falls through to a client's generic per-status branch." }
         message: { type: string }
         live_sessions: { type: integer, description: "Present on restart_required." }
         session_id:
@@ -4980,7 +5156,11 @@ components:
         next_cursor: { type: [string, "null"] }
     HostSettings:
       type: object
-      description: "GET returns pending_restart; PATCH returns restart_triggered — otherwise same shape."
+      description: >-
+        GET returns pending_restart; PATCH returns restart_triggered — otherwise same shape.
+        On RH05 agents pending_restart indicates an actual approved or standalone restart in
+        flight, not unapplied intent; PATCH returns restart_triggered:false for disruptive
+        changes and its effective map is informational rather than application proof.
       properties:
         resolved: { type: object, additionalProperties: true }
         overrides: { type: object, additionalProperties: true }
@@ -5021,7 +5201,218 @@ components:
           additionalProperties: true
         restart_confirm:
           type: boolean
-          description: "Required true to apply a restart-class knob while the host has live sessions."
+          description: "Old agents: required to apply a restart-class knob while live sessions exist. RH05 agents accept this field for compatibility but it grants no idle-apply approval and triggers no restart."
+
+    RH05Revision:
+      type: string
+      pattern: "^(0|[1-9][0-9]*)$"
+      description: Canonical nonnegative decimal string; no sign, whitespace or leading zeros.
+    RH05Digest:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+      description: Lowercase SHA-256 hex digest of canonical content.
+    HostPolicyChoice:
+      type: object
+      additionalProperties: false
+      required: [source]
+      properties:
+        source: { type: string, enum: [automatic, deployment, explicit] }
+        value:
+          description: Required for explicit; forbidden for automatic or deployment. Validated against the frozen hostcfg catalog, including cross-key groups.
+    HostPolicyResolvedValue:
+      type: object
+      required: [value, source, observed_at]
+      properties:
+        value: { description: Resolved JSON value for this setting. }
+        source: { type: string, enum: [automatic, deployment, explicit] }
+        observed_at: { type: [string, "null"], format: date-time, description: Null when no reliable resolution evidence exists. }
+        evidence_id: { type: [string, "null"] }
+    HostPolicyGroup:
+      type: object
+      required: [desired_revision, applied_revision, desired_digest, scope, status, fresh, remedy]
+      properties:
+        desired_revision: { $ref: "#/components/schemas/RH05Revision" }
+        applied_revision:
+          oneOf: [ { $ref: "#/components/schemas/RH05Revision" }, { type: "null" } ]
+        desired_digest: { $ref: "#/components/schemas/RH05Digest" }
+        applied_digest:
+          oneOf: [ { $ref: "#/components/schemas/RH05Digest" }, { type: "null" } ]
+        scope: { type: string, enum: [next_session, restart] }
+        status: { type: string, enum: [pending, applied, failed, upgrade_required, uncertain] }
+        fresh: { type: boolean, description: Whether the evidence still matches the current agent and prerequisites. }
+        observed_at: { type: [string, "null"], format: date-time }
+        remedy: { type: [string, "null"], description: Actionable reason when pending, failed, upgrade required or uncertain. }
+        next_retry_at: { type: [string, "null"], format: date-time }
+        attempt_id: { type: [string, "null"], format: uuid }
+    HostPolicyEvidenceView:
+      type: object
+      description: Independent evidence status. Preparation, configuration application and readiness do not imply one another.
+      required: [status, observed_at, remedy]
+      properties:
+        status: { type: string, description: Open evidence state; consumers retain unknown values. }
+        observed_at: { type: [string, "null"], format: date-time }
+        remedy: { type: [string, "null"] }
+        detail: { type: object, additionalProperties: true }
+    HostPolicy:
+      type: object
+      required: [revision, choices, resolved, groups, image_preparation, readiness]
+      properties:
+        revision: { $ref: "#/components/schemas/RH05Revision" }
+        choices:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/HostPolicyChoice" }
+        resolved:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/HostPolicyResolvedValue" }
+        groups:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/HostPolicyGroup" }
+        image_preparation: { $ref: "#/components/schemas/HostPolicyEvidenceView" }
+        readiness: { $ref: "#/components/schemas/HostPolicyEvidenceView" }
+    HostPolicyPatch:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, changes]
+      properties:
+        expected_revision: { $ref: "#/components/schemas/RH05Revision" }
+        changes:
+          type: object
+          minProperties: 1
+          additionalProperties: { $ref: "#/components/schemas/HostPolicyChoice" }
+    HostPolicyConflict:
+      type: object
+      required: [error, current, changed_keys]
+      properties:
+        error: { $ref: "#/components/schemas/Error" }
+        current: { $ref: "#/components/schemas/HostPolicy" }
+        changed_keys: { type: array, items: { type: string }, description: Keys changed since expected_revision. }
+    HostPolicyRetryRequest:
+      type: object
+      additionalProperties: false
+      required: [group]
+      properties:
+        group: { type: string, minLength: 1 }
+    RH05Prerequisite:
+      type: object
+      additionalProperties: false
+      required: [kind, id]
+      properties:
+        kind: { type: string, pattern: "^[^\\x00\\n]+$" }
+        id: { type: string, pattern: "^[^\\x00\\n]+$" }
+    IdleApplyRequest:
+      type: object
+      additionalProperties: false
+      required: [group, expected_revision, content_sha256, prerequisites_sha256, prerequisites, expires_at]
+      properties:
+        group: { type: string, minLength: 1 }
+        expected_revision: { $ref: "#/components/schemas/RH05Revision" }
+        content_sha256: { $ref: "#/components/schemas/RH05Digest" }
+        prerequisites_sha256: { $ref: "#/components/schemas/RH05Digest" }
+        prerequisites:
+          type: array
+          items: { $ref: "#/components/schemas/RH05Prerequisite" }
+          description: >-
+            Exact group-specific facts sorted bytewise by (kind,id): agent image digest,
+            driver, accessible device, passing probe IDs and last verified group digest as
+            relevant. Digest input is each UTF-8 kind, NUL, id, LF. NUL and LF are forbidden
+            within either field. Agent rechecks these facts before durable acceptance.
+        expires_at: { type: string, format: date-time }
+    IdleApplyAttempt:
+      type: object
+      required: [attempt_id, group, revision, content_sha256, prerequisites_sha256, phase, started, admission_restricted]
+      properties:
+        attempt_id: { type: string, format: uuid }
+        group: { type: string }
+        revision: { $ref: "#/components/schemas/RH05Revision" }
+        content_sha256: { $ref: "#/components/schemas/RH05Digest" }
+        prerequisites_sha256: { $ref: "#/components/schemas/RH05Digest" }
+        phase: { type: string, enum: [waiting, offered, accepted, activating, awaiting_startup, verifying, applied, failed, recovery_verifying, recovery_awaiting_startup, recovered, uncertain, cancel_pending, revoked_unstarted] }
+        started: { type: boolean, description: True only after durable agent acceptance is proven; unknown acceptance retains the admission hold. }
+        admission_restricted: { type: boolean }
+        remedy: { type: [string, "null"] }
+        next_retry_at: { type: [string, "null"], format: date-time }
+    IdleApplyConflict:
+      type: object
+      required: [error, current]
+      properties:
+        error: { $ref: "#/components/schemas/Error" }
+        current: { $ref: "#/components/schemas/IdleApplyAttempt" }
+
+    AppPlacement:
+      type: object
+      required: [app_id, inherited_from, mode, host_ids, revision, hosts]
+      properties:
+        app_id: { type: string, format: uuid, description: Canonical parent app ID. }
+        inherited_from: { type: [string, "null"], format: uuid, description: Canonical parent ID for a derived tile; null on the parent itself. }
+        mode: { type: string, enum: [all_eligible, fixed] }
+        host_ids: { type: array, uniqueItems: true, items: { type: string, format: uuid }, description: Fixed selection; empty is valid and allows no host. }
+        revision: { $ref: "#/components/schemas/RH05Revision" }
+        hosts:
+          type: array
+          description: Selection, preparation and readiness are distinct per-host observations.
+          items: { $ref: "#/components/schemas/AppPlacementHost" }
+    AppPlacementHost:
+      type: object
+      required: [host_id, selected, prepared, ready]
+      properties:
+        host_id: { type: string, format: uuid }
+        selected: { type: boolean }
+        prepared: { type: [boolean, "null"], description: Null when preparation evidence is unknown. }
+        ready: { type: [boolean, "null"], description: Null when readiness evidence is unknown. }
+        reason: { type: [string, "null"] }
+    AppPlacementPatch:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, mode, host_ids]
+      properties:
+        expected_revision: { $ref: "#/components/schemas/RH05Revision" }
+        mode: { type: string, enum: [all_eligible, fixed] }
+        host_ids: { type: array, uniqueItems: true, items: { type: string, format: uuid }, description: Must be empty for all_eligible. }
+    PlacementConflict:
+      type: object
+      required: [error]
+      properties:
+        error: { $ref: "#/components/schemas/Error" }
+        current: { $ref: "#/components/schemas/AppPlacement" }
+        changed_host_ids: { type: array, items: { type: string, format: uuid } }
+        parent_app_id: { type: string, format: uuid, description: Present on inherited_placement. }
+
+    HostImageCleanupView:
+      type: object
+      required: [host_id, observed_at, images]
+      properties:
+        host_id: { type: string, format: uuid }
+        observed_at: { type: string, format: date-time }
+        images:
+          type: array
+          items: { $ref: "#/components/schemas/HostImageCleanupCandidate" }
+    HostImageCleanupCandidate:
+      type: object
+      required: [image_id, version, eligible, reasons, generation]
+      properties:
+        image_id: { type: string }
+        version: { type: string }
+        eligible: { type: boolean }
+        reasons: { type: array, items: { type: string }, description: Current blockers, including uncertain inventory and retained prior success. }
+        generation: { $ref: "#/components/schemas/RH05Revision" }
+    HostImageCleanupRequest:
+      type: object
+      additionalProperties: false
+      required: [image_id, version, expected_generation]
+      properties:
+        image_id: { type: string, minLength: 1 }
+        version: { type: string, minLength: 1 }
+        expected_generation: { $ref: "#/components/schemas/RH05Revision" }
+    HostImageCleanupAttempt:
+      type: object
+      required: [attempt_id, image_id, version, generation, state]
+      properties:
+        attempt_id: { type: string, format: uuid }
+        image_id: { type: string }
+        version: { type: string }
+        generation: { $ref: "#/components/schemas/RH05Revision" }
+        state: { type: string, enum: [pending, removing, removed, failed, cancelled] }
+        reason: { type: [string, "null"] }
 
     StorageProvider:
       type: string

@@ -2021,3 +2021,306 @@ upgrade-required guidance. Its existing environment may still allow consumption.
 A new agent connected to an old control plane receives no policy and uses cold
 homes. Upgrade control plane first, then agents; never claim a saved desired switch
 was applied to unsupported or disconnected hosts.
+
+## RH05 host configuration execution journal (Quasar #334)
+
+This additive amendment governs typed host settings and reviewed idle apply. Existing
+`register`, `registered`, `config_update`, `capacity`, `restart`, and session messages
+retain their shapes unless an optional field is specified below. In particular,
+`config_update` remains the carrier for `console_config` and `source_policies` on
+RH05-capable connections. For those messages `settings:null` means **preserve** the
+current settings snapshot; `settings:{}` clears the legacy sparse overrides.
+Omission of `settings` also preserves the snapshot. The Steam source-policy
+revision and acknowledgement rules above remain independent of RH05.
+
+### Capability and connection identity
+
+An agent advertises `"config_policy_versions":{"typed_settings":1,
+"execution_journal":1,"idle_apply":1,"preparation_observation":1}` on
+`register`, alongside the existing `source_policy_versions` object. Each member
+is an independently versioned positive integer; omission means unsupported.
+The control plane replaces the advertisement on every registration. RH05 settings
+execution requires `typed_settings:1` and `execution_journal:1`; a restart-scope
+offer additionally requires `idle_apply:1`. Preparation observation is separate
+and cannot be inferred from a settings capability. Unknown versions do not imply
+support for version 1.
+
+For an authenticated registration the control plane adds two required UUID strings
+to `registered` when it supports RH05:
+
+```json
+{
+  "type": "registered", "host_id": "<uuid>", "heartbeat_interval_ms": 5000,
+  "boot_incarnation": "<uuid>", "connection_incarnation": "<uuid>"
+}
+```
+
+`boot_incarnation` is newly minted on **every control-plane process start**;
+`connection_incarnation` is newly minted for each authenticated agent WebSocket.
+The existing enrollment-only `node_secret` rule is unchanged. An old control plane
+omits these fields, in which case the agent accepts no RH05 grant. A new control
+plane sends no RH05 offer unless the advertised versions and these identities
+were established on the current connection. The authenticated socket, not a JSON
+host ID, determines the reporting host.
+
+The control plane selects **one settings writer per connection**. A legacy agent
+receives sparse `config_update.settings` as before. On an RH05 settings connection,
+only the RH05 offer below changes host settings; `config_update` may still deliver
+`console_config` or `source_policies` with `settings:null` (or omitted). The
+agent ignores any non-null legacy `config_update.settings` on that connection,
+including `{}`, and reports a feature error. The control plane does not send the
+legacy `restart` command for an RH05 settings operation. Legacy
+`capacity.effective_settings` remains an informational effective map and is
+never RH05 application evidence.
+
+### Offer, result, revocation, and inventory wire
+
+All RH05 revisions and journal sequences are **canonical nonnegative decimal
+strings** (zero only where a revision or sequence may begin at zero): no sign,
+leading zero except `"0"`, fraction, exponent, or JSON number. IDs below are
+UUID strings; digests are 64 lowercase hexadecimal SHA-256 characters.
+`content_sha256` is the SHA-256 digest of the UTF-8 RFC 8785 canonical JSON
+serialization of `{group,scope,revision,settings,resolved_settings}`. The
+`settings` object records each choice as
+`{"source":"automatic"}`, `{"source":"deployment"}`, or
+`{"source":"explicit","value":<catalog-typed JSON value>}`;
+`resolved_settings` contains the exact effective value proposed for every key
+in that group, including deployment and automatic resolutions. The agent
+independently resolves and validates the candidate; a content or resolution
+mismatch rejects the offer before acceptance. `prerequisites_sha256` binds the
+reviewed evidence and prerequisite identities in the offer's `prerequisites`
+array. Each fact is `{"kind":"<kind>","id":"<id>"}` with nonempty UTF-8
+strings containing neither NUL nor LF. Include only facts required by the
+group: relevant agent image digest, driver identity, accessible device
+identities, required passing host-probe result IDs, and last verified group
+digest. Sort facts bytewise by `(kind,id)`; encode each as UTF-8 `kind`, one
+NUL byte, UTF-8 `id`, one LF byte; concatenate and SHA-256 that byte stream.
+The agent recomputes the digest and independently checks each exact fact
+against current accessible-device inventory and probe evidence immediately
+before durable acceptance. Any changed, missing, or indeterminate fact rejects
+the grant without activation; sysfs presence alone cannot satisfy device
+accessibility. Scope is `next_session` or `restart`. Expiry is an RFC3339 UTC
+instant.
+
+```json
+{
+  "type": "config_policy_offer", "attempt_id": "<uuid>", "host_id": "<uuid>",
+  "boot_incarnation": "<uuid>", "connection_incarnation": "<uuid>",
+  "group": "hardware", "revision": "12", "content_sha256": "<sha256>",
+  "scope": "restart", "expires_at": "2026-09-23T09:00:00Z",
+  "prerequisites_sha256": "<sha256>",
+  "prerequisites": [
+    {"kind": "accessible_device", "id": "<device-identity>"},
+    {"kind": "agent_image_digest", "id": "<sha256>"},
+    {"kind": "driver_identity", "id": "<driver-identity>"},
+    {"kind": "host_probe_result", "id": "<passing-result-id>"},
+    {"kind": "last_verified_group_digest", "id": "<sha256>"}
+  ],
+  "settings": {
+    "encoder": {"source": "automatic"},
+    "render_node": {"source": "automatic"}
+  },
+  "resolved_settings": {
+    "encoder": "va", "render_node": "/dev/dri/renderD128"
+  }
+}
+```
+
+An offer is a **grant**, not an execution record. The agent checks its authenticated
+current connection, boot and connection incarnations, host ID, capability, expiry,
+revision, digest and current prerequisites. A stale grant from an earlier boot or
+connection, changed prerequisite, wrong host, unsupported capability, or changed
+content is rejected without activation. A duplicate `attempt_id` with identical
+content returns the journaled phase/result; a different digest or identity for
+that ID is `attempt_conflict`. A restart-scope offer also requires zero assigned,
+starting, running and stopping sessions (including local sessions), no conflicting
+preparation, and a final agent-side check under the same launch exclusion used
+for acceptance. Missing inventory is uncertainty, not zero.
+
+```json
+{
+  "type": "config_policy_state", "attempt_id": "<uuid>",
+  "host_id": "<uuid>", "group": "hardware", "revision": "12",
+  "content_sha256": "<sha256>", "scope": "restart",
+  "grant_boot_incarnation": "<uuid>",
+  "grant_connection_incarnation": "<uuid>",
+  "journal_sequence": "4", "phase": "accepted",
+  "active_scope": null, "evidence": null, "error": null
+}
+```
+
+`awaiting_startup` and `recovery_awaiting_startup` use this same
+`config_policy_state` shape with a new `journal_sequence`, null
+`active_scope` and null `evidence`. For example:
+
+```json
+{
+  "type": "config_policy_state", "attempt_id": "<uuid>",
+  "host_id": "<uuid>", "group": "hardware", "revision": "12",
+  "content_sha256": "<sha256>", "scope": "restart",
+  "grant_boot_incarnation": "<uuid>",
+  "grant_connection_incarnation": "<uuid>",
+  "journal_sequence": "6", "phase": "awaiting_startup",
+  "active_scope": null, "evidence": null, "error": null
+}
+```
+
+For the recovery restart, the same message has
+`"phase":"recovery_awaiting_startup"` and the next journal sequence. Its
+historical grant identity and requested revision/digest remain unchanged.
+
+`config_policy_state` is sent on the **current authenticated connection**; the
+`grant_*` fields identify the historical grant and are retained across reconnect
+or process restart. Phases are `accepted`, `activating`, `awaiting_startup`,
+`verifying`, `applied`, `failed`, `recovery_verifying`,
+`recovery_awaiting_startup`, `recovered`, `uncertain`, and
+`revoked_unstarted`. The control plane's `offered` phase means a grant was
+sent, not accepted. Each state carries the same attempt identity and an increasing
+`journal_sequence` per attempt. A repeated sequence with byte-identical content
+is idempotent; conflicting content at one sequence is rejected. The control plane
+accepts state only from the host's current authenticated connection for a matching
+durable attempt or during the full inventory reconciliation below. An older group
+revision cannot advance a newer desired group; a result for one group cannot
+advance another. `error` is null or a typed reason and bounded detail.
+
+`accepted` means execution started durably, **not** that the choice applied.
+`applied` requires `active_scope` equal to the requested scope and `evidence`
+containing the verified resolved values, revision and content digest readback,
+agent process identity, observation time, and evidence IDs. For `next_session`,
+the readback is the active next-session snapshot; existing sessions are unchanged.
+For `restart`, it is post-restart startup proof for the requested group. A socket
+send, generic `ack`, validation, pre-startup effective map, or disconnected
+historical report is not applied proof.
+
+To cancel an unstarted grant, the control plane first fences further dispatch in
+its durable ledger, then sends:
+
+```json
+{
+  "type": "config_policy_revoke", "attempt_id": "<uuid>",
+  "host_id": "<uuid>", "boot_incarnation": "<uuid>",
+  "connection_incarnation": "<uuid>", "content_sha256": "<sha256>"
+}
+```
+
+The agent serializes revocation and durable acceptance under one journal lock.
+It replies with `config_policy_state` at `revoked_unstarted` or at its recorded
+`accepted` or later phase. A revoked ID cannot later accept a delayed offer.
+If the response is lost, cancellation stays pending and admission restricted
+until inventory proves which side won. After acceptance, revocation cannot undo
+execution; cancellation waits for a safe terminal or recovery outcome.
+
+On every reconnect, boot, and restore reconciliation, the control plane requests
+the **complete** authenticated journal, including entries absent from its database:
+
+```json
+{
+  "type": "config_policy_journal_inventory_request", "inventory_id": "<uuid>",
+  "boot_incarnation": "<uuid>", "connection_incarnation": "<uuid>",
+  "cursor": null
+}
+```
+
+```json
+{
+  "type": "config_policy_journal_inventory_page", "inventory_id": "<uuid>",
+  "snapshot_id": "<uuid>", "cursor": null, "next_cursor": null,
+  "revision_high_water": {"hardware": "12"},
+  "entries": [
+    {
+      "attempt_id": "<uuid>", "host_id": "<uuid>", "group": "hardware",
+      "revision": "12", "content_sha256": "<sha256>", "scope": "restart",
+      "grant_boot_incarnation": "<uuid>",
+      "grant_connection_incarnation": "<uuid>",
+      "journal_sequence": "4", "phase": "accepted",
+      "active_scope": null, "evidence": null, "error": null
+    }
+  ]
+}
+```
+
+The first request has `cursor:null`; each later request repeats the returned
+`next_cursor`. All pages use one stable `snapshot_id` and include **every**
+durable attempt, including terminal and revoked entries; `next_cursor:null`
+marks completion. A page is bounded to at most 256 entries. The agent must keep
+the snapshot stable until completion or return an error that restarts inventory
+from the beginning. `revision_high_water` is the durable per-group maximum
+revision of every offer the agent has recorded, including terminal or revoked
+attempts; each value uses the decimal-string rule above. It is present and
+identical on every page, even when `entries` is empty. The control plane rejects
+changed snapshots, high-water maps, skipped cursors,
+duplicate entries with conflicting content, or a page from any connection other
+than the current authenticated one. It does not treat a partial inventory as
+empty or complete. Live states received during inventory are reconciled by
+attempt ID and sequence after the complete snapshot; they never excuse a missing
+page. Only a completed inventory permits scheduling and restriction reconciliation.
+Historical grant IDs identify origin; current socket authentication authorizes
+the inventory and cannot be replaced by the historical IDs in JSON.
+
+### Durable start, restart recovery, and database restore
+
+Execution starts **only** after the agent has atomically published and fsynced an
+`accepted` journal record containing attempt ID, approved digest, validated
+candidate and the last verified snapshot, before activation or restart. The
+control plane records `started` only on that durable state or complete inventory.
+Loss of its report never authorizes another grant for the same operation.
+An accepted attempt is completed at most once; re-delivery reports its recorded
+state instead of activating again.
+
+For an intentional candidate restart, the agent fsyncs `awaiting_startup`
+**before** requesting process exit. On the first boot finding that marker,
+the agent **first fsyncs `verifying`**, consuming the marker, and only then
+reads back startup state. It reports `applied` only if that readback shows the
+candidate active and verification succeeds. A failed readback or verification
+marks the original attempt `failed` before recovery. A boot finding bare
+`activating` or `verifying` also marks it `failed`: a crash during readback
+or verification cannot consume `awaiting_startup` again or activate the
+candidate a second time. The marker alone is never application proof.
+
+After original failure, the agent may make **one** recovery activation of the
+exact last verified group, only when safe. It fsyncs `recovery_verifying`
+**before** activation. If recovery requires an intentional process restart,
+it fsyncs `recovery_awaiting_startup` before requesting exit. On the first
+boot finding that marker, the agent **first fsyncs `recovery_verifying`**,
+consuming the marker, and only then reads back startup state. It verifies the
+last verified group only if that readback shows the group active, without
+another activation. A failed readback or verification marks the attempt
+`uncertain`. A boot finding bare `recovery_verifying` also marks it
+`uncertain` and performs no second recovery activation: a crash during
+readback or verification cannot consume `recovery_awaiting_startup` again.
+Fresh verification reports `recovered` alongside the
+original failure; it never marks the requested choice applied. Failed
+recovery or missing proof becomes `uncertain` and retains protective
+admission. Recovery cannot replace a platform image or repair a binary,
+runtime or mount. Unrelated safe edits remain separate for later reconciliation.
+
+Every control-plane restart changes `boot_incarnation` and expires **all
+unstarted** approvals before dispatch. Every agent reconnect invalidates old
+connection-bound unaccepted grants. Saved policy survives. A supported database
+restore stops the stack first and starts a new boot incarnation; a live rewind
+has no guarantee. Admission stays protected until full journal inventory and
+owner-scoped restriction reconciliation finish, because the database backup may
+predate an agent's accepted record and omit both attempt and restriction. The
+control plane reconstructs an inventory-only attempt only if its durable identity
+and content match surviving policy; otherwise it quarantines the orphan and
+keeps the host restricted for operator repair. It never replays an old approval
+row or assumes an absent database row means execution did not start.
+After restore, it compares surviving per-group revisions with the complete
+agent `revision_high_water` map before issuing new offers. Where a restored
+revision would reuse or precede a journaled revision, it assigns a fresh
+revision above that high-water mark and recomputes `content_sha256`, because
+revision is part of the digested candidate. Historical accepted attempts keep
+their original revision and digest; reseeding never reactivates them.
+
+An idle operation owns only its admission restriction. It releases that hold
+after confirmed nonacceptance or a safe terminal/recovered outcome; manual and
+platform holds remain independent. An uncertain started attempt retains its
+protective hold until verified reconciliation or explicit repair. A waiting
+operation never kills sessions to reach idle and has no deadline that does so.
+
+**Existing-behavior amendment.** The older `config_update` and `restart`
+paragraphs above describe the legacy settings writer. On an RH05 connection,
+legacy PATCH still stores policy intent, but the RH05 offer/result path alone
+executes settings and proves application. A legacy `restart_confirm` does not
+approve RH05 idle apply. This amendment does not change console or Steam source
+policy delivery.

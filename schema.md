@@ -2394,3 +2394,218 @@ Down migration removes only the policy/report columns and associated trigger and
 function. Published templates, existing homes, and ordinary image/session data
 remain intact. Downgrading application behavior is not a supported deployment
 operation; release schema-floor protections continue to apply.
+
+## RH05-01 — host policy, idle apply and placement (proposed additive amendment, #334)
+
+This reserves migrations **0087–0093**. It adds durable policy and scheduling state;
+it does not rewrite `0001`–`0086`, `host_settings.overrides`, `hosts.status`,
+`user_homes`, `host_images`, sessions, or platform run records. It supersedes the
+older `host_settings` prose where that prose says an absent override selects the
+catalog default: the agent's deployment resolution, including environment,
+legacy device detection and per-key fallback, remains authoritative. The legacy
+GET's `resolved` is a display projection, not proof of application. Configuration
+applied, app prepared, and readiness remain separate verdicts. These are prose
+reservations, not production SQL migrations.
+
+### 0087 — typed settings and reconciliation
+
+| Relation | Columns and constraints | Meaning |
+|---|---|---|
+| `host_policy_revisions` | `host_id UUID PRIMARY KEY REFERENCES hosts(id) ON DELETE CASCADE`, `revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0)`, `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`, `updated_by UUID NULL REFERENCES users(id) ON DELETE SET NULL` | One row per host, locked by typed CAS edits and legacy PATCH. Choices, revision and obligations commit atomically. |
+| `host_setting_choices` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `key TEXT NOT NULL`, `source TEXT NOT NULL CHECK (source IN ('automatic','deployment','explicit'))`, `explicit_value JSONB NULL`, `revision BIGINT NOT NULL CHECK (revision >= 0)`, `PRIMARY KEY (host_id,key)`, `CHECK ((source = 'explicit') = (explicit_value IS NOT NULL))`, `CHECK (explicit_value IS NULL OR jsonb_typeof(explicit_value) <> 'null')` | SQL NULL means no explicit value. JSON `null` is not a typed explicit value. The guarded `jsonb_typeof <> 'null'` is required because an unguarded SQL CHECK accepts unknown. Validate key, type and range against `hostcfg.Catalog` before writing. |
+| `host_setting_groups` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `group_key TEXT NOT NULL`, `desired_revision BIGINT NOT NULL CHECK (desired_revision >= 0)`, `desired_digest TEXT NOT NULL`, `applied_revision BIGINT NULL CHECK (applied_revision >= 0)`, `scope TEXT NOT NULL CHECK (scope IN ('next_session','restart'))`, `status TEXT NOT NULL CHECK (status IN ('pending','applied','failed','upgrade_required','uncertain'))`, `evidence_connection UUID NULL`, `evidence_at TIMESTAMPTZ NULL`, `PRIMARY KEY (host_id,group_key)`, `CHECK (applied_revision IS NULL OR applied_revision <= desired_revision)` | A verified active readback advances only the matching group, revision and digest. |
+| `host_reconcile_obligations` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `kind TEXT NOT NULL`, `resource_key TEXT NOT NULL`, `revision BIGINT NOT NULL CHECK (revision >= 0)`, `next_attempt_at TIMESTAMPTZ NOT NULL`, `retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0)`, `PRIMARY KEY (host_id,kind,resource_key)` | New intent replaces the revision. A wakeup is never authority to apply obsolete intent. |
+
+Backfill each present non-null legacy override as `explicit`; absent or cleared
+keys are `deployment`. Never infer `automatic` from installer or catalog defaults.
+An unset encoder can still use the agent's existing GPU detection. Legacy PATCH
+non-null writes explicit; legacy null removes the override and writes deployment;
+both serialize on `host_policy_revisions` and increment the same revision, though
+legacy PATCH lacks a client CAS precondition. The catalog's nullable
+`abr_floor_kbps` does not make JSON `null` a stored explicit choice: legacy null
+means deployment, a typed caller selects deployment, and an explicit floor is an
+integer >= 1. Other explicit values retain existing catalog type, enum and range
+validation. Only `encoder` and `render_node` allow `automatic`; they resolve as
+one hardware group using accessible-device and probe evidence, including explicit
+`cuda_device` if set. New hosts may choose automatic only after enrollment and
+capability evidence. Offline intent stays pending. An old agent's legacy effective
+map never establishes RH05 applied proof.
+
+### 0088 — owner-scoped admission restrictions
+
+`host_admission_restrictions`: `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE
+CASCADE`, `owner_kind TEXT NOT NULL CHECK (owner_kind IN
+('manual','platform','idle_apply','recovery','legacy'))`, `owner_id UUID NOT NULL`,
+`reason TEXT NOT NULL`, `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`, primary
+key `(host_id,owner_kind,owner_id)`. The fixed all-zero UUID is the sole manual
+owner ID; legacy uses a distinct fixed UUID; platform uses
+`platform_apply_runs.id`; idle/recovery use attempt IDs. An admin uncordon
+releases manual and legacy rows for that host, never platform or operation rows.
+Only an owner releases its row. Any row restricts admission. Backfill existing
+manual/legacy cordons as manual or legacy owners. For each active platform run's
+`cordoned_hosts` entry, `was_cordoned = false` yields that run's platform row;
+`was_cordoned = true` preserves the preexisting manual/legacy owner and must
+not be misattributed to the run. Reconcile terminal runs still awaiting
+`cordons_restored_at`. `hosts.status = 'draining'` alone cannot identify
+an owner and must never authorize globally clearing a cordon. Existing platform
+cordon writers migrate to owner-scoped acquisition/release before the old boolean
+behavior is retired. `hosts.status` remains the compatibility/liveness projection:
+draining while restricted, otherwise online/offline per connection. The scheduler
+reads the restriction set under the selected host row lock in the reservation
+transaction; it cannot reserve after an idle restriction wins that lock.
+
+### 0089 — boot fence, approvals, attempts and journal inventory
+
+`rh05_control_boot` is a singleton (`id BOOLEAN PRIMARY KEY CHECK (id)`,
+`incarnation UUID NOT NULL`, `started_at TIMESTAMPTZ NOT NULL`) in the **same
+database** as approvals. Every control-plane process start, including a start
+after stopped-stack restore, atomically replaces this incarnation and expires
+all unstarted approvals **and reseeds every RH05 host's inventory gate to
+pending** in one transaction. Dispatch and RH05 scheduling stay disabled until
+it commits and the relevant host gate completes. An in-memory boot UUID cannot
+fence an approval resurrected by restore.
+Only one control-plane boot is active; live database rewind is outside the
+supported restore guarantee.
+
+`host_config_approvals`: `id UUID PRIMARY KEY`, `host_id UUID NOT NULL REFERENCES
+hosts(id) ON DELETE CASCADE`, `group_key TEXT NOT NULL`, `revision BIGINT NOT NULL
+CHECK (revision >= 0)`, `approved_digest TEXT NOT NULL`, `prerequisites_digest
+TEXT NOT NULL`, `boot_incarnation UUID NOT NULL`, `expires_at TIMESTAMPTZ NOT
+NULL`, `state TEXT NOT NULL CHECK (state IN ('approved','offered',
+'cancel_pending','superseded','expired','accepted','revoked_unstarted'))`,
+`created_at TIMESTAMPTZ NOT NULL DEFAULT now()`. A partial unique index allows
+one live unstarted approval per `(host_id,group_key)` where state is `approved`,
+`offered` or `cancel_pending`. An edit to the group's
+source, value or prerequisite supersedes it; an unrelated safe edit preserves
+it. Cancellation or supersession fences further grants in the database before
+revocation is sent. Only confirmed nonacceptance releases the idle restriction
+before execution. A lost revocation response retains `cancel_pending` and the
+restriction until complete authenticated inventory settles whether acceptance
+occurred. Expiry is checked with the boot ID and prerequisite digest at dispatch,
+not just by a periodic sweep.
+
+`host_config_attempts`: `id UUID PRIMARY KEY`, `host_id UUID NOT NULL REFERENCES
+hosts(id) ON DELETE CASCADE`, `group_key TEXT NOT NULL`, `approved_digest TEXT NOT
+NULL`, `approved_revision BIGINT NOT NULL CHECK (approved_revision >= 0)`,
+`scope TEXT NOT NULL CHECK (scope IN ('next_session','restart'))`,
+`boot_incarnation UUID NOT NULL`, `grant_connection UUID NULL`, `phase TEXT NOT
+NULL CHECK (phase IN ('offered','accepted','activating','awaiting_startup',
+'verifying','applied','failed','recovery_verifying',
+'recovery_awaiting_startup','recovered','uncertain','revoked_unstarted'))`,
+`journal_sequence BIGINT NULL CHECK (journal_sequence >= 0)`, `started_at
+TIMESTAMPTZ NULL`, `terminal_at TIMESTAMPTZ NULL`, `recovery_attempted BOOLEAN NOT
+NULL DEFAULT false`, `error_code TEXT NULL`, `error_detail TEXT NULL`, unique
+`(host_id,group_key,id)`. A partial unique index on **`host_id` alone** where
+`scope = 'restart'` and phase is `offered`, `accepted`, `activating`,
+`awaiting_startup`, `verifying`, `recovery_verifying` or
+`recovery_awaiting_startup` allows only one open disruptive attempt per host
+across all groups. Next-session groups retain independent progress. A
+per-host/group index would allow simultaneous restarts. Terminal
+phases are `applied`, `failed`, `recovered`, `uncertain` and
+`revoked_unstarted`; `uncertain` is terminal for retry accounting but keeps a
+protective admission restriction until resolved. A recovery transition retains
+the requested choice's original failure in `error_code`/`error_detail` and the
+group's failed status; `recovered` records restoration of the last verified
+configuration, never application of the requested choice.
+Only one recovery activation of the exact last verified group is allowed.
+
+Agent `accepted` means its journal record, containing attempt ID, approved
+digest, candidate and last verified snapshot, was fsynced and atomically
+published before activation. `started_at` follows that report. Socket send,
+receipt, ack, validation and pre-startup effective values are not proof. The
+same attempt ID/digest is idempotent; a different digest or conflicting journal
+sequence is rejected. Only the authenticated current connection reports state.
+Historical grant boot/connection IDs must match the durable attempt but are not
+current authority. Next-session applied proof is active next-session snapshot
+plus revision/digest readback; restart proof is startup verification after restart.
+
+`host_journal_reconciliation`: `host_id UUID PRIMARY KEY REFERENCES hosts(id) ON
+DELETE CASCADE`, `boot_incarnation UUID NOT NULL`, `connection_incarnation UUID
+NULL`, `state TEXT NOT NULL CHECK (state IN ('pending','complete','quarantined'))`,
+`completed_at TIMESTAMPTZ NULL`, `continuation_cursor TEXT NULL`. On every new
+control-plane boot and relevant agent reconnect, this gate is pending until the
+authenticated agent's **complete** journal inventory, including attempts absent
+from the database, is consumed. Inventory must have bounded pages or continuation
+and an explicit end marker; missing inventory is unknown, never zero. Scheduling
+and idle dispatch on an RH05 host are gated until the current boot/connection
+inventory and restrictions are reconciled. A backup can predate agent acceptance
+and omit both attempt and restriction. Reseed the gate and protective restriction
+before any post-restore reservation; reconstruct an orphan only if durable
+identity/content matches surviving policy, otherwise quarantine and retain the
+admission hold for operator repair. Started work is recovered from the agent
+journal, never replayed from an old approval.
+Inventory reports a stable per-group revision high-water mark across complete
+pages. After a supported stopped-stack restore, reconciliation advances each
+host policy and desired-group revision strictly above both the restored
+database and agent high-water marks before dispatch. It preserves the saved
+source and value but recomputes the content digest, which includes the new
+revision, and invalidates all old approval digests. Historical attempt
+revision/digest pairs remain intact for audit and reconciliation. The gate
+stays pending if the inventory is incomplete or the revision cannot be safely
+advanced within `BIGINT`.
+
+### 0090–0093 — homes, placement and images
+
+| Migration and relation | Columns and constraints | Meaning |
+|---|---|---|
+| 0090 `managed_home_claims` | `user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE`, `canonical_app_id UUID NOT NULL REFERENCES apps(id) ON DELETE CASCADE`, `host_id UUID NULL REFERENCES hosts(id) ON DELETE SET NULL`, `state TEXT NOT NULL CHECK (state IN ('reserved','materialized','conflict'))`, `materialized_at TIMESTAMPTZ NULL`, `conflict_reason TEXT NULL`, `PRIMARY KEY (user_id,canonical_app_id)`, `CHECK (state <> 'conflict' OR conflict_reason IS NOT NULL)` | One canonical claim per user and parent app. Lost-host ownership, conflict or uncertainty is a tombstone, never permission to assign another host. Existing `user_homes` remains the backing-store index with its own tombstone and GC behavior. |
+| 0091 `app_placement` | `app_id UUID PRIMARY KEY REFERENCES apps(id) ON DELETE CASCADE`, `mode TEXT NOT NULL CHECK (mode IN ('all_eligible','fixed'))`, `revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0)` | Canonical parent apps only. Backfill all existing canonical apps as `all_eligible`; derived tiles inherit parent placement and have no separate row. |
+| 0091 `app_placement_hosts` | `app_id UUID NOT NULL REFERENCES app_placement(app_id) ON DELETE CASCADE`, `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `PRIMARY KEY (app_id,host_id)` | Fixed placement may deliberately have zero hosts, meaning no eligible host. Removal and reservation lock the same placement row. |
+| 0092 `host_image_success_history` | `host_id UUID NOT NULL`, `image_id TEXT NOT NULL`, `current_version TEXT NOT NULL`, `previous_version TEXT NULL`, `verified_at TIMESTAMPTZ NOT NULL`, `PRIMARY KEY (host_id,image_id)`, `FOREIGN KEY (host_id,image_id) REFERENCES host_images(host_id,image_id) ON DELETE CASCADE` | Prior successful managed-image version changes only after a newer version is verified prepared. Unknown prior history stays unknown and cleanup fails closed. |
+| 0093 `host_image_operation_fences` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL REFERENCES image_catalog(id) ON DELETE CASCADE`, `generation BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0)`, `state TEXT NOT NULL CHECK (state IN ('idle','removing'))`, `attempt_id UUID NULL`, `PRIMARY KEY (host_id,image_id)` | Separate FKs allow a fence before `host_images` inventory exists. Requirement writers increment generation; launches take a shared lock without incrementing it. `removing` blocks ready/launch until verified re-ensure. |
+
+Backfill 0090 from known `user_homes` locations only. Multiple or ambiguous
+legacy locations become `conflict`, not invented ownership. A first claim uses
+the unique key and retries a competing insert before assigning. A failed launch
+releases its claim only if it created an unmaterialized reservation **and**
+authoritative host evidence confirms no home exists. Materialized or uncertain
+claims persist. Deleting a user or canonical app cascades the claim but never
+deletes an existing `user_homes` tombstone or backing store. Swap and local
+launch apply canonical placement and claim checks before changing executable
+app identity; neither can create a second home.
+
+The image fence serializes cleanup with the union of selected app requirements,
+all container references, pending ensure/template operations and the retained
+previous successful version. Cleanup enters `removing` with a generation token
+while rechecking that union. The agent takes its local per-image operation lock
+and rechecks local references and the current token before physical removal. A
+new requirement during removal cancels an unstarted removal or stays pending and
+re-ensures afterward; it is never reported ready from stale state. Unknown
+inventory and stale preview cannot authorize deletion. No database transaction
+remains open across network, process restart, image pull or physical removal.
+
+### Transaction order and migration ownership
+
+The launch/reservation order is: per-user advisory lock (namespace 1) →
+canonical parent app row `FOR KEY SHARE` → launched tile/app row `FOR KEY SHARE`
+if different → entitlement `FOR SHARE` → per-GPU advisory lock (namespace 2)
+→ selected host row, then GPU row → inventory and restriction gate → placement
+row `FOR SHARE` → image fences for required `(host,image)` pairs `FOR SHARE` in
+deterministic image-ID order → managed home claim keyed by user and parent →
+session reservation. Locking both parent and tile before entitlement matches
+parent/tile deletion's app-before-entitlement order. Placement removal and
+reservation lock the same placement row. A fence row is precreated or inserted
+with `ON CONFLICT DO NOTHING` before taking its lock. Placement/requirement
+writers lock parent app → placement `FOR UPDATE` → image fence `FOR UPDATE`;
+cleanup locks the image fence `FOR UPDATE` before deciding. These writers do not
+later acquire a host lock; a workflow needing both splits transactions.
+Non-launch host policy, attempt, inventory, registration and restriction writes
+use host row `FOR UPDATE` → `host_policy_revisions` → groups/choices → attempts
+→ restrictions and take no user/GPU advisory lock. No database lock crosses
+physical work. Verify delete/launch, placement/launch, cleanup/requirement,
+and restriction/launch races against Postgres during implementation. Current
+claim, placement, restriction and reconciled-boot predicates are rendered in
+candidate, under-lock recheck, totals and rejection-classifier queries alike.
+An existing home constrains host selection before ranking, not only a late
+retry after selecting the wrong host.
+
+#335 authors 0087; #337 0088; #338 0089; #341 0090; #342 0091; #343 0092;
+#345 0093. #344 consumes 0092 without another writer. Integrate 0087 before
+0088 before later numbers; never deploy an 0088-only branch to a shared
+database. Recheck `origin/develop` immediately before authoring each SQL pair;
+if upstream takes a number, renumber the unshared reservation rather than
+reuse an applied version. Each down migration removes only its own structures.
+Rolling down after RH05 use loses policy, attempts, claims or image evidence
+and is not a safe live rollback: export and reconcile first, then use a binary
+compatible with the applied schema. No down migration deletes `user_homes`,
+images or session rows.
