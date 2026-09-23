@@ -1580,7 +1580,10 @@ paths:
             session_quota_exceeded / home_in_use / profile_ineligible /
             profile_not_launchable_for_app / conflict (pre-existing), or (Phase 3)
             home_not_provisioned - a derived tile whose parent has no home on any host - or
-            parent_app_disabled. Amendment 12 (#296): conflict is no longer returned for an
+            parent_app_disabled. RH05: home_conflict takes precedence over
+            home_not_provisioned when a conflicting canonical claim (including
+            gc_pending) or known tombstoned row
+            exists, including on derived tiles. Amendment 12 (#296): conflict is no longer returned for an
             explicit stream.codec the placed host cannot encode - that arm leaves the launch path
             (the codec is now a placement gate; see 503) and survives only on the certification
             bench.
@@ -1692,7 +1695,9 @@ paths:
         STEAM LIBRARY DISCOVERY PHASE 3 ADDS TWO 409 CONDITIONS HERE, both additive (409 was
         already declared on this endpoint and Error.code is an open string).
 
-        409 home_not_provisioned - the swap target is a DERIVED TILE and THIS SESSION'S HOST holds
+        RH05 home_conflict takes precedence when the canonical parent has a
+        conflicting claim or known tombstoned row. Otherwise, 409
+        home_not_provisioned - the swap target is a DERIVED TILE and THIS SESSION'S HOST holds
         no live user_homes row for its parent. A swap is pinned to the live session's host and has
         NO PLACEMENT STEP, so unlike a launch there is nowhere to re-pin it to: a tile whose
         library lives on another host, or does not exist yet, cannot be swapped into. Launch it
@@ -1725,7 +1730,8 @@ paths:
           description: >-
             session_not_swappable / swap_exceeds_reservation / conflict (pre-existing), or
             (Phase 3) home_not_provisioned - the target tile's parent has no home on THIS
-            session's host - or parent_app_disabled.
+            session's host - or parent_app_disabled. RH05 home_conflict takes
+            precedence for a conflicting claim or known tombstone.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/sessions/{id}/display:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
@@ -7778,6 +7784,33 @@ components:
           items: { $ref: "#/components/schemas/Capture" }
 
     # ─── storage (P5-05) ─────────────────────────────────────────────────────────
+    AdminHomeClaim:
+      type: object
+      additionalProperties: false
+      required: [user_id, username, canonical_app_id, app_name, host_id, host_name, state, conflict_reason, materialized_at, recorded_host_ids]
+      properties:
+        user_id: { type: string, format: uuid }
+        username: { type: [string, "null"] }
+        canonical_app_id: { type: string, format: uuid }
+        app_name: { type: [string, "null"] }
+        host_id: { type: [string, "null"], format: uuid }
+        host_name: { type: [string, "null"] }
+        state: { type: string, enum: [reserved, materialized, conflict], description: Materialized means an authenticated running session used this claimed managed-home mount; it does not attest to home contents. }
+        conflict_reason:
+          type: [string, "null"]
+          enum: [legacy_location_uncertain, claim_owner_missing, location_mismatch, gc_pending, null]
+        materialized_at: { type: [string, "null"], format: date-time }
+        recorded_host_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: Distinct sorted host IDs from known bookkeeping rows, including tombstones; not physical inventory evidence.
+    AdminHomeClaimsResponse:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AdminHomeClaim" } }
+        next_cursor: { type: [string, "null"] }
     AdminHome:
       type: object
       description: "One managed-home row from GET /v1/admin/storage/homes (storage/handler.go homeResp)."
