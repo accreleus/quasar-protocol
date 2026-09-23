@@ -325,12 +325,21 @@ session the control plane already reaped. `session_stop` for any session it
 holds likewise completes cleanup and emits a qualified terminal even if the
 control plane already marked that session terminal. If cleanup cannot be
 verified, it keeps the identity and refs pending and does not emit terminal.
-Once a terminal is emitted for a session ID, a durable retired-ID record
-prevents accepting any later `session_assign` or `session_swap_app` for that
-ID, across reconnect and restart; those commands are rejected without side
-effects. This makes a delayed pre-swap terminal valid negative evidence for
-that same ID. Agent tests cover fatal swap, abandoned runner, startup
-reconciliation, stop-after-control-plane-reap and retired-ID rejection. This
+The agent durably retires the session ID **before or atomically with terminal
+emission**. A retired ID never accepts a later `session_assign` or
+`session_swap_app`, across reconnect and restart; those commands are rejected
+without side effects. Assign, swap and stop are serialized per session ID.
+On a repeated `session_stop` for a retired ID, the agent resends the same
+qualified terminal without side effects. On `session_stop` for an ID it never
+recorded, it durably retires that ID first, then sends `stopped`: frames from
+an earlier connection epoch are gone, and commands on the current epoch are
+processed in order for that ID, so a later assign/swap is rejected. This
+repeated stop path recovers a lost terminal frame or an assign/swap command
+lost after socket handoff without adding a message or ack field. This makes a
+delayed pre-swap terminal valid negative evidence for that same ID. Agent
+tests cover fatal swap, abandoned runner, startup reconciliation, stop after
+control-plane reap, lost terminal, lost assign, repeated stop and retired-ID
+rejection. This
 is a behavioral change for agents that advertise the capability, not a change
 to `session_state` or ack JSON shape.
 

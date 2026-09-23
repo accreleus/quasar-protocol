@@ -8496,6 +8496,15 @@ event, reservation or materialization. Timeout, lost ack, heartbeat omission,
 reconnect reaper or host deletion leaves an existing hold for #347 audited
 repair. An older agent does not create a new RH05 hold; its signed behavior
 and known synthetic-reap risk continue with `legacy_unprotected_dispatch=true`.
+After each cleanup-capable registration, the control plane scans held claims
+on that owner host with a terminal or missing session row and sends one
+`session_stop` per distinct historical session ID on that connection epoch.
+It retries stop while the hold remains at a capped interval regardless of ack
+and repeats on later capable reconnects. The capable agent returns a qualified terminal even if
+the ID is already retired or was never recorded; only that terminal clears
+the hold. The stop ack and synthetic session state never do. If the agent
+still has a runner for a synthetically terminal row, this stop tears it down;
+it is never sent for a control-plane running session merely to release a hold.
 The signed admin
 host-delete path may tombstone a held home but retains a null-host conflict
 claim and hold; the null-host janitor never deletes that claim.
