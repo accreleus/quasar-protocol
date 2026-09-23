@@ -8855,6 +8855,14 @@ the failure. An untouched upgrade keeps each enabled canonical app's
 wire capability. `host_image_success_history` advances only after matching
 ready evidence for a newly adopted version. Update/auto adoption compare
 versions, so a digest-only catalog sync cannot alias that retention history.
+0092 stores each retained version together with the frozen adopted identity
+(registry ref or template build inputs). A reinstall at the same version with
+a different identity cannot advance history from a version-only ready report;
+if history's `current_version` matches the adopted version but its
+`current_identity` differs from the adopted identity, cleanup removes nothing
+for that host and image until a different version verifies. On that advance,
+the previous pair comes from the retained current pair, not the unverified
+same-version adoption. Catalog sync never rewrites retained identities.
 The P3 uninstall is also an explicit image-removal path; its best-effort
 removal must obey #344's pending/reference/retention fence once 0093 lands.
 
