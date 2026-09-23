@@ -2421,7 +2421,11 @@ An offer is a **grant**, not an execution record. The agent checks its authentic
 current connection, boot and connection incarnations, host ID, capability, expiry,
 revision, digest and current prerequisites. A stale grant from an earlier boot or
 connection, changed prerequisite, wrong host, unsupported capability, or changed
-content is rejected without activation. A duplicate `attempt_id` with identical
+content is rejected without activation. Before serving journal inventory on a
+new authenticated connection, the agent fences acceptance on every older
+connection and boot incarnation. That fence is checked immediately before
+durable acceptance, so an old queued grant cannot become accepted after
+current-connection inventory proves its ID absent. A duplicate `attempt_id` with identical
 content returns the journaled phase/result; a different digest or identity for
 that ID is `attempt_conflict`. A restart-scope offer also requires zero assigned,
 starting, running and stopping sessions (including local sessions), no conflicting
@@ -2468,7 +2472,11 @@ or process restart. Phases are `accepted`, `activating`, `awaiting_startup`,
 `revoked_unstarted`. The control plane's `offered` phase means a grant was
 sent, not accepted. Each state carries the same attempt identity and an increasing
 `journal_sequence` per attempt. A repeated sequence with byte-identical content
-is idempotent; conflicting content at one sequence is rejected. The control plane
+is idempotent; conflicting content at one sequence is rejected. A higher sequence
+may advance to a forward-reachable later journal phase after intermediate
+reports were lost on a disconnected socket. The agent treats `failed` and
+`uncertain` as open for new-grant exclusion until durable proof of the
+authorized recovery decision or resolution; ambiguity fails closed. The control plane
 accepts state only from the host's current authenticated connection for a matching
 durable attempt or during the full inventory reconciliation below. An older group
 revision cannot advance a newer desired group; a result for one group cannot

@@ -2844,8 +2844,9 @@ paths:
         while a live approval exists returns attempt_conflict with current.
         Host-wide unique-index conflicts also return attempt_conflict. A terminal
         uncertain attempt with an unresolved protective restriction blocks grants.
-        Every restart-group review token rotates when an approval leaves
-        approved/offered/cancel_pending, an accepted restart attempt reaches a
+        Every restart-group review token rotates when an approval exits
+        approved or offered for cancel_pending or a terminal state, or exits
+        cancel_pending for a terminal state; an accepted restart attempt reaches a
         terminal outcome, an unresolved disruptive admission hold resolves,
         connection/journal authority changes, or complete authenticated
         reconciliation opens disruptive availability. Unrelated safe next-session edits,
@@ -5323,7 +5324,7 @@ components:
           type: array
           items: { $ref: "#/components/schemas/RH05Prerequisite" }
         approval_boot_incarnation: { type: string, format: uuid, description: Persisted token for the current process boot. }
-        approval_review_id: { type: string, format: uuid, description: Present even when unavailable but grants nothing then. Stable during a live waiting/offered grant; all restart-group IDs on the host rotate when an approval leaves approved/offered/cancel_pending, an accepted restart attempt reaches a terminal outcome, an unresolved disruptive admission hold resolves, connection/journal authority changes, or complete authenticated reconciliation opens disruptive availability. Fresh UUIDs are never reused for this host/group in this boot. }
+        approval_review_id: { type: string, format: uuid, description: Present even when unavailable but grants nothing then. Stable during a live waiting/offered grant; all restart-group IDs on the host rotate when an approval exits approved or offered for cancel_pending or a terminal state or exits cancel_pending for a terminal state, an accepted restart attempt reaches a terminal outcome, an unresolved disruptive admission hold resolves, connection/journal authority changes, or complete authenticated reconciliation opens disruptive availability. Fresh UUIDs are never reused for this host/group in this boot. }
         remedy: { type: [string, "null"] }
     IdleApplyRequest:
       type: object
@@ -5344,7 +5345,7 @@ components:
             Digest input is each UTF-8 kind, NUL, id, LF. NUL and LF are forbidden
             within either field. Agent rechecks these facts before durable acceptance.
         approval_boot_incarnation: { type: string, format: uuid, description: Must match the reviewed preview and persisted current process boot. }
-        approval_review_id: { type: string, format: uuid, description: Must match the current server-issued token for a new grant; all restart-group IDs on the host rotate when an approval leaves approved/offered/cancel_pending, an accepted restart attempt reaches a terminal outcome, an unresolved disruptive admission hold resolves, connection/journal authority changes, or complete authenticated reconciliation opens disruptive availability. Fresh UUIDs are never reused for this host/group in this boot. }
+        approval_review_id: { type: string, format: uuid, description: Must match the current server-issued token for a new grant; all restart-group IDs on the host rotate when an approval exits approved or offered for cancel_pending or a terminal state or exits cancel_pending for a terminal state, an accepted restart attempt reaches a terminal outcome, an unresolved disruptive admission hold resolves, connection/journal authority changes, or complete authenticated reconciliation opens disruptive availability. Fresh UUIDs are never reused for this host/group in this boot. }
         expires_at: { type: string, format: date-time }
     IdleApplyAttempt:
       type: object

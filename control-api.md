@@ -8201,7 +8201,8 @@ values, the sorted prerequisite facts and digest, the current
 candidate is unavailable until complete authenticated current-connection
 journal inventory reconciles. The review ID stays stable when a grant is
 created and while it remains waiting or offered. All restart-group review IDs
-on this host rotate when an approval leaves `approved`/`offered`/`cancel_pending`,
+on this host rotate when an approval exits `approved` or `offered` for
+`cancel_pending` or a terminal state, or exits `cancel_pending` for a terminal state,
 an accepted restart attempt reaches a terminal outcome, an unresolved disruptive
 admission hold resolves, connection or
 journal authority changes, or complete authenticated inventory reconciliation
@@ -8380,8 +8381,9 @@ nothing. The server checks the boot token and request expiry first. An identical
 replay in `waiting` or `offered` returns `202` with the same attempt; replay in
 `cancel_pending` or `revoked_unstarted` returns `409 approval_superseded`;
 any other open disruptive phase returns `409 attempt_conflict` with the current
-attempt. Only a new grant reaches the review-ID check; the transaction locks
-the review-token row before that comparison, rechecks availability, and inserts
+attempt. Replay after `applied`, `recovered`, resolved `uncertain` or terminal
+`failed` returns `409 approval_superseded`. Only a new grant reaches the review-ID check; the transaction locks
+all restart-group review-token rows in ascending `group_key` before that comparison, rechecks availability, and inserts
 the grant atomically. Each process boot generates a new token even after a stopped-stack
 restore; this version supports one active control-plane approval authority. A
 request whose expiry has passed is
@@ -8418,8 +8420,9 @@ current review ID but different body while a live approval exists returns
 map to that response. A new grant also rejects a terminal `uncertain` attempt
 whose protective restriction remains unresolved. A live grant makes the
 preview unavailable for a second grant. A host disruptive lifecycle change
-rotates review IDs for **all** restart groups on that host: an approval leaves
-`approved`/`offered`/`cancel_pending`, an accepted restart attempt reaches a terminal outcome, an
+rotates review IDs for **all** restart groups on that host: an approval exits
+`approved` or `offered` for `cancel_pending` or a terminal state, or exits
+`cancel_pending` for a terminal state; an accepted restart attempt reaches a terminal outcome; an
 unresolved disruptive admission hold resolves, connection/journal authority
 changes, or complete authenticated inventory reconciliation opens disruptive
 availability. Rotation commits with that change. An unrelated safe next-session

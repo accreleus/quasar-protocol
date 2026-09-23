@@ -2650,6 +2650,12 @@ fence an approval resurrected by restore.
 Only one control-plane boot is active; live database rewind is outside the
 supported restore guarantee.
 
+The approval, review-token, issued-token and attempt tables first ship together
+in migration 0089; there are no pre-0089 approval rows or indexes to backfill.
+That migration seeds current review-token and issued-token rows for every
+existing saved restart group. Newly saved restart groups seed both rows in the
+same policy transaction.
+
 `host_config_approvals`: `id UUID PRIMARY KEY`, `host_id UUID NOT NULL REFERENCES
 hosts(id) ON DELETE CASCADE`, `group_key TEXT NOT NULL`, `revision BIGINT NOT NULL
 CHECK (revision >= 0)`, `approved_digest TEXT NOT NULL`, `prerequisites_digest
@@ -2689,13 +2695,20 @@ If stopped-stack restore erased an accepted attempt, authenticated journal
 reconciliation recreates it under the approval's ID before releasing the gate.
 That transaction also moves a restored `cancel_pending` approval to `accepted`.
 The recreated row starts at the authenticated inventory phase and journal
-sequence. Later authenticated state or inventory updates only advance a legal
-phase edge and strictly increasing per-attempt `journal_sequence` (or repeat
+sequence. Later authenticated state or inventory updates only advance to a
+forward-reachable phase in the agent journal graph with a strictly increasing
+per-attempt `journal_sequence` (so missed intermediate reports do not cause
+false quarantine), or repeat
 identical content at the same sequence), as required by `agent-api.md` §config
 policy journal. Older or conflicting reports are ignored or quarantine the
 host: a lower sequence is ignored; the same sequence with different content,
 or an illegal phase edge, quarantines the host. Neither case clears
-`terminal_at`, releases protection or rotates review IDs.
+`terminal_at`, releases protection or rotates review IDs. The control-plane-only
+`offered` row has NULL `journal_sequence`; the first authenticated
+`accepted` report supplies its initial sequence. A confirmed pre-acceptance
+`revoked_unstarted` terminal row keeps NULL sequence. A control-plane recovery
+decision that terminalizes a journaled `failed` or `uncertain` row retains its
+last authenticated sequence and does not impersonate a new agent journal report.
 Once set, `terminal_at` is never cleared. `failed` becomes terminal only after
 an explicit durable decision that recovery is impossible or after its authorized
 recovery reaches a proven terminal outcome; stale `failed` cannot terminalize
@@ -2727,7 +2740,8 @@ triggering phase change commit in the same transaction. A grant locks this row
 rechecks availability under that lock. The row survives ordinary
 restarts; the separate boot incarnation still changes on every process start.
 Review IDs for all restart groups on a host rotate together when an approval
-leaves `approved`/`offered`/`cancel_pending`, an accepted restart attempt reaches terminal outcome,
+exits `approved` or `offered` for `cancel_pending` or a terminal state, or
+exits `cancel_pending` for a terminal state; an accepted restart attempt reaches terminal outcome;
 an unresolved disruptive admission hold resolves, connection/journal authority
 changes, or complete authenticated inventory reconciliation opens disruptive
 availability; this rotation commits with the triggering transition. Unrelated safe
