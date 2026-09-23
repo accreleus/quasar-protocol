@@ -2643,8 +2643,12 @@ CASCADE, connection_incarnation UUID NOT NULL, gpus JSONB NOT NULL CHECK
 (jsonb_typeof(readiness)='array'), received_at TIMESTAMPTZ NOT NULL DEFAULT
 now())`. A write accepts one validated capacity report's GPU and readiness
 arrays in a host-locked transaction only if its authenticated socket's
-connection incarnation matches the journal gate. A report missing readiness
-or carrying invalid evidence clears this connection's projection; a stale
+connection incarnation matches the journal gate. Authentication sets that
+connection on the gate as it enters `pending`, before the first capacity
+report; projection writes are accepted while the matching gate is `pending`
+or `complete`. A quarantined gate and any disconnected socket cannot
+authorize a preview. A report missing readiness
+or carrying invalid evidence **deletes** this connection's projection; a stale
 socket cannot update or clear it. Every accepted report refreshes
 `received_at` on the database clock even when content is unchanged. Preview
 requires this row's connection to equal the complete gate's connection and
@@ -2655,6 +2659,17 @@ waiting approval and rotates all host restart review IDs in the same host
 transaction; an offered approval becomes `cancel_pending` and retains its
 restriction until authenticated nonacceptance. Agent-side final checks remain
 the authority for actual device accessibility and most recent probe outcome.
+When the authenticated current socket disconnects, the same host-locked
+fence deletes its projection and applies those supersession/rotation rules.
+A displaced old socket cannot delete the new connection's projection.
+On reconnect the pending gate fences every old review and the old
+connection-bound hardware projection; a new passing report must establish
+new evidence. Any inventory that both reveals acceptance and changes a
+snapshot reconciles the accepted attempt first, so a started attempt is
+never reclassified as unstarted. All receipt timestamps here are set by
+the same database. Registration writes `last_registered_at` before any
+capacity report is admitted; each accepted report refreshes its projection
+receipt time even if no field changed.
 
 `rh05_control_boot` is a singleton (`id BOOLEAN PRIMARY KEY CHECK (id)`,
 `incarnation UUID NOT NULL`, `started_at TIMESTAMPTZ NOT NULL`) in the **same

@@ -2394,21 +2394,27 @@ accessibility. Scope is `next_session` or `restart`. Expiry is an RFC3339 UTC
 instant.
 For Automatic hardware, `accessible_device.id` is lowercase SHA-256 of UTF-8
 `gpu\0<N>\0<render_node>\0<driver_identity>\n`, where `<N>` is the
-unprefixed decimal `capacity.gpus[].index`, `<render_node>` is the exact
+canonical non-negative decimal `capacity.gpus[].index` without leading
+zeros, `<render_node>` is the exact
 nonempty `capacity.gpus[].render_node`, and `<driver_identity>` is the exact
-nonempty `capacity.gpus[].driver_identity` (stored in the matching
-`gpus.render_node` and `gpus.driver_identity` columns and copied verbatim
-to the connection-fenced hardware projection). `<N>` must be non-negative.
+nonempty `capacity.gpus[].driver_identity`; all three are copied verbatim
+from the same authenticated `capacity` message into the connection-fenced
+`host_hardware_evidence.gpus` projection. Generic retained GPU columns do
+not authorize Automatic review.
 Invalid fields leave Automatic unresolved. The agent and
 control plane reject NUL in any field; `\0` denotes byte 0x00 and `\n`
 denotes byte 0x0A in these encodings. `host_probe_result.id` is lowercase SHA-256 of UTF-8
 `media_probe_gpu<N>\0<accessible_device.id>\0<connection_incarnation>\0host_probe\0pass\n`,
 where the device ID is the lowercase digest above and the connection ID is
-the lowercase hyphenated UUID of the current authenticated socket. The
+the lowercase hyphenated UUID from this socket's `registered.connection_incarnation`
+(§registration, above), freshly minted by the control plane and bound by the
+agent to this authenticated WebSocket. A grant on another socket cannot
+recompute this fact and is rejected. The
 passing readiness check still carries a nonempty ASCII RFC3339 `observed_at`
 from this agent process, but that timestamp is not in the fact ID; repeated
 passes on the same device during one connection do not invalidate a waiting
-approval. A later failed or indeterminate outcome makes the fact unavailable.
+approval. A later `fail`, `skip` or `unknown` outcome replaces the pass
+and makes the fact unavailable.
 Both fact objects are included in the sorted `prerequisites` and its digest.
 For a restart group, `seeded_group_digest.id` or
 `last_verified_group_digest.id` is exactly the current active snapshot
@@ -2417,13 +2423,12 @@ fact kind. Before durable acceptance the agent recomputes this fact from its
 own current active snapshot, as well as both hardware facts from its
 accessible device inventory and
 **most recent** real media host probe for that GPU immediately before accepting
-the grant. That most recent result must itself be `pass`; a later failed,
-skipped or indeterminate probe rejects the old passing result.
+the grant. That most recent readiness outcome must itself be `pass`; a
+later `fail`, `skip` or `unknown` rejects the old passing result.
 It rejects a path it cannot open or a result whose device identity no longer
 matches, even if the control plane saw a later database receipt time. The
 agent retains the device identity used by the probe and rejects a result from
-an earlier agent process incarnation. A later real media probe replaces the
-earlier result even when it fails or is indeterminate. The
+an earlier agent process incarnation. The
 control plane uses database receipt times only to exclude pre-connection
 reports; its clock and the agent's probe clock are not compared.
 

@@ -8281,7 +8281,7 @@ with `encode_slots_total > 0` and a nonempty `render_node`; its
 `media_probe_gpu<N>` check must have `source=host_probe`, `status=pass`
 and a nonempty `observed_at`. The current connection's journal gate must
 also be complete. A device path merely
-seen in sysfs or a previous connection never qualifies. The check's GPU
+seen in sysfs or a previous connection's report never qualifies. The check's GPU
 index must equal the selected GPU's reported index; missing driver identity
 leaves Automatic unresolved. Multiple eligible GPUs are ambiguous unless an
 explicit render node selects exactly one of them. Existing encoder preference maps NVIDIA
@@ -8291,7 +8291,7 @@ node. Explicit `render_node` must match the selected probed node when paired
 with Automatic encoder. A deployment choice still uses only its reported
 pre-policy baseline, even when another hardware key is Automatic.
 Within one connection, a repeated passing probe on the same device keeps
-the same `host_probe_result` fact; a later failed or indeterminate probe
+the same `host_probe_result` fact; a later `fail`, `skip` or `unknown` result
 removes availability. On a relevant device/probe fact or availability change,
 the control plane supersedes a waiting approval, rotates host restart review
 IDs under the host lock, and moves an offered approval to `cancel_pending`
