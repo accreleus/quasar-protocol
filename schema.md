@@ -2636,6 +2636,59 @@ cordon time cannot be reconstructed.
 
 ### 0089 — boot fence, approvals, attempts and journal inventory
 
+Migration 0089 creates internal
+`host_hardware_evidence(host_id UUID PRIMARY KEY REFERENCES hosts(id) ON DELETE
+CASCADE, connection_incarnation UUID NOT NULL, gpus JSONB NOT NULL CHECK
+(jsonb_typeof(gpus)='array'), readiness JSONB NOT NULL CHECK
+(jsonb_typeof(readiness)='array'), received_at TIMESTAMPTZ NOT NULL DEFAULT
+now())`. A write accepts one validated capacity report's GPU and readiness
+arrays in a host-locked transaction only if its authenticated socket's
+connection incarnation matches the journal gate. Authentication sets that
+connection on the gate as it enters `pending`, before the first capacity
+report; projection writes are accepted while the matching gate is `pending`
+or `complete`. A quarantined gate and any disconnected socket cannot
+authorize a preview. A report missing readiness
+or carrying invalid evidence **deletes** this connection's projection; a stale
+socket cannot update or clear it. Every accepted report refreshes
+`received_at` on the database clock even when content is unchanged. Preview
+requires this row's connection to equal the complete gate's connection and
+`received_at >= hosts.last_registered_at`. Generic retained GPU/readiness
+columns may be overwritten by an old handler and never authorize Automatic
+review. A relevant projection fact or availability change supersedes a
+waiting approval and rotates all host restart review IDs in the same host
+transaction; an offered approval becomes `cancel_pending` and retains its
+restriction until authenticated nonacceptance. Agent-side final checks remain
+the authority for actual device accessibility and most recent probe outcome.
+When the authenticated current socket disconnects, the same host-locked
+fence clears the journal gate's connection incarnation, sets the gate to
+`pending`, deletes its hardware projection and applies those
+supersession/rotation rules. The reconciliation restriction remains or is
+recreated until a new authenticated connection completes inventory. A late
+write from the disconnected socket cannot match the cleared gate, and no
+preview can use its old active snapshot.
+A displaced old socket cannot delete the new connection's projection.
+Migration 0089 also records the bounded current-connection heartbeat list in
+`host_idle_inventory(host_id UUID PRIMARY KEY REFERENCES hosts(id) ON DELETE
+CASCADE, connection_incarnation UUID NOT NULL, running_sessions JSONB NOT NULL
+CHECK (jsonb_typeof(running_sessions)='array'), reported_at TIMESTAMPTZ NOT
+NULL DEFAULT now())`. Only an authenticated heartbeat with an explicit
+`running_sessions` array may replace it under the host lock while its socket
+matches a pending or complete journal gate. A missing list is unknown, not an
+empty list. At most 1024 nonempty IDs of at most 64 bytes are admitted;
+an oversized or malformed list is unknown. Boot, reconnect and current-socket disconnect clear the row in
+the same host-locked fence; old-socket writes cannot restore it. A status
+read treats the list as current only when its connection equals the complete
+gate, its database receipt is after registration and at most 30 seconds old.
+This is operator wait evidence, never independent permission to execute.
+On reconnect the pending gate fences every old review and the old
+connection-bound hardware projection; a new passing report must establish
+new evidence. Any inventory that both reveals acceptance and changes a
+snapshot reconciles the accepted attempt first, so a started attempt is
+never reclassified as unstarted. All receipt timestamps here are set by
+the same database. Registration writes `last_registered_at` before any
+capacity report is admitted; each accepted report refreshes its projection
+receipt time even if no field changed.
+
 `rh05_control_boot` is a singleton (`id BOOLEAN PRIMARY KEY CHECK (id)`,
 `incarnation UUID NOT NULL`, `started_at TIMESTAMPTZ NOT NULL`) in the **same
 database** as approvals. Every control-plane process start, including a start
@@ -2650,15 +2703,26 @@ fence an approval resurrected by restore.
 Only one control-plane boot is active; live database rewind is outside the
 supported restore guarantee.
 
+The approval, review-token, issued-token and attempt tables first ship together
+in migration 0089; there are no pre-0089 approval rows or indexes to backfill.
+That migration seeds current review-token and issued-token rows for every
+existing saved restart group. Newly saved restart groups seed both rows in the
+same policy transaction.
+
 `host_config_approvals`: `id UUID PRIMARY KEY`, `host_id UUID NOT NULL REFERENCES
 hosts(id) ON DELETE CASCADE`, `group_key TEXT NOT NULL`, `revision BIGINT NOT NULL
 CHECK (revision >= 0)`, `approved_digest TEXT NOT NULL`, `prerequisites_digest
-TEXT NOT NULL`, `boot_incarnation UUID NOT NULL`, `expires_at TIMESTAMPTZ NOT
-NULL`, `state TEXT NOT NULL CHECK (state IN ('approved','offered',
+TEXT NOT NULL`, `boot_incarnation UUID NOT NULL`, `review_id UUID NOT NULL`,
+`expires_at TIMESTAMPTZ NOT NULL`, `state TEXT NOT NULL CHECK (state IN ('approved','offered',
 'cancel_pending','superseded','expired','accepted','revoked_unstarted'))`,
-`created_at TIMESTAMPTZ NOT NULL DEFAULT now()`. A partial unique index allows
-one live unstarted approval per `(host_id,group_key)` where state is `approved`,
-`offered` or `cancel_pending`. An edit to the group's
+`created_at TIMESTAMPTZ NOT NULL DEFAULT now()`, unique
+`(host_id,group_key,review_id)` for deterministic replay lookup. A partial unique index allows
+one live unstarted approval per **host** across groups where state is `approved`,
+`offered` or `cancel_pending`; this covers the waiting grant before an agent offer.
+The host-row lock and a recheck of this index plus the open restart-attempt index
+serialize the handoff to an offered attempt. An unoffered grant is not recorded
+as `host_config_attempts.phase='offered'`. `review_id` is the durable replay identity for
+this approval even after the current review token rotates. An edit to the group's
 source, value or prerequisite supersedes it; an unrelated safe edit preserves
 it. Cancellation or supersession fences further grants in the database before
 revocation is sent. Only confirmed nonacceptance releases the idle restriction
@@ -2666,6 +2730,83 @@ before execution. A lost revocation response retains `cancel_pending` and the
 restriction until complete authenticated inventory settles whether acceptance
 occurred. Expiry is checked with the boot ID and prerequisite digest at dispatch,
 not just by a periodic sweep.
+The approval ID is the public attempt ID throughout waiting, cancellation and
+terminal unstarted reads; `host_config_attempts.id` takes that same value only
+at offer. A host-locked transaction inserts the `offered` attempt and changes
+approval state to `offered` before any send. After a process boot, old
+`approved` rows move to `cancel_pending` and retain their admission hold until
+complete authenticated current-connection journal inventory proves no record
+under their ID; a stopped-stack database restore may have erased a later offer.
+On a same-boot reconnect, `approved` may revoke locally and `offered` becomes
+`cancel_pending`. All transitions and review-ID rotations are atomic. Missing
+current token rows make preview and grants unavailable. Migration 0089 seeds
+tokens for existing restart groups with saved policy.
+Agent acceptance advances both rows to `accepted` atomically. Confirmed
+nonacceptance of an offered grant terminalizes the approval and writes the
+attempt's `revoked_unstarted` phase and `terminal_at` in the same transaction.
+If stopped-stack restore erased an accepted attempt, authenticated journal
+reconciliation recreates it under the approval's ID before releasing the gate.
+That transaction also moves a restored `cancel_pending` approval to `accepted`.
+The recreated row starts at the authenticated inventory phase and journal
+sequence. Later authenticated state or inventory updates only advance to a
+forward-reachable phase in the agent journal graph with a strictly increasing
+per-attempt `journal_sequence` (so missed intermediate reports do not cause
+false quarantine), or repeat
+identical content at the same sequence), as required by `agent-api.md` §config
+policy journal. Older or conflicting reports are ignored or quarantine the
+host: a lower sequence is ignored; the same sequence with different content,
+or an illegal phase edge, quarantines the host. Neither case clears
+`terminal_at`, releases protection or rotates review IDs. The control-plane-only
+`offered` row has NULL `journal_sequence`; the first authenticated
+`accepted` report supplies its initial sequence. A confirmed pre-acceptance
+`revoked_unstarted` terminal row keeps NULL sequence. A control-plane recovery
+decision that terminalizes a journaled `failed` or `uncertain` row retains its
+last authenticated sequence and does not impersonate a new agent journal report.
+Once set, `terminal_at` is never cleared. `failed` becomes terminal only after
+an explicit durable decision that recovery is impossible or after its authorized
+recovery reaches a proven terminal outcome; stale `failed` cannot terminalize
+an in-progress recovery.
+The approval row is the phase authority until acceptance or terminal
+nonacceptance; after acceptance the attempt row is authoritative.
+An invalidated approval with uncertain nonacceptance physically remains
+`cancel_pending`, indexed and held. `superseded` and `expired` are terminal only
+after confirmed nonacceptance, and project as `revoked_unstarted`.
+Every writer of approval state, attempt phase, protective restriction or review
+token—including grant, offer, acceptance, terminal outcome, cancellation,
+supersession, inventory, boot, expiry sweep and restriction release—locks in this order:
+host row, policy revision, groups and choices, all restart-group review-token
+rows in ascending `group_key`, then approval and attempt rows, then restrictions.
+No database lock is held across agent transport. A grant
+also checks protective restrictions owned by a terminal `uncertain` restart
+attempt, since that attempt has `terminal_at` set and is outside the open-attempt
+partial index.
+
+`host_approval_review_tokens`: `(host_id UUID REFERENCES hosts(id) ON DELETE
+CASCADE, group_key TEXT)` primary key,
+`review_id UUID NOT NULL`. The token is seeded when a restart group first gains
+saved policy and rotated for the host-wide disruptive lifecycle triggers below.
+A token value is
+never reused for the same host/group within one boot: UUIDv4 generation is
+checked against durable issued IDs and retries a collision. Rotation and its
+triggering phase change commit in the same transaction. A grant locks this row
+`FOR UPDATE` before comparing the token and inserting the approval, and
+rechecks availability under that lock. The row survives ordinary
+restarts; the separate boot incarnation still changes on every process start.
+Review IDs for all restart groups on a host rotate together when an approval
+exits `approved` or `offered` for `cancel_pending` or a terminal state, or
+exits `cancel_pending` for a terminal state; an accepted restart attempt reaches terminal outcome;
+an unresolved disruptive admission hold resolves, connection/journal authority
+changes, or complete authenticated inventory reconciliation opens disruptive
+availability; this rotation commits with the triggering transition. Unrelated safe
+next-session edits, ordinary session activity and unrelated owner holds do not
+rotate them. Existing grants remain governed by their reviewed facts, expiry,
+boot and connection, independent of the current token.
+`host_approval_review_issued`: `(host_id UUID REFERENCES hosts(id) ON DELETE
+CASCADE, group_key TEXT, review_id UUID)` primary key. Seed and rotation insert
+here in the same transaction as updating the current token; a uniqueness
+collision generates another UUIDv4. Rows survive ordinary process restarts;
+the separate boot-incarnation fence protects a stopped-stack database restore
+that rolls back this history.
 
 `host_config_attempts`: `id UUID PRIMARY KEY`, `host_id UUID NOT NULL REFERENCES
 hosts(id) ON DELETE CASCADE`, `group_key TEXT NOT NULL`, `approved_digest TEXT NOT
@@ -2709,7 +2850,29 @@ plus revision/digest readback; restart proof is startup verification after resta
 `host_journal_reconciliation`: `host_id UUID PRIMARY KEY REFERENCES hosts(id) ON
 DELETE CASCADE`, `boot_incarnation UUID NOT NULL`, `connection_incarnation UUID
 NULL`, `state TEXT NOT NULL CHECK (state IN ('pending','complete','quarantined'))`,
-`completed_at TIMESTAMPTZ NULL`, `continuation_cursor TEXT NULL`. On every new
+`completed_at TIMESTAMPTZ NULL`, `continuation_cursor TEXT NULL`.
+Migration 0089 also creates internal
+`host_journal_active_snapshots(host_id UUID REFERENCES hosts(id) ON DELETE
+CASCADE, group_key TEXT NOT NULL, connection_incarnation UUID NOT NULL, kind TEXT
+NOT NULL CHECK (kind IN ('seeded','verified')), digest TEXT NOT NULL CHECK
+(digest ~ '^[0-9a-f]{64}$'), observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+PRIMARY KEY(host_id,group_key))`. `observed_at` is the database receipt time
+set in the gate-opening transaction, never an agent clock. Its rows are an authenticated
+current-connection projection, not a new source of applied proof. After
+validating every inventory page and its stable header, the control plane
+replaces the host's snapshot rows in the **same host-locked transaction** that
+opens the gate. Preview uses a row only when its connection equals the complete
+gate's current connection. A missing row leaves the restart candidate
+unavailable; `seeded` supplies `seeded_group_digest` and `verified`
+supplies `last_verified_group_digest`. A snapshot added, removed, or changed
+in digest or kind on a later
+authenticated inventory is a relevant prerequisite change: supersede an
+unstarted approval for that group and rotate all host restart review IDs in that same
+transaction, retaining an offered grant's restriction until nonacceptance
+proof. This projection does not overwrite `host_setting_groups.applied_digest`
+or convert `seeded` into application evidence. On boot/reconnect, the gate
+closes before any old snapshot row can be used.
+On every new
 control-plane boot and relevant agent reconnect, this gate is pending until the
 authenticated agent's **complete** journal inventory, including attempts absent
 from the database, is consumed. Inventory must have bounded pages or continuation

@@ -8215,7 +8215,31 @@ per-atomic-group `desired_revision`, `applied_revision`, `desired_digest`,
 resolved value/source, evidence time/freshness and actionable reason/remedy.
 For each restart group, `approval_preview` supplies a server-derived reviewed
 candidate: availability/remedy, desired revision, content digest, exact resolved
-values, and the sorted prerequisite facts and digest. It is null for
+values, the sorted prerequisite facts and digest, the current
+`approval_boot_incarnation`, and a server-issued `approval_review_id`. A
+candidate is unavailable until complete authenticated current-connection
+journal inventory reconciles.
+The inventory's active snapshot for this restart group is persisted only as
+an internal current-connection projection when the complete gate opens. A
+missing projection leaves approval unavailable. Its `seeded` or `verified`
+kind and digest enter the reviewed prerequisites as
+`seeded_group_digest` or `last_verified_group_digest`; a changed snapshot
+supersedes only a relevant unstarted approval and rotates review IDs under the
+host lock. A seed never claims application.
+The review ID stays stable when a grant is
+created and while it remains waiting or offered. All restart-group review IDs
+on this host rotate when an approval exits `approved` or `offered` for
+`cancel_pending` or a terminal state, or exits `cancel_pending` for a terminal state,
+an accepted restart attempt reaches a terminal outcome, an unresolved disruptive
+admission hold resolves, connection or
+journal authority changes, or complete authenticated inventory reconciliation
+opens disruptive availability. Each rotation issues a fresh random UUID never reused
+for that host and group within the same boot. Every rotation commits in the same
+transaction as its triggering change. UUIDv4 generation checks
+durable issued IDs and retries a collision. The approval transaction locks all
+restart-group review-token rows in `group_key` order before comparing the token and inserting the grant, and
+rechecks availability under that lock. A fresh operator read can reapprove
+unchanged saved intent. It is null for
 next-session groups. The operator sends this tuple to idle apply with a chosen
 expiry; the server rechecks it under the approval transaction. A stale preview
 returns a conflict, never approval of changed facts. The preview is an
@@ -8265,6 +8289,40 @@ Automatic is supported only for the encoder/render-node hardware group and needs
 accessible-device plus passing host-probe evidence. The current 39-key
 source/effect/evidence matrix is `quasar/docs/design/rh05-contract-proposal.md`;
 new catalog keys declare those properties before typed policy accepts them.
+For this group, the control plane uses only the internal `host_hardware_evidence`
+projection of **one** authenticated current-connection `capacity` report
+containing both GPU inventory and readiness checks. Its write takes the host
+lock, checks the journal gate's connection incarnation, and refuses a stale
+socket; the database `received_at` must be at or after
+`hosts.last_registered_at`. Generic retained `gpus` and `hosts.readiness`
+columns are not Automatic approval authority. A selected GPU must be reported
+with `encode_slots_total > 0` and a nonempty `render_node`; its
+`media_probe_gpu<N>` check must have `source=host_probe`, `status=pass`
+and a nonempty `observed_at`. The current connection's journal gate must
+also be complete. A device path merely
+seen in sysfs or a previous connection's report never qualifies. The exact
+`media_probe_gpu<N>` ID is reserved for this RH05 Automatic fact: `<N>` is the
+selected `capacity.gpus[].index`, and any `blocks.gpu_index` must agree.
+Codec-probe IDs with a suffix do not qualify; missing or renamed media-floor
+checks leave Automatic unresolved. Missing driver identity
+leaves Automatic unresolved. Multiple eligible GPUs are ambiguous unless an
+explicit render node selects exactly one of them. Existing encoder preference maps NVIDIA
+and AMD to `vulkan`, Intel to `va`; an unrecognized vendor is unresolved.
+Automatic render-node resolution chooses only that one probed accessible
+node. Explicit `render_node` must match the selected probed node when paired
+with Automatic encoder. A deployment choice still uses only its reported
+pre-policy baseline, even when another hardware key is Automatic.
+Within one connection, a repeated passing probe on the same device keeps
+the same `host_probe_result` fact. An inconclusive later attempt retains the
+last definitive pass and its original observation time; a subsequently
+reported non-pass result removes availability. On a relevant device/probe fact or availability change,
+the control plane supersedes a waiting approval, rotates host restart review
+IDs under the host lock, and moves an offered approval to `cancel_pending`
+with its restriction intact until authenticated nonacceptance. An agent
+rejection of an offered grant likewise settles as `revoked_unstarted` only
+after durable nonacceptance proof. Existing media probes run at startup and
+on relevant device, driver, settings or failure triggers; an unchanged
+passing result does not churn waiting approval.
 
 `PATCH /v1/admin/hosts/{id}/policy` takes
 `{"expected_revision":"12","changes":{"gop":{"source":"explicit","value":90}}}`.
@@ -8314,12 +8372,30 @@ the host remains unavailable for new sessions and that group shows
 plane never sends its pending desired value through the legacy map; that
 older agent cannot restore a typed active snapshot.
 
-`POST /v1/admin/hosts/{id}/policy/retry` takes `{"group":"<key>"}`. A
-transient exhausted group can retry with bounded backoff; invalid intent is not
-retryable. A disruptive retry needs fresh scoped approval. Typed errors include
+`POST /v1/admin/hosts/{id}/policy/retry` takes `{"group":"<key>"}` and re-arms
+one next-session group whose transient retry budget is exhausted: its `status`
+is `failed` and the code before the first `:` in its `remedy` is exactly
+`retry_exhausted`. The status check and budget reset are one transaction; two
+concurrent requests cannot each reset the budget. Success is
+`200` with the typed view, the group `pending` again at the current desired
+revision with a fresh bounded backoff budget. Retry grants no approval and
+proves no application. Besides the standard admin `401` and `403`, its other
+responses are: `400 validation_failed` for a malformed body or a `group` that
+is not a catalog policy group; `404 not_found` for an unknown host; and
+`409 conflict` for a
+group not waiting for Retry, meaning status `pending`, `applied`,
+`upgrade_required` or `uncertain`, status `failed` with any other remedy code
+(the host rejecting invalid intent is `validation_failed`), or any
+restart-scope group whatever its status. Every non-`200` response writes
+nothing. Invalid intent is never retried; change the setting instead. A
+restart-scope group is never re-armed by Retry; it proceeds only through a
+fresh scoped approval via `POST /v1/admin/hosts/{id}/idle-apply`.
+
+Across the typed policy routes, group remedy codes and route errors include
 `unsupported_source`, `upgrade_required`, `group_execution_unavailable`,
-`attempt_conflict`, `retry_exhausted` and
-`recovery_uncertain`.
+`attempt_conflict`, `retry_exhausted` and `recovery_uncertain`. Retry returns
+none of these as a response; `retry_exhausted` is the remedy code that makes
+a group eligible for Retry.
 
 ### Existing settings PATCH and restart: explicit behavior amendment
 
@@ -8375,13 +8451,76 @@ reconnect; it is not configuration-applied status.
 ### Idle apply, cancellation and recovery
 
 `POST /v1/admin/hosts/{id}/idle-apply` takes a group key, reviewed decimal-string
-revision, content digest and prerequisite digest. Success is `202` with stable
-`attempt_id` and `waiting`; mismatched review or another open disruptive
+revision, content digest, prerequisite digest and the preview's
+`approval_boot_incarnation` and `approval_review_id`. The server compares both
+under the approval transaction; a delayed pre-restart or pre-attempt request
+cannot create a fresh grant from an unchanged policy digest. A boot-token or
+review-ID mismatch for a new grant is `409 approval_superseded` and writes
+nothing. The server checks the boot token and request expiry first. An identical
+replay in `waiting` or `offered` returns `202` with the same attempt; replay in
+`cancel_pending` or `revoked_unstarted` returns `409 approval_superseded`;
+any other open disruptive phase returns `409 attempt_conflict` with the current
+attempt. Replay after `applied`, `recovered`, resolved `uncertain` or terminal
+`failed` returns `409 approval_superseded`. Only a new grant reaches the review-ID check; the transaction locks
+all restart-group review-token rows in ascending `group_key` before that comparison, rechecks availability, and inserts
+the grant atomically. Each process boot generates a new token even after a stopped-stack
+restore; this version supports one active control-plane approval authority. A
+request whose expiry has passed is
+`409 approval_superseded`. A new grant returns `202` with a stable
+`attempt_id` in `waiting`; identical replay returns `202` with that attempt's
+current `waiting` or `offered` phase. Mismatched review or another open disruptive
 attempt is `409 approval_superseded|attempt_conflict`. Approval binds only the
 reviewed disruptive group, its resolved values and relevant facts. An unrelated
 safe edit preserves it; a relevant edit supersedes it before durable acceptance.
 Every control-plane boot expires unstarted approval. A grant from an old boot
 or agent connection is rejected.
+
+The approval row's `id` is the public `attempt_id` while waiting and after an
+unstarted terminal outcome. At offer, one host-locked transaction inserts
+`host_config_attempts.id = host_config_approvals.id` in phase `offered` and moves
+the approval to `offered`; it commits **before** sending any bytes to the agent.
+Authenticated durable acceptance moves both rows to `accepted` in one
+host-locked transaction. Confirmed nonacceptance moves an offered attempt to
+`revoked_unstarted` with `terminal_at` and terminalizes the approval in that
+same transaction. If a restored approval has a matching accepted agent record
+but its attempt row is missing, reconciliation recreates that row under the
+approval ID before releasing the inventory gate. The approval row decides the
+public GET/replay phase until acceptance or terminal nonacceptance; after
+acceptance the attempt row decides it. A resolved terminal `uncertain` attempt
+replay is `409 approval_superseded`.
+The host-wide approval and restart-attempt uniqueness fences overlap through
+this handoff. Cancel and offer take the same host lock. `approved` projects as
+`waiting`. If nonacceptance is uncertain, an invalidated approval physically
+stays `cancel_pending`, covered by the host-wide live index and its admission
+hold. Only after proof may it become terminal `superseded`, `expired` or
+`revoked_unstarted`, each projected as `revoked_unstarted`. A request with the
+current review ID but different body while a live approval exists returns
+`409 attempt_conflict` with that attempt. Both host-wide unique-index conflicts
+map to that response. A new grant also rejects a terminal `uncertain` attempt
+whose protective restriction remains unresolved. A live grant makes the
+preview unavailable for a second grant. A host disruptive lifecycle change
+rotates review IDs for **all** restart groups on that host: an approval exits
+`approved` or `offered` for `cancel_pending` or a terminal state, or exits
+`cancel_pending` for a terminal state; an accepted restart attempt reaches a terminal outcome; an
+unresolved disruptive admission hold resolves, connection/journal authority
+changes, or complete authenticated inventory reconciliation opens disruptive
+availability. Rotation commits with that change. An unrelated safe next-session
+edit, ordinary session activity or unrelated owner hold leaves the IDs stable.
+An ID observed while a disruptive preview was unavailable cannot later become
+a new grant merely because host disruptive availability returned. An existing
+approval remains governed by its reviewed facts, expiry, boot and connection;
+rotation alone does not revoke it.
+
+After a control-plane boot, even an approval restored as `approved` may have
+been offered and accepted after the database snapshot. It becomes
+`cancel_pending` and keeps its own restriction until complete authenticated
+current-connection journal inventory proves its ID absent; a found journal
+record is reconciled as accepted work: the restored `cancel_pending` approval
+becomes `accepted`, while its matching attempt takes the authenticated journal
+phase and sequence (`accepted` or later), in the same transaction. A same-boot reconnect may revoke an
+`approved` row locally because offer always commits first; an `offered` row
+becomes `cancel_pending` until journal proof. Boot and reconnect rotate the
+review ID in the same transaction as those transitions.
 
 Requesting idle apply acquires only its own admission restriction. It waits for
 assigned, starting, running and stopping sessions (including local sessions),
@@ -8389,6 +8528,20 @@ plus conflicting preparation and confirmed cleanup. Unknown inventory is never
 idle. No waiting deadline kills sessions. The agent's fsynced `accepted` journal
 record is the exact execution start; delivery and ack are not. A post-start
 edit is subsequent work.
+The `waiting` attempt's `remedy` reports why it is waiting using current
+authenticated heartbeat inventory plus persisted assigned/starting/running/
+stopping rows, including local-only console sessions with control-plane rows.
+Agent-reported IDs absent from those active rows are untracked managed
+sessions: existing orphan-stop behavior applies, and they remain idle
+blockers until the agent confirms absence. Missing,
+stale (over 30 seconds), offline or older-agent heartbeat inventory is
+reported as unknown. Current source-preparation states `queued`, `preparing`,
+`waiting_image`, `deferred` and `failed`, and pending/running host jobs show
+conflicting preparation or cleanup. A current `ready` or `disabled` report
+after terminal cleanup clears that reported blocker; absent current
+preparation evidence is unknown. Even an observed empty inventory does not make #338 execute:
+the later executor rechecks under admission and with the agent before any
+durable acceptance. An operator may cancel the waiting approval at any time.
 
 `POST /v1/admin/hosts/{id}/idle-apply/{attempt_id}/cancel` returns `200
 cancelled` only after confirmed agent nonacceptance. A lost revocation response
@@ -8400,6 +8553,15 @@ failure. Uncertain recovery keeps admission protected with a remedy. After a
 control-plane boot or supported stopped-stack restore, the full authenticated
 agent journal (including orphan attempts) is reconciled before an RH05 host can
 take assignments.
+
+`GET /v1/admin/hosts/{id}/idle-apply/{attempt_id}` is an admin read of the
+current or terminal `IdleApplyAttempt` for that host. It returns `404` when the
+attempt does not belong to the host. It has no admission or execution side
+effect and lets the console refresh phase, started and restriction status after
+reload. An unswept expiry can still read as `waiting` with its hold; approval
+replay and dispatch check expiry synchronously and refuse it. A sweep settles
+the durable state without ever treating time expiry as agent nonacceptance for
+an offered or restored approval.
 
 ### Active admission reasons on the existing Host response
 

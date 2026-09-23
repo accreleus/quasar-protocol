@@ -679,6 +679,19 @@ unchanged. This sentence exists so a `codec` scope is not added later without a 
 Sent every `heartbeat_interval_ms`. Updates `hosts.last_heartbeat_at`. `running_sessions` lets
 the control plane reconcile its view against the agent's ground truth (detect orphans both ways).
 Missing N consecutive heartbeats ⇒ host `offline`, its sessions `failed`, reservations released.
+For RH05 idle waiting, an explicit `running_sessions` array is the current
+agent's complete list of its live control-plane-managed sessions on this
+socket, including local-only console sessions that still have control-plane
+session rows. The existing orphan-stop rule in §Reconnection continues to
+apply to unknown IDs; their presence blocks idle until confirmed absent,
+without treating them as a new class of authorized local session.
+The control plane accepts the list into internal `host_idle_inventory` only
+when the authenticated connection incarnation matches the pending or complete
+journal gate. An absent/null list, stale heartbeat, lost socket or older agent
+is unknown for idle status, never an empty list. Assigned, starting and
+stopping control-plane rows are counted separately because they may not yet
+or no longer appear in this running list. The later executor must recheck
+quiescence locally before durable acceptance; the heartbeat alone is advisory.
 
 `gpu_vram` *(NEW, #383, optional, additive)* — a live per-GPU memory sample, `index` matching the
 GPU's index in the `capacity` report. `used_mb` / `free_mb` are each **optional**: an omitted or
@@ -2412,7 +2425,30 @@ array. Each fact is `{"kind":"<kind>","id":"<id>"}` with nonempty UTF-8
 strings containing neither NUL nor LF. Include only facts required by the
 group: relevant agent image digest, driver identity, accessible device
 identities, required passing host-probe result IDs, and last verified group
-digest (or seeded group digest before first verification). Sort facts bytewise
+digest (or seeded group digest before first verification). Every restart
+approval includes exactly one `{"kind":"accepted_attempts","id":"<sha256>"}`
+fact for that group. Its ID is the lowercase 64-character hex SHA-256 of the
+group's complete durable set of accepted attempt records, sorted bytewise by
+lowercase 36-character hyphenated attempt UUID. Encode each record as that
+UTF-8 UUID, one NUL byte, its current journal phase, one LF byte; concatenate
+and SHA-256 the bytes. The empty set hashes the empty
+byte sequence. Current phases are `accepted`, `activating`, `awaiting_startup`,
+`verifying`, `applied`, `failed`, `recovery_verifying`,
+`recovery_awaiting_startup`, `recovered`, and `uncertain`. An unknown phase,
+missing record, or incomplete inventory makes the fact indeterminate and
+blocks approval. An agent rejects a missing or mismatched fact before durable
+acceptance, including when the grant claims the empty set but its journal has
+an accepted attempt. The agent also refuses a new grant while any restart
+attempt of any group
+in its journal remains open. Accepted records cannot be pruned in RH05. If a
+complete authenticated inventory omits an accepted record known to the control
+plane, the host remains quarantined; omission is never revocation. Simultaneous
+loss of both the database and agent journal is outside the supported restore
+guarantee. The control plane constructs the
+fact only from complete authenticated current-connection inventory, never
+from a partial or restored database alone. An approval never offered to the
+agent is fenced by the control-plane-only `approval_review_id` and is not an
+agent prerequisite. Sort facts bytewise
 by `(kind,id)`; encode each as UTF-8 `kind`, one
 NUL byte, UTF-8 `id`, one LF byte; concatenate and SHA-256 that byte stream.
 When any choice has `source=deployment`, include exactly one additional fact
@@ -2439,6 +2475,54 @@ before durable acceptance. Any changed, missing, or indeterminate fact rejects
 the grant without activation; sysfs presence alone cannot satisfy device
 accessibility. Scope is `next_session` or `restart`. Expiry is an RFC3339 UTC
 instant.
+For Automatic hardware, `accessible_device.id` is lowercase SHA-256 of UTF-8
+`gpu\0<N>\0<render_node>\0<driver_identity>\n`, where `<N>` is the
+canonical non-negative decimal `capacity.gpus[].index` without leading
+zeros, `<render_node>` is the exact
+nonempty `capacity.gpus[].render_node`, and `<driver_identity>` is the exact
+nonempty `capacity.gpus[].driver_identity`; all three are copied verbatim
+from the same authenticated `capacity` message into the connection-fenced
+`host_hardware_evidence.gpus` projection. Generic retained GPU columns do
+not authorize Automatic review.
+Invalid fields leave Automatic unresolved. The agent and
+control plane reject NUL in any field; `\0` denotes byte 0x00 and `\n`
+denotes byte 0x0A in these encodings. `host_probe_result.id` is lowercase SHA-256 of UTF-8
+`media_probe_gpu<N>\0<accessible_device.id>\0<connection_incarnation>\0host_probe\0pass\n`,
+where `media_probe_gpu<N>` is an RH05 Automatic-only exception to the
+general readiness rule that consumers do not key on check IDs: the agent
+MUST keep this exact ID for its GPU media-floor probe. `<N>` in that ID
+binds the check to `capacity.gpus[].index` and, when `blocks` is present,
+must equal `blocks.gpu_index`. A renamed or missing check leaves Automatic
+unresolved. Codec checks such as `media_probe_gpu<N>_av1` never qualify.
+The device ID is the lowercase digest above and the connection ID is
+the lowercase hyphenated UUID from this socket's `registered.connection_incarnation`
+(§registration, above), freshly minted by the control plane and bound by the
+agent to this authenticated WebSocket. A grant on another socket cannot
+recompute this fact and is rejected. The
+passing readiness check still carries a nonempty ASCII RFC3339 `observed_at`
+from this agent process, but that timestamp is not in the fact ID; repeated
+passes on the same device during one connection do not invalidate a waiting
+approval. The reported last **definitive** result remains authoritative under
+the existing host-probe retention rule: an inconclusive later attempt keeps
+the prior pass and original `observed_at`; any subsequently reported status
+other than `pass` makes this fact unavailable.
+Both fact objects are included in the sorted `prerequisites` and its digest.
+For a restart group, `seeded_group_digest.id` or
+`last_verified_group_digest.id` is exactly the current active snapshot
+digest carried in that group's authenticated inventory; its kind selects the
+fact kind. Before durable acceptance the agent recomputes this fact from its
+own current active snapshot, as well as both hardware facts from its
+accessible device inventory and
+current retained definitive media host-probe result for that GPU immediately
+before accepting the grant. That reported result must be `pass`; an
+inconclusive later attempt does not clear a retained pass, while any
+subsequently reported non-pass result rejects the old passing fact.
+It rejects a path it cannot open or a result whose device identity no longer
+matches, even if the control plane saw a later database receipt time. The
+agent retains the device identity used by the probe and rejects a result from
+an earlier agent process incarnation. The
+control plane uses database receipt times only to exclude pre-connection
+reports; its clock and the agent's probe clock are not compared.
 
 ```json
 {
@@ -2468,7 +2552,11 @@ An offer is a **grant**, not an execution record. The agent checks its authentic
 current connection, boot and connection incarnations, host ID, capability, expiry,
 revision, digest and current prerequisites. A stale grant from an earlier boot or
 connection, changed prerequisite, wrong host, unsupported capability, or changed
-content is rejected without activation. A duplicate `attempt_id` with identical
+content is rejected without activation. Before serving journal inventory on a
+new authenticated connection, the agent fences acceptance on every older
+connection and boot incarnation. That fence is checked immediately before
+durable acceptance, so an old queued grant cannot become accepted after
+current-connection inventory proves its ID absent. A duplicate `attempt_id` with identical
 content returns the journaled phase/result; a different digest or identity for
 that ID is `attempt_conflict`. A restart-scope offer also requires zero assigned,
 starting, running and stopping sessions (including local sessions), no conflicting
@@ -2515,7 +2603,11 @@ or process restart. Phases are `accepted`, `activating`, `awaiting_startup`,
 `revoked_unstarted`. The control plane's `offered` phase means a grant was
 sent, not accepted. Each state carries the same attempt identity and an increasing
 `journal_sequence` per attempt. A repeated sequence with byte-identical content
-is idempotent; conflicting content at one sequence is rejected. The control plane
+is idempotent; conflicting content at one sequence is rejected. A higher sequence
+may advance to a forward-reachable later journal phase after intermediate
+reports were lost on a disconnected socket. The agent treats `failed` and
+`uncertain` as open for new-grant exclusion until durable proof of the
+authorized recovery decision or resolution; ambiguity fails closed. The control plane
 accepts state only from the host's current authenticated connection for a matching
 durable attempt or during the full inventory reconciliation below. An older group
 revision cannot advance a newer desired group; a result for one group cannot
