@@ -4829,14 +4829,33 @@ components:
         items: { type: array, items: { $ref: "#/components/schemas/AdminActivity" } }
         next_cursor: { type: [integer, "null"], format: int64 }
 
+    HostAdmissionRestriction:
+      type: object
+      additionalProperties: false
+      required: [owner_kind, reason, created_at]
+      properties:
+        owner_kind: { type: string, enum: [manual, legacy, platform, idle_apply, recovery, reconciliation] }
+        reason:
+          type: string
+          enum: [manual_drain, legacy_drain, platform_apply, idle_configuration, configuration_recovery, journal_reconciliation, journal_quarantine]
+          description: Stable safe display code; never a free-form host, user or operation identifier.
+        created_at: { type: string, format: date-time }
     Host:
       type: object
       # crud/handler.go hostResp — every key is always serialized (nullable ones present-but-null).
-      required: [id, node_name, status, agent_version, cpu_cores, mem_mb, cpu_model, last_registered_at, last_heartbeat_at, storage, capacity_detection, capacity_reason, readiness, readiness_reported_at, readiness_gate, readiness_overrides, capacity, source_commit, built_at, install_mode, updater_present]
+      required: [id, node_name, status, admission_restrictions, agent_version, cpu_cores, mem_mb, cpu_model, last_registered_at, last_heartbeat_at, storage, capacity_detection, capacity_reason, readiness, readiness_reported_at, readiness_gate, readiness_overrides, capacity, source_commit, built_at, install_mode, updater_present]
       properties:
         id: { type: string, format: uuid }
         node_name: { type: string }
         status: { type: string, enum: [online, offline, draining] }
+        admission_restrictions:
+          type: array
+          description: >-
+            RH05 active owner-scoped admission holds, always serialized; [] means no
+            hold. This explains draining without exposing owner IDs or implying that
+            an offline host is schedulable. The server derives reason from a bounded
+            code set, never from private host or user data.
+          items: { $ref: "#/components/schemas/HostAdmissionRestriction" }
         agent_version: { type: [string, "null"] }
         cpu_cores: { type: [integer, "null"] }
         mem_mb: { type: [integer, "null"] }
