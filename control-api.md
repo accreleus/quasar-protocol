@@ -8394,6 +8394,24 @@ canonical app and managed-home mount match the claim and a live `user_homes`
 row advances it to `materialized` and stamps `materialized_at`; this proves
 that the mount was used, not what data it contains. On later conflict, the
 timestamp is retained as historical use evidence, not current-location proof.
+The control plane persists the exact dispatch binding (`sessions.managed_home_id`
+and a digest of the managed-home mount object) before sending the assignment.
+The first accepted nonterminal-to-running transition counts as materialization
+evidence in the same transaction as that session state change, only when the
+authenticated reporting host is `sessions.host_id` and,
+under the session and claim locks, the immutable dispatch binding matches the
+same non-NULL user, canonical parent app, host, live `user_homes` row and
+resolved mount target. The claim must still be `reserved`; this transition
+never inserts or revives one. `session_swap_app` leaves the original binding
+unchanged, so a swap target stays reserved even if a later callback says
+`running` (including a rollback callback). Swaps start from `running` and
+return to `running`, never the first transition into that state. Late,
+rejected, terminal-session,
+heartbeat and reconnect running reports are not evidence. A missing binding,
+a host other than `sessions.host_id`, a deleted home row, or a mount mismatch
+leaves the claim reserved or conflicted. Neither `sessions.managed_home_id` nor
+`managed_home_mount_sha256` appears in any API resource, event, trace, log line
+or diagnostic export; the unsalted digest must not reveal another user's ref.
 A failed/stopped session
 never clears a committed claim, since it may have created data before failing.
 
