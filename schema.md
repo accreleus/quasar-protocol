@@ -2742,7 +2742,8 @@ advanced within `BIGINT`.
 | 0093 `host_image_operation_fences` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL REFERENCES image_catalog(id) ON DELETE CASCADE`, `generation BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0)`, `state TEXT NOT NULL CHECK (state IN ('idle','removing'))`, `attempt_id UUID NULL`, `PRIMARY KEY (host_id,image_id)` | Separate FKs allow a fence before `host_images` inventory exists. Requirement writers increment generation; launches take a shared lock without incrementing it. `removing` blocks ready/launch until verified re-ensure. |
 
 **0090 managed-home recovery hold.**
-`managed_home_claims` also has nullable `pending_home_session_id UUID`,
+`managed_home_claims` also has `legacy_unprotected_dispatch BOOLEAN NOT NULL
+DEFAULT false` and nullable `pending_home_session_id UUID`,
 `pending_home_token UUID`, and `pending_home_started_at TIMESTAMPTZ`, with a
 named `managed_home_claims_pending_home_ck` CHECK requiring all three NULL or
 all three non-NULL. A partial index
@@ -2756,12 +2757,25 @@ trace, log or diagnostic export. Existing session APIs keep their own IDs.
 Presence of all three columns is a durable **pending-home hold**, meaning the
 agent may have mounted that canonical home. It is not proof of a current mount
 and does not change claim `state`, owner, conflict reason or `materialized_at`.
+`legacy_unprotected_dispatch=true` records that a pre-RH05 home or a managed-home
+dispatch on an agent without cleanup capability was outside durable hold
+coverage; it is an operator warning, not proof of a present copy. All 0090
+claims backfilled from legacy `user_homes` begin true. A later unsupported
+dispatch sets it true in the same transaction and it is sticky until audited
+repair; a later capable registration never silently clears historical risk.
 
 The original assigned managed home receives a hold atomically in the dispatch
 transaction that writes `sessions.managed_home_id` and its mount digest, before
-`session_assign` can be sent. Every managed-home swap target receives the same
-hold atomically with its claim/placement check, before mount resolution or
-`session_swap_app` send. A claim-only target is included. A hold is keyed by
+`session_assign` can be sent, **only when the selected authenticated command
+connection epoch advertises `terminal_home_cleanup_v1`**. Every managed-home
+swap target on such a connection receives the same hold atomically with its
+claim/placement check, before mount resolution or `session_swap_app` send.
+A claim-only target is included. On an older/unsupported connection, the
+signed legacy launch/swap behavior continues without a new hold, and the
+claim's `legacy_unprotected_dispatch` is set true; no cleanup proof is claimed.
+The selected connection epoch is checked again before send: if it changed,
+the old decision is not dispatched and the reservation/hold decision is
+retried for the new epoch. A hold is keyed by
 its claim's `(user_id,canonical_app_id)` and records the historical session ID;
 its owner is `claims.host_id`, not a separate mutable field. A target held by
 another session is refused. The same session may swap into its already-held
@@ -2776,12 +2790,12 @@ still materialize its claim under the signed mount-binding checks while its
 hold remains; materialization is use evidence, not unmount proof.
 
 A newly created hold may be CAS-cleared by its exact token only if dispatch
-fails before any send, an authenticated connection is absent at send time, or
+fails before any send, the command's authenticated connection epoch is absent at send time, or
 the frame fails before it is handed to the socket. A write failure after
 handoff, timeout, lost ack, disconnect, crash or missing callback is uncertain
 and retains the hold. An explicit `ack{ok:false}` may clear only the newly
-created hold for its exact in-memory command-to-token correlation, if the
-agent's current authenticated connection advertises
+created hold for its exact in-memory command-to-token correlation, if the ack
+arrives on the **same command connection epoch** that advertised
 `terminal_home_cleanup_v1` (defined in `agent-api.md`); the agent promises
 this rejection had no home side effect. A late ack after control-plane restart
 has no correlation and cannot clear a hold. Assignment rejection still leaves
@@ -2808,8 +2822,14 @@ session-row deletion never clear a hold. Session rows (when present, ascending
 ID) are locked before all affected claims in ascending
 `(user_id,canonical_app_id)` order, then `user_homes`; when the session row is
 gone, the partial index finds its held claims before ordered claim locks.
-This order applies to terminal reconciliation, user/app deletion and #347
-repair as well as launch, tombstone and GC. No network call occurs under these
+This order applies to terminal reconciliation and #347 repair as well as
+launch, tombstone and GC. HTTP user/app deletion locks affected nonterminal
+and historical held-session rows in ascending ID, then claims in ascending
+key order, checks the hold, then tombstones homes and deletes the user/app
+**in the same transaction**. A refused delete rolls back all tombstones.
+Direct SQL deletion can deadlock against a session callback; PostgreSQL
+aborts one transaction and it must retry without a partial tombstone.
+No network call occurs under these
 locks. Tombstone, agent GC pull and GC confirmation treat a held claim as in
 use independently of session state or `app_id`, and may neither reap its
 backing home nor release its claim.
@@ -2823,14 +2843,16 @@ hard deletion instead refuses while any associated hold exists; ordinary
 unheld claims still follow their signed `ON DELETE CASCADE` rule. Deleting a
 derived tile alone preserves its parent's claim and retains the existing
 active-session guard. The expired ephemeral-user reaper skips and retains
-held users individually while continuing the rest of its batch; it never
-silently cascades away a hold.
+held users individually while continuing the rest of its batch; it prefilters
+held users and handles a racing `QH001` per user in its own transaction or
+savepoint. A set-based DELETE may not abort the whole batch. It never silently
+cascades away a hold.
 
 0090 names `rh05_guard_managed_home_claim_delete`,
 `rh05_guard_user_delete_home_hold` and
 `rh05_guard_parent_app_delete_home_hold` as `BEFORE DELETE` triggers on
 `managed_home_claims`, `users` and `apps`, respectively, backed by same-named
-`_fn` functions. Each locks affected claims in the order above, tests for a
+`_fn` functions. Each locks affected claims in ascending claim-key order, tests for a
 non-NULL `pending_home_token`, and on a held claim uses `RAISE EXCEPTION USING
 ERRCODE='QH001', MESSAGE='managed home operation pending'`. It never returns
 NULL to skip a cascade. The API maps `QH001` to HTTP `409 conflict`; other SQL
