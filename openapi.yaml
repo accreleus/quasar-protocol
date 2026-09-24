@@ -2030,6 +2030,25 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: Current cleanup blocker and remedy., content: { application/json: { schema: { $ref: "#/components/schemas/HostImageCleanupConflict" } } } }
 
+  /v1/admin/hosts/{id}/images/cleanup/attempts/{attempt_id}:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+      - name: attempt_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [images]
+      summary: Read one durable exact-version cleanup attempt (RH05).
+      description: Reads persisted state only; it does not infer removal from a preview, contact an agent, or retry dispatch. An attempt on another host or a pruned attempt is 404. The reason is a safe operator code, never a raw runtime error.
+      x-required-role: admin
+      responses:
+        "200": { description: Current persisted attempt., content: { application/json: { schema: { $ref: "#/components/schemas/HostImageCleanupAttempt" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /v1/admin/hosts/{id}/images/{image_id}/retry:
     parameters:
       - { $ref: "#/components/parameters/PathId" }
