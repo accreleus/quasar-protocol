@@ -2907,7 +2907,8 @@ advanced within `BIGINT`.
 | 0091 `app_placement_hosts` | `app_id UUID NOT NULL REFERENCES app_placement(app_id) ON DELETE CASCADE`, `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `PRIMARY KEY (app_id,host_id)` | Fixed placement may deliberately have zero hosts, meaning no eligible host. Removal and reservation lock the same placement row. |
 | 0092 `host_image_success_history` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL REFERENCES image_catalog(id) ON DELETE CASCADE`, `current_version TEXT NOT NULL`, `current_identity JSONB NOT NULL`, `previous_version TEXT NULL`, `previous_identity JSONB NULL`, `verified_at TIMESTAMPTZ NOT NULL`, `PRIMARY KEY (host_id,image_id)`, paired nullability for previous version and identity | Each identity is the frozen adoption's registry ref or template build inputs (`registry_ref`, `local_tag`, `context_repo`, `context_sha`, `dockerfile`, `build_args`), not mutable catalog data. History advances only after ready evidence for a different adopted version. A same-version reinstall with changed identity leaves prior history intact because the agent's version-only ready report cannot prove which bits became ready; cleanup fails closed for the ambiguous pair. Separate FKs keep retention history when the current `host_images` inventory row is removed or refreshed. Unknown prior history stays unknown and cleanup fails closed. |
 | 0093 `sessions.home_seed`; `job_runs` publication columns | `sessions.home_seed JSONB NULL` with named `sessions_home_seed_ck`: when nonnull `jsonb_typeof(home_seed)='object'`, exactly two keys (`home_seed - 'mode' - 'reason' = '{}'::jsonb`), both strings and a valid pair from the sessions table above. Add nullable `job_runs.template_publish_claim_token UUID`, `template_publish_connection_id TEXT`, `publish_permit_accepted_at TIMESTAMPTZ`; no backfill. | First authenticated initial-launch provisioning outcome and internal run-scoped selected Steam publication evidence. Older agents and unproven outcomes stay NULL/limited. Neither field governs session state, image readiness or claims. Down migration drops only these 0093 additions. |
-| 0094 `host_image_operation_fences` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL REFERENCES image_catalog(id) ON DELETE CASCADE`, `generation BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0)`, `state TEXT NOT NULL CHECK (state IN ('idle','removing'))`, `attempt_id UUID NULL`, `PRIMARY KEY (host_id,image_id)` | Separate FKs allow a fence before `host_images` inventory exists. Requirement writers increment generation; launches take a shared lock without incrementing it. `removing` blocks ready/launch until verified re-ensure. |
+| 0094 `host_image_operation_fences` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL`, `generation BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0)`, `state TEXT NOT NULL CHECK (state IN ('idle','removing'))`, `attempt_id UUID NULL`, `PRIMARY KEY (host_id,image_id)` | The host FK allows a fence before `host_images` inventory or catalog adoption exists. No catalog FK permits manifest pruning while preserving generations/attempts. Requirement writers increment generation; launches take a shared lock without incrementing it. `removing` blocks ready/launch until verified re-ensure. |
+| 0094 `host_image_cleanup_attempts` | `id UUID PRIMARY KEY`, `host_id UUID NOT NULL`, `image_id TEXT NOT NULL`, `version TEXT NOT NULL`, `image_ref TEXT NOT NULL`, `runtime_image_id TEXT NOT NULL`, `generation BIGINT NOT NULL CHECK (generation >= 0)`, `state TEXT NOT NULL CHECK (state IN ('removing','removed','failed','unknown'))`, `reason TEXT NULL`, `created_at TIMESTAMPTZ NOT NULL`, `updated_at TIMESTAMPTZ NOT NULL`, FK `(host_id,image_id)` to fence with delete cascade, unique partial index for one active `(host_id,image_id)` when state IN ('removing','unknown') | Persist identity and outcome across restart/lost ack. Acceptance re-dispatch, when needed, uses only the identical attempt ID, generation and identity; the agent journal/tombstone prevents a second physical delete. Terminal report CASes by attempt ID and generation; confirmed removal needs current exact runtime evidence. New requirement increments fence generation and forces re-ensure before launch. Fence.image_id intentionally has no catalog FK: sync may prune an image without deleting fence generations or attempts, and re-adding the same image ID reuses that monotonic fence. Migration 0094 also drops only `host_image_success_history_image_id_fkey` from 0092; the history host FK remains, so prune/re-add cannot silently erase the frozen previous-success pair. Host deletion cascades both tables. Terminal attempts are kept for 90 days, except the latest terminal row for each exact `(host,image,version,image_ref,runtime_image_id)` is retained indefinitely for idempotence; active removing/unknown rows are never pruned. |
 
 For 0092, identity is a JSON object with all six frozen adoption keys always
 present: `registry_ref`, `local_tag`, `context_repo`, `context_sha`, and
@@ -3158,14 +3159,19 @@ launch apply canonical placement and claim checks before changing executable
 app identity.
 
 The image fence serializes cleanup with the union of selected app requirements,
-all container references, pending ensure/template operations and the retained
-previous successful version. Cleanup enters `removing` with a generation token
-while rechecking that union. The agent takes its local per-image operation lock
-and rechecks local references and the current token before physical removal. A
-new requirement during removal cancels an unstarted removal or stays pending and
-re-ensures afterward; it is never reported ready from stale state. Unknown
-inventory and stale preview cannot authorize deletion. No database transaction
-remains open across network, process restart, image pull or physical removal.
+all container references, pending ensure/template/launch operations and the
+retained previous successful version. Cleanup increments the generation,
+commits `removing` and its durable attempt, then dispatches that exact token.
+The capable agent takes its local per-image operation/launch lock and rechecks
+the frozen ref, daemon image ID and every container reference before physical
+removal. The agent compares the token with its own journaled attempt; the
+control plane owns later fence generations, which the agent cannot read while
+working. A new requirement during removal stays pending, advances the fence
+generation and re-ensures after the attempt reaches a proven terminal state;
+it is never reported ready from stale state. No cancellation command is implied.
+Unknown inventory and stale preview cannot authorize deletion. No database
+transaction remains open across network, process restart, image pull or physical
+removal.
 
 ### Transaction order and migration ownership
 

@@ -2002,6 +2002,34 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
 
+  /v1/admin/hosts/{id}/images/cleanup:
+    parameters:
+      - { $ref: "#/components/parameters/PathId" }
+    get:
+      tags: [images]
+      summary: Preview exact managed-image versions eligible for explicit cleanup (RH05).
+      x-required-role: admin
+      responses:
+        "200": { description: Current preview., content: { application/json: { schema: { $ref: "#/components/schemas/HostImageCleanupView" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [images]
+      summary: Request exact-version image cleanup after current generation and reference recheck (RH05).
+      x-required-role: admin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/HostImageCleanupRequest" } } }
+      responses:
+        "200": { description: Exact version already confirmed removed., content: { application/json: { schema: { $ref: "#/components/schemas/HostImageCleanupAttempt" } } } }
+        "202": { description: Cleanup accepted or identical attempt in flight., content: { application/json: { schema: { $ref: "#/components/schemas/HostImageCleanupAttempt" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Current cleanup blocker and remedy., content: { application/json: { schema: { $ref: "#/components/schemas/HostImageCleanupConflict" } } } }
+
   /v1/admin/hosts/{id}/images/{image_id}/retry:
     parameters:
       - { $ref: "#/components/parameters/PathId" }
@@ -5587,39 +5615,55 @@ components:
 
     HostImageCleanupView:
       type: object
-      required: [host_id, observed_at, images]
+      required: [host_id, inventory_status, observed_at, remedy, images]
       properties:
         host_id: { type: string, format: uuid }
-        observed_at: { type: string, format: date-time }
+        inventory_status: { type: string, enum: [current, unknown, offline] }
+        observed_at: { type: [string, "null"], format: date-time, description: Null when no current complete observation exists. }
+        remedy: { type: [string, "null"], description: Safe next action when inventory is not current. }
         images:
           type: array
           items: { $ref: "#/components/schemas/HostImageCleanupCandidate" }
     HostImageCleanupCandidate:
       type: object
-      required: [image_id, version, eligible, reasons, generation]
+      required: [image_id, version, image_ref, runtime_image_id, eligible, reasons, generation]
       properties:
         image_id: { type: string }
         version: { type: string }
+        image_ref: { type: string, description: Exact frozen adopted reference, bound to the verified daemon image ID (template local tags may be mutable). }
+        runtime_image_id: { type: string, description: Daemon image ID verified for that reference. }
         eligible: { type: boolean }
-        reasons: { type: array, items: { type: string }, description: Current blockers, including uncertain inventory and retained prior success. }
+        reasons: { type: array, items: { type: string, enum: [required, container_reference, pending_launch, pending_image_operation, pending_template_work, retained_previous_success, unknown_inventory, offline, removing] } }
+        remedy: { type: [string, "null"], description: Safe next action for an ineligible candidate. }
         generation: { $ref: "#/components/schemas/RH05Revision" }
     HostImageCleanupRequest:
       type: object
       additionalProperties: false
-      required: [image_id, version, expected_generation]
+      required: [image_id, version, image_ref, runtime_image_id, expected_generation]
       properties:
         image_id: { type: string, minLength: 1 }
         version: { type: string, minLength: 1 }
+        image_ref: { type: string, minLength: 1 }
+        runtime_image_id: { type: string, minLength: 1 }
         expected_generation: { $ref: "#/components/schemas/RH05Revision" }
+    HostImageCleanupConflict:
+      type: object
+      required: [error, current, remedy]
+      properties:
+        error: { $ref: "#/components/schemas/Error" }
+        current: { oneOf: [ { $ref: "#/components/schemas/HostImageCleanupCandidate" }, { type: "null" } ] }
+        remedy: { type: string }
     HostImageCleanupAttempt:
       type: object
-      required: [attempt_id, image_id, version, generation, state]
+      required: [attempt_id, image_id, version, image_ref, runtime_image_id, generation, state]
       properties:
         attempt_id: { type: string, format: uuid }
         image_id: { type: string }
         version: { type: string }
+        image_ref: { type: string }
+        runtime_image_id: { type: string }
         generation: { $ref: "#/components/schemas/RH05Revision" }
-        state: { type: string, enum: [pending, removing, removed, failed, cancelled] }
+        state: { type: string, enum: [removing, removed, failed, unknown] }
         reason: { type: [string, "null"] }
 
     StorageProvider:
