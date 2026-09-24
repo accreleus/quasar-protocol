@@ -3475,8 +3475,8 @@ Only the owner (or an admin) may read a session (`403` otherwise). The signaling
 
 #### `home_seed` — actual initial managed-home seeding outcome (RH05 #344)
 
-The owner/admin session read shape (`POST /v1/sessions`, `GET /v1/sessions/{id}`,
-session lists and SSE, including admin oversight) gains an always-present
+The served owner/admin session read shape (`POST /v1/sessions`,
+`GET /v1/sessions/{id}` and session lists, including admin oversight) gains an always-present
 nullable `home_seed` object with `{mode,reason}`. Modes are `reflink`, `copy`,
 `cold`, `existing`; their exact safe reasons and evidence meaning are in
 `agent-api.md` `session_state.home_seed`. `null` means no authenticated outcome
@@ -3499,8 +3499,10 @@ report is ignored. Absence never clears an accepted value. An invalid field
 separately so an invalid type cannot drop a `running` or terminal callback.
 Log only fixed `invalid_home_seed`, never the raw value. The field is
 observational and never changes admission, lifecycle, image preparation or
-home-claim materialization. The session SSE event fires when the accepted
-`home_seed` changes, as for other session read fields.
+home-claim materialization. The documented session SSE route is not yet served;
+when implemented, its envelope carries `home_seed` and an accepted outcome
+triggers an event, as for other session read fields. Until then, GET/list reads
+remain the authority for the operator UI.
 
 The operator UI labels `reflink` as a completed reflinked home; `copy` as a
 completed full copy with **no reflink storage saving**; `cold` as a cold start
