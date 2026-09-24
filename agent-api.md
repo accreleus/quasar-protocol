@@ -2051,6 +2051,22 @@ and consumption, live disable/cancellation, revision checks and status reporting
 Every registration replaces the capability advertisement and clears the previous
 connection's acknowledgement; omission means unsupported, not retained support.
 
+RH05 #344 adds the independent optional
+`"source_policy_versions":{"steam_preparation":1,"template_publish_permit":1}`
+advertisement. The new key promises that the agent uses the authenticated,
+run-scoped final publication check in `control-api.md` after warmup verification
+and safe teardown. It retains the claimed run's opaque token and connection
+epoch; only a current `200 {"authorized":true}` immediately before local
+policy lease commit and atomic publication allows a template to become ready.
+The permit is not cached or reused, and a failed check leaves ordinary cold
+launch available. An older agent omitting the new key retains existing warmup
+and launch behavior, but its preparation is displayed as
+`publication_protection:"limited_protection"` even when it reports a ready
+template. It never silently claims RH05 selected-safe publication.
+The capable agent echoes the claim token on every `template.warmup` job report.
+A missing or stale token cannot close the current claimed run or confer
+verified protection; older agents and other jobs use the existing report shape.
+
 The control plane sends the following optional block in `config_update`, alongside
 `settings` and `console_config`, immediately after registration, after policy or
 adopted-identity changes, and on reconnect:

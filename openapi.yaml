@@ -3760,7 +3760,11 @@ paths:
         404: an unknown run id, a run belonging to another host, and a bad node secret are one
         indistinguishable answer, so these routes never become an oracle for run ids. A
         `deferred` report is a normal outcome (the runner's own gate refused) and the
-        dispatcher schedules the retry on the persisted backoff ladder.
+        dispatcher schedules the retry on the persisted backoff ladder. For a
+        capable template.warmup claim, every nonterminal report must carry its
+        publish_claim_token; the atomic transition rejects a missing or stale
+        token with 409 and never gives verified credit to another claim's report.
+        An already-terminal retry remains a 200 no-op.
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/AgentJobReportRequest" } } }
@@ -3768,8 +3772,38 @@ paths:
         "200": { description: Report recorded (or a no-op for an already-terminal run). , content: { application/json: { schema: { $ref: "#/components/schemas/AgentJobReportAccepted" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "409": { description: Could not record the report (the run moved under the caller, or the summary blew the 4096-byte ceiling). , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "409": { description: Could not record the report (the claim token or state moved under the caller, or the summary blew the 4096-byte ceiling). , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
         "500": { description: Could not record the job report. , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+
+  /v1/agent/jobs/template.warmup/{run_id}/publish-permit:
+    post:
+      tags: [agent]
+      summary: "Node-agent internal: final selected Steam template publication check."
+      description: >-
+        RH05 #344. Existing node-secret agent job authentication. One conditional SQL
+        statement checks the exact running claim token and current connection epoch,
+        digest-pinned run params, current source/adoption/ack/ready image and selected
+        app placement, and stamps publish_permit_accepted_at only on acceptance.
+        Its database snapshot is the authorization linearization point. A placement
+        removal before the snapshot denies; a later removal may leave a cached
+        template but grants no current requirement or launch permission. No network
+        or template-content copy is allowed between a 200 and local lease commit
+        plus atomic publication. Every unavailable/malformed/denied response fails
+        closed for optional publication and leaves ordinary cold launch available.
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SteamPublishPermitRequest" } } }
+      responses:
+        "200": { description: Current publication check accepted. , content: { application/json: { schema: { $ref: "#/components/schemas/SteamPublishPermitAccepted" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: Not current; same closed answer for unknown, other-host and stale runs after valid node authentication. , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "500": { description: Publication check unavailable. , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
 
   # ─── signaling (WebSocket) ───────────────────────────────────────────────
   /v1/signal:
@@ -4281,7 +4315,7 @@ components:
         image: { $ref: "#/components/schemas/CatalogImage" }
     SteamPreparationStatus:
       type: [object, "null"]
-      required: [detail, eligible, supported, desired_enabled, desired_revision, applied_revision, policy_pending, preparation_enabled, consumption_enabled, state, reason, template, clone_mode, clone_reason, reported_at]
+      required: [detail, eligible, supported, desired_enabled, desired_revision, applied_revision, policy_pending, preparation_enabled, consumption_enabled, publication_protection, state, reason, template, clone_mode, clone_reason, reported_at]
       properties:
         detail: { type: string, maxLength: 1024 }
         eligible: { type: boolean }
@@ -4292,6 +4326,7 @@ components:
         policy_pending: { type: boolean }
         preparation_enabled: { type: [boolean, "null"] }
         consumption_enabled: { type: [boolean, "null"] }
+        publication_protection: { type: string, enum: [verified, limited_protection], description: "Verified requires a capable agent's successful claimed warmup run with an accepted final permit; older agents remain visibly limited even if template ready." }
         state: { type: string, enum: [waiting_image, queued, preparing, ready, deferred, failed, disabled, unsupported, unknown, pending_policy] }
         reason: { type: string }
         template:
@@ -9106,6 +9141,7 @@ components:
       required: [run_id, job_id, params, deadline_secs]
       properties:
         run_id: { type: string, format: uuid }
+        publish_claim_token: { type: string, format: uuid, description: "Opaque per-claim token on capable template.warmup runs only; omit for legacy agents and other jobs. Internal, never in public job reads or logs." }
         job_id: { type: string, description: "The registry job id, e.g. \"template.warmup\"." }
         params:
           type: object
@@ -9129,11 +9165,28 @@ components:
           type: array
           items: { $ref: "#/components/schemas/AgentJobPendingRun" }
           description: "Capped at 5 per poll; [] is the steady state and also the answer when the jobs master switch is off."
+    SteamPublishPermitRequest:
+      type: object
+      additionalProperties: false
+      required: [publish_claim_token, image_id, registry_ref, version, policy_revision]
+      properties:
+        publish_claim_token: { type: string, format: uuid }
+        image_id: { type: string, enum: [steam] }
+        registry_ref: { type: string, pattern: '^[^@\s]+@sha256:[0-9a-f]{64}$', description: "Exact digest-pinned ref; server matches current adopted Steam identity and persisted run params. The grammar does not authorize new sources or pins." }
+        version: { type: string }
+        policy_revision: { type: string, pattern: '^[1-9][0-9]*$' }
+    SteamPublishPermitAccepted:
+      type: object
+      additionalProperties: false
+      required: [authorized]
+      properties:
+        authorized: { type: boolean, enum: [true] }
     AgentJobReportRequest:
       type: object
       required: [run_id, state]
       properties:
         run_id: { type: string, format: uuid, description: "The claimed run being closed. Unknown, or owned by another host: 401, indistinguishable from a bad secret." }
+        publish_claim_token: { type: string, format: uuid, description: "Required for a nonterminal capable template.warmup run; omitted for older agents and other jobs. Must match this exact claim atomically with the report." }
         state:
           type: string
           enum: [succeeded, failed, deferred, skipped]

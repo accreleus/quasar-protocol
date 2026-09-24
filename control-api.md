@@ -6308,6 +6308,87 @@ ready, claims what is due **for itself**, and reports what its own runner decide
               "params": {"image_id": "steam"}, "deadline_secs": 3600 } ] }
 ```
 
+**RH05 #344 additive claim binding.** A claimed `template.warmup` run offered to
+an agent advertising `source_policy_versions.template_publish_permit=1` also
+carries `publish_claim_token`, an opaque UUID. The control plane creates it in
+the same claim statement that stamps `claimed_at`, and stores the current
+database `source_preparation_connection_id` on the run. A re-claim gets a new
+token and clears any earlier accepted-at stamp; a reconnect changes the
+connection id and invalidates a prior claim's
+publication authority. Other jobs and older agents omit this field. No token
+appears in logs, public job reads, or diagnostics.
+
+**`POST /v1/agent/jobs/template.warmup/{run_id}/publish-permit`** (RH05 #344):
+the existing node-secret job-route authentication applies. Request body is
+`{"publish_claim_token":"<uuid>","image_id":"steam", "registry_ref":"<exact digest-pinned ref>","version":"<version>","policy_revision":"<decimal>"}`;
+unknown keys or wrong types are `400 validation_failed`. A single SQL statement
+at its one READ COMMITTED snapshot checks: this exact `running` claimed run,
+its token and unexpired claim deadline; the authenticated host and the run's
+stored connection epoch equal the current database host registration epoch;
+the host advertises `template_publish_permit=1`, has acknowledged the current
+Steam source policy on that epoch, and has the exact ready image; the run
+`params` JSON (created by `preparation.Params` with `image_id`, `registry_ref`,
+`version`, `policy_revision`) matches every supplied field exactly, including
+the full digest, never only a tag; the supplied revision equals both the
+current desired policy revision and this connection's acknowledged revision;
+the source is currently enabled with that adopted identity;
+and an enabled canonical or derived app currently selects that exact identity
+on this host. The same conditional SQL statement records
+`publish_permit_accepted_at` on the run and returns `200 {"authorized":true}`
+only if all predicates held at its statement snapshot. Bad node credentials
+return the existing `401 unauthorized`; after successful node authentication,
+an unknown run, another host's run, or any stale current predicate returns
+the same closed `409 publication_not_authorized` error envelope (with no
+run-existence detail); database failure is
+`500 internal`. The timestamp records an accepted check, not a reusable
+authorization: each call rereads current state, and a replay after re-claim
+or reconnect fails token/epoch. A successful run report counts as RH05
+verified only if this same claim recorded acceptance. A capable claimed
+`template.warmup` agent report carries the optional `publish_claim_token`;
+the server compares it to the current run token in the same atomic report
+transition for every reported state, and a missing or different token returns
+`409` without changing the run. Older agents and other jobs omit it and retain
+the existing report behavior. Acceptance alone never
+claims a prepared template or a successful run.
+
+The agent calls this endpoint only after sanitization, verification and safe
+teardown, immediately before its local policy lease check and atomic template
+publication. It uses a short bounded HTTP timeout. Only a well-formed 200
+with `authorized:true` permits publication; every timeout, unavailable CP,
+non-200, malformed body or false answer discards staging and reports a
+deferred/failed optional warmup. No network call, template-content copy, long
+scan or retry lies between acceptance and the local atomic rename/symlink
+commit; a small metadata write may occur, and post-swap old-version reclaim is
+outside the authorization gap. This database snapshot is the authorization
+linearization point. A placement removal committed before that snapshot
+denies; removal committed afterward is later work and may leave a cached
+template. That cache does not become a current selected requirement or confer
+launch permission, and #345 owns explicit safe cleanup. Initial home seeding
+is a separate launch-time step behind placement, source and existing-home
+gates; it is not part of warmup publication and never uses this permit.
+
+Crash examples: death after 200 but before rename leaves only staging for
+restart cleanup; death after rename but before the job report leaves a cached
+published template while the run follows ordinary claim expiry/retry, never
+an invented success report. A pre-capability agent retains existing warmup
+and launch behavior through the legacy job claim; the control plane marks its
+preparation projection `publication_protection:"limited_protection"`, even if
+the template reports ready. Only a capable agent with a successful final
+permit may report `publication_protection:"verified"`: the server derives it
+from a successful `template.warmup` run on this host with nonnull accepted-at,
+the same claim token and exact current adopted digest/version, plus the current
+ready template report. Capability alone and acceptance without a successful
+run stay `limited_protection`; a failed permit never reports a selected-safe
+ready outcome. The endpoint
+never makes an optional warmup failure block an otherwise valid cold launch.
+The permit accepts a syntactically valid digest-pinned registry ref from any
+registry, then matches the exact persisted run params and adopted Steam source
+identity. Current Steam adoption remains the official digest-pinned registry
+source; this syntax change does not authorize a new source or replace a pin.
+Build-input identities for other image types do not use this Steam permit.
+When #345 adds the image-operation fence in 0094, an active removing fence
+also denies the permit in the same snapshot; #345 owns that check.
+
 Capped at **5 runs per poll**: a host returning from an outage with a dozen jobs due must not
 start all of them at once, and the rest are still `pending` because the work is a durable row.
 `params` is the opaque per-job blob the control plane stored when it materialized the run
@@ -6320,6 +6401,11 @@ already-materialized row being *handed out*.
 
 **`POST /v1/agent/jobs/report`** — `{ "run_id", "state", "summary", "error" }`, `200 {"ok": true}`.
 
+RH05 #344 adds optional `publish_claim_token` for capable `template.warmup`
+claims only. The server requires it to match the current run token in the
+atomic nonterminal report transition for every state; missing or stale token
+is `409` with no transition. Other jobs and older agents retain this shape.
+
 - `state ∈ {succeeded, failed, deferred, skipped}`. **`aborted` is not reportable**: it is the
   reaper's verdict on a host that said nothing, and a host claiming it would be describing a
   decision it does not get to make. Sending it — or any other value — is `400 validation_failed`.
@@ -6328,7 +6414,7 @@ already-materialized row being *handed out*.
   the failure is `401` rather than `404` so these routes never become an oracle for run ids. The
   real reason is logged, never returned.
 - **The idempotent-report rule.** A report for a run that is **already terminal** is a **no-op
-  `200`**, so an agent retrying after a network blip is safe. A `409` the agent cannot act on
+  `200`**, including a repeated token-bearing report, so an agent retrying after a network blip is safe. A `409` the agent cannot act on
   would turn a run that actually succeeded into a permanent error in an operator's face.
 - A `deferred` report is a normal outcome (the runner's own gate refused) and the dispatcher
   materializes the retry on a **persisted** backoff ladder — persisted, so a back-off decision
@@ -8036,6 +8122,7 @@ The shared `ImageHostState` in administrator image responses adds nullable
 | `applied_revision` | Last applied revision string or null. |
 | `policy_pending` | True while the desired revision is unacknowledged or host is disconnected. |
 | `preparation_enabled`, `consumption_enabled` | Effective booleans; null when unobserved/legacy. |
+| `publication_protection` | Always `verified` or `limited_protection`. `verified` requires a successful capable claimed run with an accepted final publication permit for the exact current adopted digest/version and a matching ready report. Every older agent, unknown report, stale identity, or incomplete attempt is `limited_protection`, even when an older agent reports a ready template. This is a protection claim, not image or session readiness. |
 | `state`, `reason` | Typed state/reason vocabulary below; never parse human text for logic. |
 | `template` | Null or `{registry_ref,version}` identifying an observed published template. |
 | `clone_mode`, `clone_reason` | Null when unobserved; otherwise measured `reflink`/`copy` and explanation. |
