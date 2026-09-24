@@ -8340,6 +8340,14 @@ Browser reachability remains outside host readiness.
 per-atomic-group `desired_revision`, `applied_revision`, `desired_digest`,
 `scope` (`next_session|restart`), `status` (`pending|applied|failed|upgrade_required|uncertain`),
 resolved value/source, evidence time/freshness and actionable reason/remedy.
+**RH05 #346 additive field.** Each group also carries `saved` (boolean): `true`
+when the host has a persisted group record (an operator-saved revision, or the
+server-written install-time hardware record); `false` when the server projects
+the group because no record exists. A projected group's `status`, `remedy` and
+`approval_preview` follow the existing rules unchanged; `saved:false` only lets a
+client present a projected next-session group as current deployment behaviour
+rather than pending work. Clients treat an absent field as `true`. No other shape
+or meaning changes.
 For each restart group, `approval_preview` supplies a server-derived reviewed
 candidate: availability/remedy, desired revision, content digest, exact resolved
 values, the sorted prerequisite facts and digest, the current

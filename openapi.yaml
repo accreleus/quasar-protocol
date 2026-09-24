@@ -5472,6 +5472,7 @@ components:
           oneOf: [ { $ref: "#/components/schemas/RH05Digest" }, { type: "null" } ]
         scope: { type: string, enum: [next_session, restart] }
         status: { type: string, enum: [pending, applied, failed, upgrade_required, uncertain] }
+        saved: { type: boolean, description: "True when a group record is persisted for this host (including the install-time hardware record). False when projected; status, remedy and approval_preview are unchanged. Absent from older servers: treat as true." }
         fresh: { type: boolean, description: Whether the evidence still matches the current agent and prerequisites. }
         observed_at: { type: [string, "null"], format: date-time }
         remedy: { type: [string, "null"], description: "Actionable reason when pending, failed, upgrade required or uncertain; baseline_unavailable names missing current-connection deployment evidence." }
