@@ -1662,7 +1662,7 @@ paths:
         Session-events amendment (2026-08-02): SSE stream (text/event-stream) replacing
         lifecycle polling for clients that support it. One event type, `session`, whose data
         is the same envelope as GET /v1/sessions/{id} — sent once on subscribe (snapshot) and
-        on every change to state / state_detail / app_launch_state / health_state; the event
+        on every change to state / state_detail / app_launch_state / home_seed / health_state; the event
         for a terminal state is final and the server then closes the stream. Comment lines
         (`:`) are keep-alives (~25s). Best-effort latency optimization, never an authority:
         the GET remains canonical, and a client MUST retain polling as fallback (older
@@ -2018,7 +2018,7 @@ paths:
         control-plane restart before dispatch. Acceptance is not proof of
         preparation; read image and placement views for progress. A current
         authenticated pulling/building state is not retryable. Once migration
-        0093 lands, removing fences refuse Retry and delayed dispatch rechecks
+        0094 lands, removing fences refuse Retry and delayed dispatch rechecks
         the fence. Other images and active sessions are unaffected. Non-202
         writes nothing. Failure reasons and exact safe messages are frozen in
         control-api.md RH05 #343.
@@ -4811,12 +4811,28 @@ components:
               type: array
               items: { $ref: "#/components/schemas/Entitlement" }
 
+    HomeSeedOutcome:
+      type: object
+      additionalProperties: false
+      required: [mode, reason]
+      properties:
+        mode:
+          type: string
+          enum: [reflink, copy, cold, existing]
+        reason:
+          type: string
+          enum: [seeded, template_unavailable, source_disabled, host_templates_disabled, host_setting_invalid, policy_unavailable, storage_unavailable, clone_failed, policy_changed, existing_home]
+      description: >-
+        Valid pairs: reflink/seeded, copy/seeded,
+        cold/{template_unavailable,source_disabled,host_templates_disabled,host_setting_invalid,policy_unavailable,storage_unavailable,clone_failed,policy_changed},
+        existing/existing_home. Only reflink proves reflink storage saving.
+
     Session:
       type: object
       # health_state/health_reason are additive (present only when running/unsustainable);
       # app_launch_state is additive (present only when the app image reports one);
       # every other key is always serialized (nullable ones present-but-null).
-      required: [id, user_id, app_id, host_id, state, state_detail, error_message, failure_code, app_log_tail, profile_id, stream_profile_id, stream, codec_decision, negotiated_codec, created_at, started_at, ended_at]
+      required: [id, user_id, app_id, host_id, state, state_detail, error_message, failure_code, app_log_tail, home_seed, profile_id, stream_profile_id, stream, codec_decision, negotiated_codec, created_at, started_at, ended_at]
       properties:
         id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
@@ -4839,6 +4855,17 @@ components:
             oldest first, ~100 lines bound) - the only surviving copy, since app containers run
             --rm. Always serialized; null unless a failure warranted capturing it. Rendered
             preformatted, distinct from error_message's prose rendering.
+        home_seed:
+          description: >-
+            RH05 #344. Actual initial managed-home seeding outcome. Null means no
+            authenticated evidence, including an older agent, a non-managed
+            home or failure before provisioning. No inference of cold or
+            storage savings from null.
+            Swaps do not change the initial outcome. Never contains paths or
+            free-form diagnostics.
+          oneOf:
+            - { type: "null" }
+            - { $ref: "#/components/schemas/HomeSeedOutcome" }
         profile_id:
           type: [string, "null"]
           description: >-
@@ -5505,7 +5532,7 @@ components:
         selected: { type: boolean }
         prepared: { type: [boolean, "null"], description: Null when preparation evidence is unknown. }
         ready: { type: [boolean, "null"], description: Null when readiness evidence is unknown. }
-        reason: { type: [string, "null"], description: "Safe open code: unmanaged_image, no_image, on_demand, not_required, awaiting_preparation, preparing, preparation_failed, inventory_unknown, removing (after 0093); unknown future codes render generically. Prepared on an unselected host is observation only." }
+        reason: { type: [string, "null"], description: "Safe open code: unmanaged_image, no_image, on_demand, not_required, awaiting_preparation, preparing, preparation_failed, inventory_unknown, removing (after 0094); unknown future codes render generically. Prepared on an unselected host is observation only." }
     AppPlacementPatch:
       type: object
       additionalProperties: false

@@ -1074,6 +1074,7 @@ signaling (P1-D).
 | `error_message` | `TEXT` NULL | populated on `failed`. |
 | `failure_code` | `TEXT` NULL | *(first-run-experience §S5, migration 0062, additive)* machine-readable classification of a terminal failure, sent by the agent as `session_state.reason_code` (`agent-api.md`). Today's only defined value is `'app_exited_early'`. Sits **beside** `error_message` rather than replacing it: `error_message` is operator prose that may be rewritten freely, while this is the stable key the UI branches on. NULL for every failure that carries no classification, and for every non-failed session. |
 | `app_log_tail` | `TEXT` NULL | *(first-run-experience §S5, migration 0062, additive)* the app container's own captured log tail (newline-joined, oldest first, ~100 lines bound), sent by the agent as `session_state.app_log_tail`. Its own column because it cannot share `error_message` — that field renders inline as a one-line reason everywhere it appears, and a hundred lines of Steam output pasted into it would wreck every existing surface. App containers run `--rm`, so these lines are otherwise unrecoverable once the daemon reaps the container (#463) — this column is the only surviving copy. NULL unless a failure warranted capturing it. |
+| `home_seed` | `JSONB` NULL | *(RH05 #344, migration 0093)* actual initial Steam managed-home seeding outcome from an authenticated `session_state`. Exact object `{mode,reason}` only: `reflink/seeded`, `copy/seeded`, `existing/existing_home`, or `cold` paired with `template_unavailable`, `source_disabled`, `host_templates_disabled`, `host_setting_invalid`, `policy_unavailable`, `storage_unavailable`, `clone_failed` or `policy_changed`. NULL means no accepted evidence, never inferred cold. First accepted outcome wins; swaps leave it unchanged. No path, user identifier, image ref, command output or free text. Only `reflink/seeded` proves reflink storage saving. |
 | **launch params** | | drive the P1-5 pipeline; default from `apps` then overridable per launch. |
 | `width` | `INT` NOT NULL | |
 | `height` | `INT` NOT NULL | |
@@ -2397,7 +2398,7 @@ operation; release schema-floor protections continue to apply.
 
 ## RH05-01 — host policy, idle apply and placement (proposed additive amendment, #334)
 
-This reserves migrations **0087–0093**. It adds durable policy and scheduling state;
+This reserves migrations **0087–0094**. It adds durable policy and scheduling state;
 it does not rewrite `0001`–`0086`, `host_settings.overrides`, `hosts.status`,
 `user_homes`, `host_images`, sessions, or platform run records. It supersedes the
 older `host_settings` prose where that prose says an absent override selects the
@@ -2894,7 +2895,7 @@ revision/digest pairs remain intact for audit and reconciliation. The gate
 stays pending if the inventory is incomplete or the revision cannot be safely
 advanced within `BIGINT`.
 
-### 0090–0093 — homes, placement and images
+### 0090–0094 — homes, placement, Steam seed evidence and images
 
 | Migration and relation | Columns and constraints | Meaning |
 |---|---|---|
@@ -2902,7 +2903,8 @@ advanced within `BIGINT`.
 | 0091 `app_placement` | `app_id UUID PRIMARY KEY REFERENCES apps(id) ON DELETE CASCADE`, `mode TEXT NOT NULL CHECK (mode IN ('all_eligible','fixed'))`, `revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0)` | Canonical parent apps only. Backfill all existing canonical apps as `all_eligible`; derived tiles inherit parent placement and have no separate row. |
 | 0091 `app_placement_hosts` | `app_id UUID NOT NULL REFERENCES app_placement(app_id) ON DELETE CASCADE`, `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `PRIMARY KEY (app_id,host_id)` | Fixed placement may deliberately have zero hosts, meaning no eligible host. Removal and reservation lock the same placement row. |
 | 0092 `host_image_success_history` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL REFERENCES image_catalog(id) ON DELETE CASCADE`, `current_version TEXT NOT NULL`, `current_identity JSONB NOT NULL`, `previous_version TEXT NULL`, `previous_identity JSONB NULL`, `verified_at TIMESTAMPTZ NOT NULL`, `PRIMARY KEY (host_id,image_id)`, paired nullability for previous version and identity | Each identity is the frozen adoption's registry ref or template build inputs (`registry_ref`, `local_tag`, `context_repo`, `context_sha`, `dockerfile`, `build_args`), not mutable catalog data. History advances only after ready evidence for a different adopted version. A same-version reinstall with changed identity leaves prior history intact because the agent's version-only ready report cannot prove which bits became ready; cleanup fails closed for the ambiguous pair. Separate FKs keep retention history when the current `host_images` inventory row is removed or refreshed. Unknown prior history stays unknown and cleanup fails closed. |
-| 0093 `host_image_operation_fences` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL REFERENCES image_catalog(id) ON DELETE CASCADE`, `generation BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0)`, `state TEXT NOT NULL CHECK (state IN ('idle','removing'))`, `attempt_id UUID NULL`, `PRIMARY KEY (host_id,image_id)` | Separate FKs allow a fence before `host_images` inventory exists. Requirement writers increment generation; launches take a shared lock without incrementing it. `removing` blocks ready/launch until verified re-ensure. |
+| 0093 `sessions.home_seed` | `JSONB NULL` with named `sessions_home_seed_ck`: when nonnull `jsonb_typeof(home_seed)='object'`, exactly two keys (`home_seed - 'mode' - 'reason' = '{}'::jsonb`), both strings and a valid pair from the sessions table above; no backfill | First authenticated initial-launch provisioning outcome. Older agents and unproven outcomes stay NULL. Does not govern session state, image readiness or claims. Down migration drops only this column. |
+| 0094 `host_image_operation_fences` | `host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE`, `image_id TEXT NOT NULL REFERENCES image_catalog(id) ON DELETE CASCADE`, `generation BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0)`, `state TEXT NOT NULL CHECK (state IN ('idle','removing'))`, `attempt_id UUID NULL`, `PRIMARY KEY (host_id,image_id)` | Separate FKs allow a fence before `host_images` inventory exists. Requirement writers increment generation; launches take a shared lock without incrementing it. `removing` blocks ready/launch until verified re-ensure. |
 
 For 0092, identity is a JSON object with all six frozen adoption keys always
 present: `registry_ref`, `local_tag`, `context_repo`, `context_sha`, and
@@ -2913,7 +2915,7 @@ verification, `previous_version` and `previous_identity` copy the row's prior
 current pair verbatim, never the current adoption's fields. A same-version
 report with a different adopted identity does not alter either retained pair
 or `verified_at`. When history `current_version` equals the adopted version
-but `current_identity` differs from the adopted identity, #344 cleanup removes
+but `current_identity` differs from the adopted identity, #345 cleanup removes
 nothing for that host and image until a different version verifies. The
 unverified same-version identity is not retained as previous history then.
 
@@ -3188,7 +3190,10 @@ An existing home constrains host selection before ranking, not only a late
 retry after selecting the wrong host.
 
 #335 authors 0087; #337 0088; #338 0089; #341 0090; #342 0091; #343 0092;
-#345 0093. #344 consumes 0092 without another writer. Integrate 0087 before
+#344 authors 0093; #345 authors 0094 and consumes 0092 without another writer.
+This preserves monotonic migration
+ordering: shipping 0094 before 0093 would cause the versioned runner to skip
+0093. Integrate 0087 before
 0088 before later numbers; never deploy an 0088-only branch to a shared
 database. Recheck `origin/develop` immediately before authoring each SQL pair;
 if upstream takes a number, renumber the unshared reservation rather than

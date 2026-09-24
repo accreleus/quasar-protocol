@@ -3473,6 +3473,44 @@ well-formed and authorized; the server simply has no room to place it now.
 Only the owner (or an admin) may read a session (`403` otherwise). The signaling token is
 **never** returned here — only in the launch response.
 
+#### `home_seed` — actual initial managed-home seeding outcome (RH05 #344)
+
+The owner/admin session read shape (`POST /v1/sessions`, `GET /v1/sessions/{id}`,
+session lists and SSE, including admin oversight) gains an always-present
+nullable `home_seed` object with `{mode,reason}`. Modes are `reflink`, `copy`,
+`cold`, `existing`; their exact safe reasons and evidence meaning are in
+`agent-api.md` `session_state.home_seed`. `null` means no authenticated outcome
+was accepted, including an older agent, a non-managed home or a terminal
+failure before provisioning. Never infer cold from null, image readiness,
+published-template readiness or a filesystem probe. This is the initial app
+launch's outcome only; a later app swap does not update it.
+
+Only a `session_state{state:"starting"}` on the current authenticated
+connection from the session's assigned host may set it, while the row is
+`assigned` or `starting`. The agent sends this after provisioning; its earlier
+`starting` report has no outcome. Once the row reaches `running` or a terminal
+state, all seed reports are late and ignored, so a later swap cannot supply the
+first outcome. Validate the exact closed mode/reason combinations and object
+shape, then write once while the column is null. An identical duplicate is
+idempotent; a later conflicting, late, displaced-connection or cross-host
+report is ignored. Absence never clears an accepted value. An invalid field
+(wrong type, missing/extra key or invalid pair) rejects only `home_seed`: the
+`session_state` still drives lifecycle. Decode and validate the field
+separately so an invalid type cannot drop a `running` or terminal callback.
+Log only fixed `invalid_home_seed`, never the raw value. The field is
+observational and never changes admission, lifecycle, image preparation or
+home-claim materialization. The session SSE event fires when the accepted
+`home_seed` changes, as for other session read fields.
+
+The operator UI labels `reflink` as a completed reflinked home; `copy` as a
+completed full copy with **no reflink storage saving**; `cold` as a cold start
+with no such saving; and `existing` as an existing home preserved. Unknown
+future codes render as unknown, not as seeded or storage saving. The accepted
+code set is closed; extending it needs a reviewed contract and CHECK migration.
+No home path,
+user identifier beyond the existing session boundary, command output or
+free-text reason is exposed.
+
 #### `app_launch_state` — in-container application launch state (2026-08-02)
 > *Additive amendment — one optional, read-only string on the session resource (user and admin
 > session GET/list alike), plus one new conventional `state_detail` value. Changes no existing
@@ -3590,7 +3628,7 @@ than `EventSource` so the `Authorization` header carries as normal.
 **One event type: `session`.** Its `data` is the same `{ "session": { ... } }` envelope as
 `GET /v1/sessions/{id}` — no new vocabulary, no delta encoding. Sent once immediately on
 subscribe (snapshot), then on every change to `state`, `state_detail`, `app_launch_state`,
-or `health_state` (coalesced, best-effort). The event carrying a **terminal** state is
+`home_seed`, or `health_state` (coalesced, best-effort). The event carrying a **terminal** state is
 final: the server sends it and closes the stream. Comment lines (`:`) act as keep-alives
 (~25 s cadence).
 
@@ -8813,7 +8851,7 @@ older digest by the mutable catalog's current digest. Older clients ignore
 the additive field; existing placement fields and revision semantics do not
 change. `hosts[].reason` is a safe open code: `unmanaged_image`, `no_image`,
 `on_demand`, `not_required`, `awaiting_preparation`, `preparing`,
-`preparation_failed`, `inventory_unknown`, or, once 0093 fences exist,
+`preparation_failed`, `inventory_unknown`, or, once 0094 fences exist,
 `removing`; unknown future codes render generically. `prepared` on an
 unselected host is an observation only, not a requirement. An absent image
 report gives false; no current inventory gives null. `preparation_failed`
@@ -8864,7 +8902,7 @@ for that host and image until a different version verifies. On that advance,
 the previous pair comes from the retained current pair, not the unverified
 same-version adoption. Catalog sync never rewrites retained identities.
 The P3 uninstall is also an explicit image-removal path; its best-effort
-removal must obey #344's pending/reference/retention fence once 0093 lands.
+removal must obey #345's pending/reference/retention fence once 0094 lands.
 
 `POST /v1/admin/hosts/{id}/images/{image_id}/retry` is admin-only and returns
 `202` with no body after scheduling one retry through the existing Ensurer
@@ -8883,7 +8921,7 @@ is `400 validation_failed`. `409 conflict` has fixed safe messages: `Host is
 offline; retry after reconnect`, `Image is not required on this host`, `Lazy
 image downloads at first launch`, `Image is not failed for the adopted version`,
 or `Image cleanup is in progress; retry after it finishes`. A current
-`pulling`/`building` report gives the not-failed message. Once 0093 exists,
+`pulling`/`building` report gives the not-failed message. Once 0094 exists,
 Retry takes the shared image-operation fence and refuses `removing`; delayed
 dispatch rechecks the same fence. Every non-202 response writes nothing.
 The scheduled Retry and automatic backoff timer are process-local, not durable:

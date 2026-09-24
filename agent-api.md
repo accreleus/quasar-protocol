@@ -753,6 +753,53 @@ row, stamps `started_at`/`ended_at`, and **releases the GPU reservation** when t
 > `sessions.app_log_tail` for the stored form (the wire spells the classification `reason_code`;
 > the column is `failure_code`).
 
+> **RH05 #344 — initial Steam managed-home seed evidence.** A capable agent
+> may add `home_seed` to a second `session_state{state:"starting"}` report
+> immediately after the initial app launch has finished its pre-launch home
+> provision decision. The runner's first `starting` report precedes
+> provisioning and has no `home_seed`; the provision result report follows it
+> before `running` or any swap callback:
+> `{"mode":"reflink"|"copy"|"cold"|"existing","reason":"<code>"}`.
+> `reflink` means a forced reflink clone actually completed; `copy` means a
+> full copy completed and has **no reflink storage saving**. Both require
+> `reason:"seeded"`, an authorized matching published template, and an absent
+> or empty unambiguous managed home. `existing` requires
+> `reason:"existing_home"` and means a nonempty managed home was preserved.
+> `cold` means no template content was installed and ordinary launch can
+> continue. Its reason is one of `template_unavailable`, `source_disabled`,
+> `host_templates_disabled`, `host_setting_invalid`, `policy_unavailable`,
+> `storage_unavailable`, `clone_failed`, or `policy_changed`. The field is
+> scoped to the official adopted `steam` image with one identifiable managed
+> home mount; non-Steam apps, zero/ambiguous managed-home mounts and
+> pre-provision terminal failures omit it. Ambiguity never licenses creation
+> or rewriting an uncertain home or a claim of a cold outcome. For a cold
+> report, the agent must prove the destination is an absent/empty safe new
+> home and that optional seeding installed no content. A failed clone may
+> report `cold/clone_failed` only after partial content is removed and the
+> destination is proven empty. Unproven cleanup fails the launch safely and
+> omits the field. `storage_unavailable` is permitted only when the home
+> destination is safe and empty but optional template storage is unavailable;
+> inability to provision the home destination itself omits the field and
+> follows the existing launch failure path. The field is absent for swaps and
+> describes the **initial launch only**, even if a later swap changes the app.
+>
+> Classification precedence: determine one safe managed-home mount and inspect
+> it first. A nonempty existing home reports `existing/existing_home` regardless
+> of policy or template state. For a new empty home, source disabled wins over
+> host permission; malformed host permission wins over a disabled permission;
+> missing/revoked policy (`policy_unavailable`) wins over template/storage
+> absence; an authorized but missing/incompatible template reports
+> `template_unavailable`. After a clone starts, `policy_changed` or
+> `clone_failed` describes the abort only when safe empty cleanup is proven.
+> No reason reveals a path or free text.
+>
+> No path, user identifier, image reference, command output, or free-text
+> reason is sent. The field is observational: it proves neither app
+> presentation nor image/host readiness or home-claim materialization.
+> Identical reports may be repeated on reconnect. Older agents omit it and
+> retain ordinary launch behavior; an older control plane ignores the optional
+> field. A report with no field does not imply a cold launch.
+
 ### `ack` — reply to a downstream command
 ```json
 { "type": "ack", "id": "<command-id>", "ok": true, "error": null }
