@@ -761,14 +761,20 @@ single-use invite). Index: `(created_by)` for the admin list view.
 >
 > *Amendment 14 (#353), no DDL: the static value is **deprecated** and retires with the RH06
 > contract step (RH06-15, #367). A combined or control-only machine's single-use **local
-> enrollment token** is an ordinary row of this table — `max_uses = 1`, `created_by` NULL
-> (no admin minted it) — so it is hashed, single-use and redeemed exactly like a minted token.*
+> enrollment token** is an ordinary row of this table, hashed, single-use and redeemed exactly
+> like a minted token: `max_uses = 1`; `created_by` NULL (no admin minted it); `node_name` bound
+> to the node name the recovery actor gives the machine's own agent, so the token can enroll only
+> that agent; `expires_at` NULL, because it is only ever present on that machine and is spent by
+> its one use; `note` naming it the local enrollment token. The control plane inserts it at boot
+> **once**: a row with the same `token_hash` already present is left exactly as it is
+> (`ON CONFLICT (token_hash) DO NOTHING`), so a restart neither duplicates it nor revives a spent
+> one.*
 
 | column | type | notes |
 |---|---|---|
 | `id` | `UUID` PK | `gen_random_uuid()` |
 | `token_hash` | `TEXT` NOT NULL UNIQUE | SHA-256 (hex) of the opaque token (256-bit entropy). Lookup key. Plaintext shown to the admin exactly once at mint, never stored. |
-| `created_by` | `UUID` NULL → `users(id)` **ON DELETE SET NULL** | the admin who minted it; NULL once that account is gone. *(0073 — it was NOT NULL / CASCADE in 0072.)* **The row must outlive its minter:** a token minted by an ephemeral DX admin identity (`users.ephemeral_expires_at`, #399) was cascaded away mid-enrollment when the reaper deleted that identity, destroying a credential a host was in the middle of using. The admin list already `LEFT JOIN`s `users` and `control-api.md` already models `created_by_user_id` as nullable, so nothing above the database changed. |
+| `created_by` | `UUID` NULL → `users(id)` **ON DELETE SET NULL** | the admin who minted it; NULL once that account is gone, or *(amendment 14)* when no admin minted it at all — a machine's local enrollment token (above). *(0073 — it was NOT NULL / CASCADE in 0072.)* **The row must outlive its minter:** a token minted by an ephemeral DX admin identity (`users.ephemeral_expires_at`, #399) was cascaded away mid-enrollment when the reaper deleted that identity, destroying a credential a host was in the middle of using. The admin list already `LEFT JOIN`s `users` and `control-api.md` already models `created_by_user_id` as nullable, so nothing above the database changed. |
 | `node_name` | `TEXT` NULL | NULL = usable by any `node_name`; set = usable only by exactly this one — what stops a leaked token becoming a host it was not minted for. |
 | `max_uses` | `INT` NOT NULL DEFAULT `1` | `CHECK (max_uses >= 1)`. |
 | `used_count` | `INT` NOT NULL DEFAULT `0` | `CHECK (used_count >= 0 AND used_count <= max_uses)`. Bumped atomically on redemption. |
@@ -979,7 +985,7 @@ capacity (CPU/mem) lives here; GPU capacity is per-row in `gpus`.
 | `built_at` | `TIMESTAMPTZ` NULL | *(platform-release amendment 1, migration 0074, additive)* when that agent binary was built. Same wholesale-replace rule. |
 | `install_mode` | `TEXT` NULL | *(platform-release amendment 1, migration 0074, additive)* `CHECK (install_mode IS NULL OR install_mode IN ('registry','source'))`, **widened by amendment 14 (#353) to `('registry','source','owned')`** — a plain `CHECK` swap, the enum convention above. How this host got its platform images (`CONTEXT.md` "Install mode"): `registry` = pulled published images, `source` = built on the host, `owned` = created and replaced by the machine's recovery actor. A `source` host can be **told** about a platform release but never given one. Same wholesale-replace rule. |
 | `updater_present` | `BOOLEAN` NULL | *(platform-release amendment 1, migration 0074, additive)* whether an **updater** sits on this host's stack. **NULL is not `false`**: NULL = no amendment-aware agent has registered (nobody has said), `false` = an agent looked and found none — the first is an old agent, the second a real gap an operator must close, and the release surface reports them differently. Same wholesale-replace rule. *(Amendment 14:)* on an `owned` host, whether its recovery actor answered on the agent socket. |
-| `recovery_actor_version` | `TEXT` NULL | *(amendment 14, #353, additive)* the semver the **recovery actor** serving this host's machine reports, as sent on `register` (`agent-api.md`). NULL unless the host is `owned` and reported it. Same wholesale-replace rule as `source_commit`. Compared with the installed control plane's floor (`control-api.md` `below_floor`); never parsed for anything else. |
+| `recovery_actor_version` | `TEXT` NULL | *(amendment 14, #353, additive)* the semver the **recovery actor** serving this host's machine reports, as sent on `register` (`agent-api.md`). NULL unless the host is `owned` and reported it. Same wholesale-replace rule as `source_commit`. Compared with the installed control plane's floor (`control-api.md` `below_floor`); never parsed for anything else. **Deliberately unlike `agent_version`** (stored as sent): a reported value that is not `MAJOR.MINOR.PATCH[-prerelease]` is stored NULL, because this column exists only to be ordered. |
 | `recovery_actor_source_commit` | `TEXT` NULL | *(amendment 14, additive)* the git commit that recovery actor was built from: 7–40 lowercase hex, stored exactly as sent. What `up_to_date` compares for the actor half of an owned host. Same wholesale-replace rule. |
 | `seed_version` | `TEXT` NULL | *(amendment 14, additive)* the version of the **seed** the recovery actor last saw on the machine, opaque, stored as sent. Informational only: nothing is decided on it (ADR 0007). Same wholesale-replace rule. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |

@@ -2531,6 +2531,49 @@ paths:
         "501":
           description: "apply_unsupported - as for apply."
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  /v1/admin/platform/hosts/{id}/remove:
+    post:
+      tags: [admin]
+      x-required-role: admin
+      x-unimplemented: true
+      summary: Remove an owned GPU host's node agent and recovery actor (admin). NOT YET SERVED - see x-unimplemented.
+      description: >-
+        AMENDMENT 14 (#353), authored ahead of the server: `x-unimplemented: true` until the
+        RH06 slice that implements it registers the route and removes the marker (and its
+        entry in the drift test's reviewed allowlist) in the same change. The console's
+        "remove host". Validates, cordons the host exactly as a per-host apply does, with force
+        stops its sessions, then sends agent-api.md host_remove and answers 202 once the
+        recovery actor accepts. It does NOT forget the host: once the host is offline the
+        existing DELETE /v1/hosts/{id} does that, unchanged. A refusal after the cordon puts the
+        host's cordon state back as it was found. Writes no platform_apply_attempts row.
+        Audited as platform.remove.host.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlatformHostRemoveRequest" }
+      responses:
+        "202": { description: "Accepted - the host's recovery actor accepted the removal. The host as it stands (cordoned).", content: { application/json: { schema: { $ref: "#/components/schemas/PlatformHostRemoveResponse" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >-
+            run_active; attempt_in_flight (both as for apply); host_not_eligible (the body
+            carries `reason`: host_offline or updater_absent); host_not_removable (the host is not
+            owned, or its agent refused because its machine also runs the control plane, or the
+            ack carried another rejection, which the message names); conflict (non-terminal
+            sessions remain and force is false - nothing changed).
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "501":
+          description: "apply_unsupported - no ack within the 10s ack timeout: the agent predates amendment 14 and nothing was removed."
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/admin/platform/attempts:
     get:
       tags: [admin]
@@ -6576,6 +6619,22 @@ components:
         from or to an agent or recovery actor below the installed control plane's floor.
       properties:
         force: { type: boolean, default: false, description: "As for apply." }
+    PlatformHostRemoveRequest:
+      type: object
+      description: "Amendment 14 (#353). The body of POST /v1/admin/platform/hosts/{id}/remove; optional as a whole."
+      properties:
+        force:
+          type: boolean
+          description: >-
+            Optional; absent means false. The same meaning as on the per-host apply - the operator
+            agreeing to end the host's live sessions. False refuses 409 conflict while any
+            non-terminal session remains; true stops them and proceeds. A client MUST name the
+            number of sessions in its confirmation.
+    PlatformHostRemoveResponse:
+      type: object
+      required: [host]
+      properties:
+        host: { $ref: "#/components/schemas/Host" }
     PlatformApplyRunEnvelope:
       type: object
       required: [run]

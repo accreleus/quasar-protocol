@@ -1203,6 +1203,7 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `POST /v1/admin/platform/apply/runs/{id}/cancel` | **admin** | *(amendment 2)* stop the run **before its next target**; it **never interrupts an in-flight attempt**. Idempotent; `409 run_not_active` on a terminal run; `404 not_found`. Audited as `platform.apply.cancel` |
 | `POST /v1/admin/platform/hosts/{id}/apply` | **admin** | *(amendment 2)* **per-host apply** of one release. Body: `release_id`, optional `force` (skip the zero-sessions wait and kill the N sessions running). `202` with the attempt. `404 not_found`; `422 release_below_schema_version`; `409 release_not_offered` / `409 host_not_eligible` (carrying the amendment-1 `EligibilityReason`) / `409 attempt_in_flight` / `409 run_active`; `501 apply_unsupported` when the agent never acks. Audited as `platform.apply.host` |
 | `POST /v1/admin/platform/hosts/{id}/revert` | **admin** | *(amendment 2)* **per-host revert** to the previous digests recorded on that host's last succeeded attempt — an apply with an older digest set, not a new wire message, and bounded by ADR 0002 (never above the control plane's release). Optional `force`. `202` with the attempt. `409 nothing_to_revert` / `409 host_not_eligible` / `409 attempt_in_flight` / `409 run_active`; `404 not_found`. Audited as `platform.revert.host` |
+| `POST /v1/admin/platform/hosts/{id}/remove` | **admin** | *(amendment 14, #353)* **remove an owned GPU host's** node agent and recovery actor, by `agent-api.md` `host_remove`. Optional `force` (stop the host's sessions rather than refuse). `202` with the host once its recovery actor accepts. `404 not_found`; `409 run_active` / `409 attempt_in_flight` / `409 host_not_eligible` (`host_offline`, `updater_absent`) / `409 host_not_removable` / `409 conflict` (sessions remain without `force`); `501 apply_unsupported`. Does not forget the host: that stays `DELETE /v1/hosts/{id}` once offline. Audited as `platform.remove.host` |
 | `GET /v1/admin/platform/attempts` | **admin** | *(amendment 2)* apply history, newest first — **including control-plane attempts and reverts**. Optional `host_id` narrows to one host; `limit` 1–200, default 50 |
 | `POST /v1/admin/platform/release-webhook/test` | **admin** | *(release notifications, amendment 4, #123)* send **one** test notification to the configured webhook. Ignores `release_webhook_enabled` and **records nothing**, so it can never suppress a real notification. A refused delivery is `200` with `ok: false`; only a test with nowhere to send is `400 webhook_not_configured`. Where the notification goes is `PATCH /v1/admin/settings`; the optional signing secret is `PUT /v1/admin/secrets/platform.release_webhook.secret`. Audited as `platform.release_webhook.tested` — outcome only, never the URL |
 | everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account. *(UI-P5: `POST /v1/sessions` additionally refuses a `profile_id` outside the app's allow-list with `409 profile_not_launchable_for_app` — a per-app configuration rule, not a role check, which is why it is `409` and not the `403` this table's admin rows produce. It is refused for **every** non-admin caller, including one supplying an explicit `stream` override, which carries no role gate here.* ***Phase 2:** `POST /v1/sessions` additionally refuses an app the caller holds no entitlement for with `403 forbidden`. That one **is** `403` and not `409`, because unlike the allow-list it is a statement about the **caller** rather than about the request — and unlike this table's admin rows it is refused for **every** role, admin included)* |
@@ -1870,7 +1871,9 @@ break a feature; `DELETE` is how you clear one.
 > **Amendment 14 (#353):** the static `ENROLLMENT_TOKEN` is **deprecated** and is removed by the
 > RH06 contract step (not in force until RH06-15, #367); an owned machine never uses it, and a
 > combined or control-only machine's own agent enrolls with a single-use local token redeemed
-> through the minted-token path (§"RH06 — Quasar-owned installation", "Enrollment").
+> through the minted-token path (§"RH06 — Quasar-owned installation", "Enrollment"). The boot
+> `WARN` below inverts under amendment 14: it is logged when a static value **is** set, and not
+> when it is unset.
 
 **`ENROLLMENT_TOKEN` is optional.** A deployment that enrolls only with minted tokens sets no
 static value; the control plane logs one `WARN` at boot and matches nothing against it (empty
@@ -7084,6 +7087,12 @@ precedence is inserted between those two keys — see §Platform-release beta ch
 - **A stable release whose manifest is missing or invalid is not listed either** — it cannot be
   applied by digest (ADR 0001), so offering it would be offering something unfollowable. It
   surfaces as a `manifest_invalid` fault instead, which is how a broken publish stops being silent.
+  *(Amendment 14 note, #353: shipped control planes reserve the `manifest_invalid` fault kind but
+  do not emit it — a missing or invalid asset is counted in the `platform.release_detect` run
+  summary and the release is simply not listed. So a control plane that predates amendment 14 shows
+  **nothing** for a release that publishes no `platform-release-manifest.json` (#352 decision 19),
+  not a fault. Amendment 14 does not change what a control plane emits here; it relies only on
+  "not listed".)*
 
 Per release:
 
@@ -9096,7 +9105,8 @@ endpoint and keep their existing image read/launch behavior.
 > drive such machines. **Everything below is additive and optional for an existing consumer**:
 > every new field is optional in `openapi.yaml`, every new identifier is appended to a vocabulary
 > whose consumers already render an unrecognised value verbatim, a `registry` or `source` host and a
-> format-1 release behave exactly as before, and no route is added, removed or renamed. The
+> format-1 release behave exactly as before, and exactly one admin route is added
+> (`POST /v1/admin/platform/hosts/{id}/remove`) while none is removed or renamed. The
 > **contract** step (§"RH06 contract step" below) is written now and is **not in force** until
 > RH06-15 (#367) lands. The wire twin is `agent-api.md` amendment 14; storage is `schema.md`
 > amendment 14. Decisions: **ADR 0007** (the seed interface), **ADR 0008** (compiled recipes; the
@@ -9104,8 +9114,8 @@ endpoint and keep their existing image read/launch behavior.
 > of the recovery actor and of a non-migrating control plane that never passed a health check).
 > ADRs 0001–0003, 0005 and 0006 hold unchanged.
 >
-> Every operation touched here keeps `RequireAuth → RequireAdmin`, server-enforced; nothing here
-> changes §Authorization.
+> Every operation touched here keeps `RequireAuth → RequireAdmin`, server-enforced. §Authorization
+> gains exactly one row, for the new remove route, under the same gate.
 
 What this amendment adds, in one list:
 
@@ -9127,8 +9137,8 @@ What this amendment adds, in one list:
 9. **The control-plane target's automatic restore** is widened by the ADR 0004 amendment
    (§"Automatic restore on an owned machine").
 10. **The static `ENROLLMENT_TOKEN` is deprecated** (§"Enrollment").
-11. **Removing an owned GPU host** is carried by `agent-api.md` `host_remove` (§"Removing an owned
-    GPU host").
+11. **Removing an owned GPU host**: one admin route, `POST /v1/admin/platform/hosts/{id}/remove`,
+    which sends `agent-api.md` `host_remove` (§"Removing an owned GPU host").
 
 ### Release manifest format 2
 
@@ -9175,10 +9185,15 @@ produced by the same publish workflow from the same tag as the notes and the for
 - **Signature.** A release that is signed carries **`platform-release-manifest.v2.json.sig`**, a
   detached signature over the v2 asset's exact bytes in the format ADR 0003 defines. An actor that
   verifies signatures fetches the v2 pair; nothing about the signature format, the trust
-  configuration or the two signature reasons changes.
+  configuration or the two signature reasons changes. The Go **updater** on a `registry` host
+  fetches only `platform-release-manifest.json` and its `.sig`: set to `require`, it would fail a
+  release that published only the v2 pair `signature_missing`. That cannot arise, because the
+  format-1 pair keeps being published until the updater has retired (the ordering constraint in
+  §"RH06 contract step", item 4).
 - **Format-1 consumers are unaffected.** A control plane that predates this amendment fetches only
   `platform-release-manifest.json` and never sees a format-2 document. While the expand step is in
-  force a release may publish **both** assets; the format-1 asset then keeps its exact two-component
+  force a release that publishes the v2 asset publishes the format-1 asset **beside** it (the
+  ordering constraint in §"RH06 contract step", item 4); the format-1 asset keeps its exact two-component
   shape and names the same control-plane and node-agent digests as the format-2 one. A control
   plane implementing this amendment reads the v2 asset when a release publishes one and the
   format-1 asset otherwise; a release read from format 1 has no recovery-actor component and no
@@ -9186,7 +9201,15 @@ produced by the same publish workflow from the same tag as the notes and the for
 - `PlatformRelease.manifest` serves whichever asset was read, **verbatim**; a client tells them apart
   by `format_version`. A v2 asset that fails validation — an unknown `format_version`, a component
   missing or out of order, a `floor` entry missing, out of order, malformed or above `version`, an
-  unknown key — is a `manifest_invalid` fault exactly as for format 1, and the release is not listed.
+  unknown key — is handled exactly as an invalid format-1 asset: the release is not listed (and see
+  the amendment-14 note in §"Platform releases" on `manifest_invalid`).
+- **Edge publishes no manifest**, in either format, so nothing above applies to an edge build. Its
+  `recovery-actor` image is resolved for the build's commit exactly as the edge channel resolves
+  that commit's control-plane and node-agent images (the edge tag family is release tooling, not
+  this contract). An edge build is **one commit for every image**, so it names a `recovery-actor`
+  component whenever one was published for that commit. **The floor never comes from a manifest at
+  apply time**: `below_floor` is judged against the installed control plane's own build (§"`below_floor`"),
+  so it holds on edge too.
 - The contract step stops publishing the format-1 asset (§"RH06 contract step").
 
 ### Owned hosts on the host body and the release view
@@ -9214,8 +9237,10 @@ produced by the same publish workflow from the same tag as the notes and the for
   fields.
 - **`up_to_date` on an owned host** requires both halves of the host to be on the release: the
   agent's `source_commit` equals the release's **and**, when the release names a `recovery-actor`
-  component, so does `recovery_actor_source_commit`. An owned host whose actor commit is null is not
-  up to date. A `registry` host is judged as before.
+  component, so does `recovery_actor_source_commit`. A stable release names one when it was read
+  from a format-2 asset; an edge build names one when a recovery-actor image was published for its
+  commit (above); a release read from a format-1 asset never does. An owned host whose actor commit
+  is null is not up to date against a release that names one. A `registry` host is judged as before.
 
 ### Components of an apply on an owned machine
 
@@ -9375,8 +9400,10 @@ The ADR 0004 amendment, as it reaches this surface:
 ### Enrollment
 
 - **The static `ENROLLMENT_TOKEN` is deprecated.** It keeps working exactly as §Host enrollment
-  tokens describes until the contract step; a control plane implementing this amendment logs one
-  `WARN` at boot while it is set.
+  tokens describes until the contract step. The boot warning **inverts**: §Host enrollment tokens
+  has the control plane log one `WARN` when *no* static value is set; a control plane implementing
+  this amendment instead logs one `WARN` when a static value **is** set (naming the deprecation and
+  the contract step) and logs nothing when it is unset, because unset is now the recommended state.
 - An owned machine never uses it. A GPU host enrolls with an admin-minted token, as today; the
   recovery actor passes the enrollment string to the agent it creates. A combined or control-only
   machine's own agent enrolls with a **single-use local enrollment token** the recovery actor
@@ -9386,10 +9413,57 @@ The ADR 0004 amendment, as it reaches this surface:
 ### Removing an owned GPU host
 
 An owned GPU host's platform services are removed by `agent-api.md` **`host_remove`**, relayed to its
-recovery actor, which removes the node agent and then itself. The control plane drains the host
-first; the host then goes offline, and forgetting its row is the existing `DELETE /v1/hosts/{id}`,
-unchanged. **This amendment adds no route.** A removal is not a platform-release attempt and writes
-no `platform_apply_attempts` row.
+recovery actor, which removes the node agent and then itself. This amendment adds **one** admin
+route that sends it. A removal is not a platform-release attempt and writes no
+`platform_apply_attempts` row.
+
+#### `POST /v1/admin/platform/hosts/{id}/remove` — remove an owned GPU host's platform services (admin)
+
+`RequireAuth → RequireAdmin`, server-enforced, listed in §Authorization. The console's "remove host"
+(#352 decision 18). It stops and removes the host's node agent and recovery actor; it does **not**
+forget the host — once the host is offline, the existing `DELETE /v1/hosts/{id}` does that,
+unchanged (it still refuses an online host).
+
+```json
+// request — the body is optional; force defaults to false
+{ "force": false }
+// 202 Accepted — the recovery actor accepted the removal; the host as it stands (cordoned)
+{ "host": { "id": "<uuid>", "node_name": "gpu-host-01", "status": "draining", "...": "..." } }
+```
+
+- **`force`** *(boolean, optional, default `false`)* — the same meaning as on the per-host apply:
+  the operator agreeing to end the host's live sessions. With `force: false` a host that holds any
+  non-terminal session is refused `409 conflict` and **nothing changes** — drain it first
+  (`POST /v1/hosts/{id}/drain`) and ask again once it is empty. With `force: true` the control plane
+  sends `session_stop` (`reason: "host_draining"`) to each of them and then proceeds without waiting:
+  removing the agent ends them regardless, and the stops give them a clean terminal state. A client
+  MUST name the number of sessions in its confirmation, as for apply.
+- **What it does, in order.** Validate (below); cordon the host exactly as a per-host apply does;
+  with `force`, stop its sessions; mint a `request_id` and send `host_remove`; wait for the ack
+  (the 10 s ack timeout). `ack{ok:true}` answers `202`. The host's connection then closes when its
+  agent is removed and the host reads `offline`; nothing further is reported (`agent-api.md`
+  §`host_remove`).
+- **On any refusal after the cordon** (a negative ack, or no ack) the host's cordon state is put back
+  as it was found, as a failed apply does. Sessions a `force` request already stopped are not
+  brought back.
+- **Errors**, checked in this order:
+  - `404 not_found` — no such host.
+  - `409 run_active` — a fleet run is active; `409 attempt_in_flight` — this host has an open
+    platform-apply attempt. Both exactly as for the per-host apply.
+  - `409 host_not_eligible` with `reason: "host_offline"` (the host's agent is not connected; there
+    is nobody to tell) or `reason: "updater_absent"` (`updater_present` is false: no recovery actor
+    answered) — amendment 1's `EligibilityReason` values, reused.
+  - **`409 host_not_removable`** — the host's `install_mode` is not `owned`, or its agent refused
+    `invalid` because its machine also runs the control plane (a combined host is taken apart with
+    the recovery actor's operator `uninstall` command on that machine), or the ack carried any
+    other rejection; the error message names the ack's identifier.
+  - `409 conflict` — non-terminal sessions remain and `force` is false (above).
+  - `501 apply_unsupported` — no ack within the ack timeout: the agent predates amendment 14 and
+    nothing was removed. Reused from the per-host apply.
+- **Audited** as **`platform.remove.host`**, target type `host`, with the host id, its `node_name`
+  and `force`.
+- **Authored ahead of the server**: the operation carries `x-unimplemented: true` in `openapi.yaml`
+  until the RH06 slice that implements it registers the route and removes the marker.
 
 ### Unknown identifiers, restated for every appended vocabulary
 
@@ -9425,7 +9499,15 @@ no `platform_apply_attempts` row.
 4. **Format-1 publication stops.** From the first release that ships without the Go updater, releases
    publish `platform-release-manifest.v2.json` (and, when signed, its `.sig`) and **no**
    `platform-release-manifest.json`, so a control plane that predates this amendment is never offered
-   an in-place update onto an owned install: it finds no asset it can read and lists no such release.
-   A control plane implementing this amendment stops falling back to format 1. The `ReleaseManifest`
-   (format 1) shape stays documented, because releases already published carry it.
+   an in-place update onto an owned install: it finds no asset it can read and lists no such
+   release. It raises no fault either — shipped control planes never emit `manifest_invalid` (see
+   the amendment-14 note in §"Platform releases") — so it shows nothing, as #352 decision 19
+   intends. A control plane implementing this amendment stops falling back to format 1. The
+   `ReleaseManifest` (format 1) shape stays documented, because releases already published carry it.
+   **Ordering constraint.** The generator change that stops emitting the format-1 asset is RH06-13
+   (#365), but no release may be published without the format-1 pair until the Go updater has
+   retired (RH06-15, #367): until then a `registry` host's updater still verifies signatures against
+   `platform-release-manifest.json.sig` (Signature bullet above). Releases are cut from this work
+   only after the initiative merges, which is after both.
 5. Nothing else is removed: no route, no field, no enum value other than the two preflight ids.
+   `POST /v1/admin/platform/hosts/{id}/remove` is part of the expand step and stays.

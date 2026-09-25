@@ -298,7 +298,8 @@ A node must prove it's allowed to join before it can register.
   `auth_failed` that says nothing about whether the `node_name` exists or is live.
   *(Amendment 14, #353:)* **the fleet-wide static value is deprecated.** It is still accepted
   exactly as above until the contract step (§"RH06 contract step"), and a control plane
-  implementing amendment 14 logs a `WARN` at boot while one is configured. An `owned` machine
+  implementing amendment 14 logs a `WARN` at boot while one is configured (and, inverting the
+  earlier rule in `control-api.md` §Host enrollment tokens, no longer warns when none is). An `owned` machine
   never uses it: a GPU host's recovery actor hands the admin-minted enrollment string to the
   node agent it creates, and the agent redeems it as above; a combined or control-only machine's
   own agent enrolls with a **single-use local enrollment token** the recovery actor generates at
@@ -451,7 +452,9 @@ report three more optional flat fields describing the rest of its machine:
 - **`recovery_actor_version`** — the semver the recovery actor serving this machine reports for
   itself, without a leading `v`; anything that is not `MAJOR.MINOR.PATCH[-prerelease]` is treated
   as **absent**. It is what the control plane compares with its declared floor (`control-api.md`
-  §"RH06", `below_floor`).
+  §"RH06", `below_floor`). **Deliberately unlike `agent_version`**, which is stored exactly as sent:
+  this field is only ever compared by SemVer precedence, so a value that is not a version is stored
+  NULL rather than kept as a string nothing can order.
 - **`recovery_actor_source_commit`** — the git commit that recovery actor was built from, under
   exactly the `source_commit` rule above (7–40 lowercase hex, stored as sent, anything else absent).
   It is how the control plane recognises that the actor is on a release, as `source_commit` is for
@@ -2176,7 +2179,8 @@ rejected apply **never fails a session and never changes host status**:
   the machine finishes it. A removal is **not** a platform-release attempt and produces no
   `platform_apply_attempts` row.
 - **Draining is the control plane's job**, done before it sends this command: the agent does no
-  session logic, and removing the agent ends every session on the host. Forgetting the host's row
+  session logic, and removing the agent ends every session on the host. The admin route that sends
+  it is `control-api.md` `POST /v1/admin/platform/hosts/{id}/remove`. Forgetting the host's row
   afterwards is the existing `control-api.md` `DELETE /v1/hosts/{id}`, which requires the host to be
   offline.
 
