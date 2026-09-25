@@ -6954,11 +6954,11 @@ Everything below that refuses a move, orders a list, or reports a fault does it 
 
 ### `GET /v1/admin/platform/identity` — what this control plane is (admin)
 
-`RequireAuth → RequireAdmin`. A pure read of the running binary's own stamps; it touches no
-database row and never varies with the channel. *(Amendment 14, owner addition on #353: five
-optional fields describe the control plane's own machine, read from that machine's recovery actor —
-§"RH06 — Quasar-owned installation", "The control plane's own machine". The four fields below are
-unchanged.)*
+`RequireAuth → RequireAdmin`. A read of the running binary's own stamps **and**, since amendment
+14 (owner addition on #353), of the identity of the machine it runs on, which that machine's
+recovery actor reports (five optional fields — §"RH06 — Quasar-owned installation", "The control
+plane's own machine"). It touches no database row and never varies with the channel. The four
+fields below are unchanged and still come from the binary alone.
 
 ```json
 // 200
@@ -9554,9 +9554,15 @@ than from a release row.
 - **`components`** *(required, non-empty)* — `{name, image, digest}` exactly as `ApplyComponentDigest`:
   `image` a repository reference with **no tag and no digest**, `digest` `sha256:` + 64 lowercase hex
   (ADR 0001). Each name at most once. A `control_plane` target may name `control-plane` and
-  `recovery-actor`; a `host` target may name `node-agent` and `recovery-actor`; `control-plane` is
-  never sent to a host. **The order in the request is not significant**: the control plane orders
-  the list with the rule it uses for every apply — `recovery-actor` first (ADR 0008).
+  `recovery-actor`, but **names `recovery-actor` only together with `control-plane`** — an actor-only
+  request against the control plane's machine would leave that actor ahead of the control plane with
+  no control-plane replacement in flight, which A1 does not allow — otherwise `400
+  validation_failed`. A `host` target may name `node-agent` and `recovery-actor`, except that a
+  request for the agent on the control plane's own machine (a combined host, known as for the
+  remove route) names **only `node-agent`**, because that machine's actor moves in the
+  control-plane step; otherwise `400 validation_failed`. `control-plane` is never sent to a host.
+  **The order in the request is not significant**: the control plane orders the list with the rule
+  it uses for every apply — `recovery-actor` first (ADR 0008).
 - **`force`**, **`external_backup_confirmed`** *(optional, default `false`)* — the same meanings as on
   the per-host apply and the fleet apply.
 - **Owned targets only.** It is the product lane (#352 decision 15): a `source` or Compose (`registry`)
@@ -9573,11 +9579,15 @@ than from a release row.
   carry the same commit.
   - A **control-plane** digest whose schema version is **below** the installed control plane's is
     refused `422 release_below_schema_version`; one **above** it **migrates**.
-  - A **host** digest set is allowed only when its commit is the installed control plane's own, or
-    the commit of a release this instance knows that orders at or below it; any other commit
-    cannot be shown not to be ahead of the control plane and is refused `409 host_not_eligible` with
+  - **Any request that does not name `control-plane`**, whatever its target, is allowed only when its commit is the installed control plane's own, or the commit of a release
+    this instance knows that orders at or below it; any other commit cannot be shown not to be ahead
+    of the control plane and is refused `409 host_not_eligible` with
     `reason: "release_above_control_plane"` (fail closed). It is refused `reason: "below_floor"`
     when that known release is below the floor.
+  - **A1 with a branch build.** When a control-plane request names both components, the machine's
+    actor moves first and may lead the control plane by a **branch commit** rather than by one
+    release, while that replacement is in flight or after it failed and was restored — the same
+    situation A1 allows, and within its intent (ADR 0008).
 - **A migrating control-plane digest follows #352 decision 14 exactly as a migrating release
   does**: the instance is drained first (with `force`, its sessions stopped), and then either the
   Quasar-owned database's pre-update dump is taken (`backup_failed` if it cannot be) or, on an
@@ -9641,7 +9651,10 @@ the control plane runs on. No route is added.
   these five are the one part of the identity read that consults something other than the binary.
 - **`install_mode`** — `owned` when the machine's recovery actor answered; otherwise **null**. The
   enum is the host's (`registry`, `source`, `owned`) so the two read alike, but this amendment defines
-  only when the control plane reports `owned`.
+  only when the control plane reports `owned`. A **transient** failure to reach the machine's recovery
+  actor therefore also reads null, and a developer apply to the control-plane target is then refused
+  `409 target_not_owned` — the safe answer — until the actor answers again. The control-plane
+  target's `updater_socket` preflight check is what surfaces that condition to the operator.
 - **`recovery_actor_version`**, **`recovery_actor_source_commit`**, **`seed_version`** — exactly the
   host fields of the same names (§"Owned hosts on the host body and the release view"), for the
   control plane's machine, including the rule that an unparseable version is null.
