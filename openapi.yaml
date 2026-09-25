@@ -2541,9 +2541,11 @@ paths:
         AMENDMENT 14 (#353), authored ahead of the server: `x-unimplemented: true` until the
         RH06 slice that implements it registers the route and removes the marker (and its
         entry in the drift test's reviewed allowlist) in the same change. The console's
-        "remove host". Validates, cordons the host exactly as a per-host apply does, with force
-        stops its sessions, then sends agent-api.md host_remove and answers 202 once the
-        recovery actor accepts. It does NOT forget the host: once the host is offline the
+        "remove host". Validates (refusing the control plane's own machine's agent before
+        anything changes), cordons the host exactly as a per-host apply does, then checks
+        sessions (without force a remaining session refuses 409 conflict; with force they are
+        stopped), then sends agent-api.md host_remove and answers 202 once the recovery actor
+        accepts. It does NOT forget the host: once the host is offline the
         existing DELETE /v1/hosts/{id} does that, unchanged. A refusal after the cordon puts the
         host's cordon state back as it was found. Writes no platform_apply_attempts row.
         Audited as platform.remove.host.
@@ -2565,14 +2567,65 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
           description: >-
-            run_active; attempt_in_flight (both as for apply); host_not_eligible (the body
-            carries `reason`: host_offline or updater_absent); host_not_removable (the host is not
-            owned, or its agent refused because its machine also runs the control plane, or the
-            ack carried another rejection, which the message names); conflict (non-terminal
-            sessions remain and force is false - nothing changed).
+            PRE-SEND, in this order, each changing nothing: run_active; attempt_in_flight (both
+            as for apply); host_not_eligible (the body carries `reason`: host_offline or
+            updater_absent); host_not_removable (the host is not owned, or its agent is the one on
+            the control plane's own machine - refused before any cordon or session stop);
+            conflict (after the cordon, non-terminal sessions remain and force is false; the
+            cordon is restored). ACK OUTCOME: host_not_removable (the ack carried a rejection -
+            invalid, busy, updater_absent or updater_unreachable - which the message names; the
+            cordon is restored, and sessions a force request already stopped stay stopped).
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
         "501":
           description: "apply_unsupported - no ack within the 10s ack timeout: the agent predates amendment 14 and nothing was removed."
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  /v1/admin/platform/developer-apply:
+    post:
+      tags: [admin]
+      x-required-role: admin
+      x-unimplemented: true
+      summary: Developer apply - an arbitrary digest set to one owned target (admin). NOT YET SERVED - see x-unimplemented.
+      description: >-
+        AMENDMENT 14, OWNER ADDITION on #353 (2026-09-25), beyond #352 decision 24; authored
+        ahead of the server: `x-unimplemented: true` until the RH06 slice that implements it
+        registers the route and removes the marker (and its drift-test allowlist entry) in the
+        same change. The product lane (#352 decisions 15 and 22): a standalone attempt that
+        applies the requested digests to ONE owned target - the control plane or one host -
+        ordered recovery-actor first. Every image digest-only and under the namespace
+        allowlist (ADR 0001; the recovery actor's allowlist is the enforcement, the control
+        plane checks up front). ADR 0002 holds on the images' build-identity labels: a
+        control-plane digest below the installed schema is refused, one above it MIGRATES and
+        follows #352 decision 14 (drain, then the pre-update dump or external_backup_confirmed);
+        a host digest set must be the installed control plane's commit or a known release at
+        or below it. Never offered as a release, never unattended. Carries no release version,
+        so under signature mode require it fails signature_missing; under verify it applies
+        unsigned with the WARN. Recorded as a kind developer_apply attempt; audited as
+        platform.apply.developer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlatformDeveloperApplyRequest" }
+      responses:
+        "202": { description: "Accepted - the attempt was created.", content: { application/json: { schema: { $ref: "#/components/schemas/PlatformApplyAttemptEnvelope" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >-
+            run_active; attempt_in_flight; host_not_eligible (with the host's EligibilityReason,
+            including release_above_control_plane for a commit that cannot be shown not to be
+            ahead and below_floor); preflight_blocked (the control-plane target); target_not_owned
+            (the target is not an owned install); image_unresolvable (a digest does not resolve
+            as seen from the control plane, carries no readable build identity, or the images
+            disagree on their commit); namespace_rejected (an image outside the allowlist).
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "422":
+          description: "release_below_schema_version - a control-plane digest below the installed schema (ADR 0002)."
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "501":
+          description: "apply_unsupported - as for the per-host apply."
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/admin/platform/attempts:
     get:
@@ -5905,6 +5958,31 @@ components:
             an integer). ALWAYS KNOWN, because it is derived from the embedded
             migration set rather than a build flag - which is why it, and not semver
             or built_at, is the ordering key everywhere in this surface (ADR 0002).
+        # amendment 14, owner addition on #353 (2026-09-25): the control plane's OWN MACHINE,
+        # read from that machine's recovery actor over its local (non-frozen) control socket.
+        # All five OPTIONAL; absent or null means unknown (an older server, a machine that is
+        # not owned, or an actor that did not answer). The four fields above are unchanged.
+        install_mode:
+          type: [string, "null"]
+          enum: [registry, source, owned, null]
+          description: "owned when this machine's recovery actor answered; otherwise null. The enum is the host's; this amendment defines only when owned is reported."
+        recovery_actor_version:
+          type: [string, "null"]
+          description: "Semver of this machine's recovery actor; null when absent or unparseable."
+        recovery_actor_source_commit:
+          type: [string, "null"]
+          description: "7-40 lowercase hex, the commit that recovery actor was built from."
+        seed_version:
+          type: [string, "null"]
+          description: "Opaque version of the seed the recovery actor last saw on this machine."
+        database_mode:
+          type: [string, "null"]
+          enum: [owned, external, null]
+          description: >-
+            owned = Quasar created this database and takes its pre-update dump; external = the
+            operator's own database, only used, so a migrating update needs
+            external_backup_confirmed. What tells a client when to show that confirmation and
+            backup_space. A client meeting an unrecognized value shows it as unknown.
     PlatformHostIdentity:
       type: object
       description: "One host's installed identity, as last reported on the agent `register` message."
@@ -5934,6 +6012,17 @@ components:
             updater_present are non-null. A CLIENT MUST READ THIS RATHER THAN
             RE-DERIVING IT, so "what counts as known" cannot disagree between server and
             client. A host with identity_known false is never eligible for an apply.
+        below_floor:
+          type: boolean
+          description: >-
+            ADDITIVE (amendment 14, owner addition on #353). SERVER-DERIVED, in the same posture
+            as identity_known: true when the host's reported agent_version OR
+            recovery_actor_version orders below the installed control plane's floor by SemVer
+            precedence (an absent or unparseable version is never below). The console's "must
+            update before it can be managed": such a host is offered only an update. It changes
+            no eligibility, and eligible true still always carries reason null. A server
+            implementing the amendment always serializes it; optional here, and a client reads
+            absent as false.
     PlatformRelease:
       type: object
       description: >-
@@ -6455,7 +6544,7 @@ components:
         run_id: { type: [string, "null"], format: uuid, description: "The fleet run this belongs to. NULL for a standalone per-host apply or revert - those are attempts with no run, because a run carries fleet ordering and a single-host action has none." }
         kind:
           type: string
-          enum: [apply, revert, auto_revert]
+          enum: [apply, revert, auto_revert, developer_apply]
           description: >-
             A REVERT IS AN APPLY WITH AN OLDER DIGEST SET - same wire message, same
             states, same reasons. This field exists so history can say which button was
@@ -6469,7 +6558,11 @@ components:
             apply's output), was never driven over the wire, and its requested_digests
             are the failed apply's previous_digests. Amendment 14 (#353): on an owned host the
             recovery actor did the restore, and the row names ONLY the restored component
-            (the one whose replacement failed), which may be recovery-actor.
+            (the one whose replacement failed), which may be recovery-actor. Amendment 14
+            (owner addition on #353) APPENDS developer_apply: an admin applied an arbitrary
+            digest set to an owned target (POST /v1/admin/platform/developer-apply); release_id
+            is null, and it is otherwise an ordinary apply and revert source. A client meeting
+            an unrecognized kind renders it verbatim.
         target: { type: string, enum: [control_plane, host] }
         host_id: { type: [string, "null"], format: uuid, description: "Null exactly when target is control_plane." }
         node_name: { type: [string, "null"] }
@@ -6635,6 +6728,24 @@ components:
       required: [host]
       properties:
         host: { $ref: "#/components/schemas/Host" }
+    PlatformDeveloperApplyRequest:
+      type: object
+      description: "Amendment 14, owner addition on #353. The body of POST /v1/admin/platform/developer-apply."
+      required: [target, components]
+      properties:
+        target: { type: string, enum: [control_plane, host] }
+        host_id: { type: string, format: uuid, description: "Required when target is host; absent otherwise." }
+        components:
+          type: array
+          minItems: 1
+          maxItems: 2
+          description: >-
+            Each name at most once. A control_plane target may name control-plane and
+            recovery-actor; a host target node-agent and recovery-actor. ORDER IS NOT
+            SIGNIFICANT: the control plane orders recovery-actor first, as for every apply.
+          items: { $ref: "#/components/schemas/ApplyComponentDigest" }
+        force: { type: boolean, description: "Optional; absent means false. As on the per-host and fleet applies." }
+        external_backup_confirmed: { type: boolean, description: "Optional; absent means false. As on the fleet apply: read only for a migrating control-plane digest on an external database." }
     PlatformApplyRunEnvelope:
       type: object
       required: [run]

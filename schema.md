@@ -552,8 +552,11 @@
 > `hosts` for the recovery actor's and the seed's identity (`recovery_actor_version`,
 > `recovery_actor_source_commit`, `seed_version`), the `hosts.install_mode` `CHECK` widened to
 > admit `owned`, and one **nullable** dump reference on `platform_apply_attempts`
-> (`pre_update_dump`). No new table, no default, no backfill, no existing column, type or
-> constraint narrowed. Authored as one additive migration by the implementing slice; its number is
+> (`pre_update_dump`); and, **added by owner decision on #353 (2026-09-25) beyond Decision 24**,
+> the `platform_apply_attempts.kind` `CHECK` widened to admit `developer_apply`. No new table, no
+> default, no backfill, no existing column, type or constraint narrowed. The control plane's own
+> machine identity and `below_floor` (also owner additions) are derived or read live and add no
+> column. Authored as one additive migration by the implementing slice; its number is
 > assigned when it integrates, so it is not fixed here. The recovery actor's sockets, journal and
 > machine state stay outside this contract (§"Not frozen: the updater's local socket", widened by
 > this amendment). The contract step (§"RH06 — amendment 14" at the end of this document) drops
@@ -2187,7 +2190,7 @@ cannot disagree.
 |---|---|---|
 | `id` | `UUID` PK | |
 | `run_id` | `UUID` NULL → `platform_apply_runs(id)` **ON DELETE CASCADE** | the fleet run this attempt belongs to. **NULL for a standalone per-host apply or revert** (`POST /v1/admin/platform/hosts/{id}/apply` / `/revert`), which is the normal shape of an operator fixing one box — those are attempts with no run, not one-target runs, because a run carries fleet ordering and a single-host action has none. |
-| `kind` | `TEXT` NOT NULL | `CHECK (kind IN ('apply','revert','auto_revert'))` *(widened by migration 0083, amendment 9)*. **A revert is an apply with an older digest set** — same wire message, same states, same reasons — so it is a `kind` on this row rather than a second table or a second `agent-api.md` message. The column exists so history can say which button was pressed, and for nothing else. `auto_revert` is the one kind no button produced: the host's updater restored the previous digests itself after a failed health wait (`agent-api.md` `release_state.restored`), and the control plane inserted this row **already `succeeded`** beside the failed apply, with the failed apply's `previous_digests` as its `requested_digests` and vice versa (a restore that itself failed leaves no row; `restored` is only sent for one that came up). It is never driven over the wire and never holds the open-target index. |
+| `kind` | `TEXT` NOT NULL | `CHECK (kind IN ('apply','revert','auto_revert'))` *(widened by migration 0083, amendment 9)*, **widened by amendment 14 (owner addition on #353) to add `'developer_apply'`** — an admin's developer apply of an arbitrary digest set (`control-api.md` §"Developer apply"), with `release_id` NULL; it is otherwise an ordinary apply and an ordinary revert source. **A revert is an apply with an older digest set** — same wire message, same states, same reasons — so it is a `kind` on this row rather than a second table or a second `agent-api.md` message. The column exists so history can say which button was pressed, and for nothing else. `auto_revert` is the one kind no button produced: the host's updater restored the previous digests itself after a failed health wait (`agent-api.md` `release_state.restored`), and the control plane inserted this row **already `succeeded`** beside the failed apply, with the failed apply's `previous_digests` as its `requested_digests` and vice versa (a restore that itself failed leaves no row; `restored` is only sent for one that came up). It is never driven over the wire and never holds the open-target index. |
 | `target` | `TEXT` NOT NULL | `CHECK (target IN ('control_plane','host'))`. |
 | `host_id` | `UUID` NULL → `hosts(id)` **ON DELETE CASCADE** | the host, NULL for the control-plane target. CASCADE (not SET NULL) so the `target`/`host_id` CHECK below can be a real invariant rather than one a host deletion silently breaks; the precedent is `DELETE /v1/hosts/{id}`, which already cascades a forgotten host's GPUs and terminal session history. |
 | `release_id` | `UUID` NULL → `platform_releases(id)` **ON DELETE SET NULL** | the release the digests came from, when they came from one. **NULL is legitimate on a `revert`**, whose digest set is read from an earlier attempt's `previous_digests` and may correspond to no row this instance still has. SET NULL rather than RESTRICT precisely because `requested_digests` — not this column — is the authority for what an attempt did; the release row is provenance. (The opposite call from `platform_apply_runs.release_id`, and for the opposite reason.) |
@@ -3270,6 +3273,7 @@ images or session rows.
 | `hosts` | `ADD recovery_actor_version TEXT NULL` | wholesale-replaced on every `register`, like amendment 1's identity columns |
 | `hosts` | `ADD recovery_actor_source_commit TEXT NULL` | as above |
 | `hosts` | `ADD seed_version TEXT NULL` | as above |
+| `platform_apply_attempts` | `kind` `CHECK` widened to add `'developer_apply'` *(owner addition on #353, 2026-09-25, beyond #352 decision 24)* | a plain `CHECK` swap; the developer-apply route's attempts (`control-api.md` §"Developer apply"), `release_id` NULL |
 | `platform_apply_attempts` | `ADD pre_update_dump TEXT NULL` with `CHECK (pre_update_dump IS NULL OR target = 'control_plane')` and `CHECK (pre_update_dump IS NULL OR octet_length(pre_update_dump) <= 255)` | the dump reference a failed migrating control-plane attempt's `restore` command names |
 
 - **No DDL for the rest of the amendment.** The appended failure reasons ride the existing

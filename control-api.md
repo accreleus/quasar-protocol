@@ -1204,6 +1204,7 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `POST /v1/admin/platform/hosts/{id}/apply` | **admin** | *(amendment 2)* **per-host apply** of one release. Body: `release_id`, optional `force` (skip the zero-sessions wait and kill the N sessions running). `202` with the attempt. `404 not_found`; `422 release_below_schema_version`; `409 release_not_offered` / `409 host_not_eligible` (carrying the amendment-1 `EligibilityReason`) / `409 attempt_in_flight` / `409 run_active`; `501 apply_unsupported` when the agent never acks. Audited as `platform.apply.host` |
 | `POST /v1/admin/platform/hosts/{id}/revert` | **admin** | *(amendment 2)* **per-host revert** to the previous digests recorded on that host's last succeeded attempt — an apply with an older digest set, not a new wire message, and bounded by ADR 0002 (never above the control plane's release). Optional `force`. `202` with the attempt. `409 nothing_to_revert` / `409 host_not_eligible` / `409 attempt_in_flight` / `409 run_active`; `404 not_found`. Audited as `platform.revert.host` |
 | `POST /v1/admin/platform/hosts/{id}/remove` | **admin** | *(amendment 14, #353)* **remove an owned GPU host's** node agent and recovery actor, by `agent-api.md` `host_remove`. Optional `force` (stop the host's sessions rather than refuse). `202` with the host once its recovery actor accepts. `404 not_found`; `409 run_active` / `409 attempt_in_flight` / `409 host_not_eligible` (`host_offline`, `updater_absent`) / `409 host_not_removable` / `409 conflict` (sessions remain without `force`); `501 apply_unsupported`. Does not forget the host: that stays `DELETE /v1/hosts/{id}` once offline. Audited as `platform.remove.host` |
+| `POST /v1/admin/platform/developer-apply` | **admin** | *(amendment 14, owner addition on #353)* **developer apply**: an arbitrary digest set to one **owned** target (the control plane or one host), under the namespace allowlist (ADR 0001) and ADR 0002's ordering, recorded as a `kind: developer_apply` attempt. Never offered as a release, never unattended; refused `signature_missing` under `require`. `202` with the attempt. `400 validation_failed`; `404 not_found`; `409 run_active` / `409 attempt_in_flight` / `409 host_not_eligible` / `409 preflight_blocked` / `409 target_not_owned` / `409 image_unresolvable` / `409 namespace_rejected`; `422 release_below_schema_version`; `501 apply_unsupported`. Audited as `platform.apply.developer` |
 | `GET /v1/admin/platform/attempts` | **admin** | *(amendment 2)* apply history, newest first — **including control-plane attempts and reverts**. Optional `host_id` narrows to one host; `limit` 1–200, default 50 |
 | `POST /v1/admin/platform/release-webhook/test` | **admin** | *(release notifications, amendment 4, #123)* send **one** test notification to the configured webhook. Ignores `release_webhook_enabled` and **records nothing**, so it can never suppress a real notification. A refused delivery is `200` with `ok: false`; only a test with nowhere to send is `400 webhook_not_configured`. Where the notification goes is `PATCH /v1/admin/settings`; the optional signing secret is `PUT /v1/admin/secrets/platform.release_webhook.secret`. Audited as `platform.release_webhook.tested` — outcome only, never the URL |
 | everything else (`/v1/me`, `POST /v1/sessions`, …) | user | any authenticated account. *(UI-P5: `POST /v1/sessions` additionally refuses a `profile_id` outside the app's allow-list with `409 profile_not_launchable_for_app` — a per-app configuration rule, not a role check, which is why it is `409` and not the `403` this table's admin rows produce. It is refused for **every** non-admin caller, including one supplying an explicit `stream` override, which carries no role gate here.* ***Phase 2:** `POST /v1/sessions` additionally refuses an app the caller holds no entitlement for with `403 forbidden`. That one **is** `403` and not `409`, because unlike the allow-list it is a statement about the **caller** rather than about the request — and unlike this table's admin rows it is refused for **every** role, admin included)* |
@@ -6954,7 +6955,10 @@ Everything below that refuses a move, orders a list, or reports a fault does it 
 ### `GET /v1/admin/platform/identity` — what this control plane is (admin)
 
 `RequireAuth → RequireAdmin`. A pure read of the running binary's own stamps; it touches no
-database row and never varies with the channel.
+database row and never varies with the channel. *(Amendment 14, owner addition on #353: five
+optional fields describe the control plane's own machine, read from that machine's recovery actor —
+§"RH06 — Quasar-owned installation", "The control plane's own machine". The four fields below are
+unchanged.)*
 
 ```json
 // 200
@@ -9105,8 +9109,9 @@ endpoint and keep their existing image read/launch behavior.
 > drive such machines. **Everything below is additive and optional for an existing consumer**:
 > every new field is optional in `openapi.yaml`, every new identifier is appended to a vocabulary
 > whose consumers already render an unrecognised value verbatim, a `registry` or `source` host and a
-> format-1 release behave exactly as before, and exactly one admin route is added
-> (`POST /v1/admin/platform/hosts/{id}/remove`) while none is removed or renamed. The
+> format-1 release behave exactly as before, and two admin routes are added
+> (`POST /v1/admin/platform/hosts/{id}/remove`, and the owner-added
+> `POST /v1/admin/platform/developer-apply`) while none is removed or renamed. The
 > **contract** step (§"RH06 contract step" below) is written now and is **not in force** until
 > RH06-15 (#367) lands. The wire twin is `agent-api.md` amendment 14; storage is `schema.md`
 > amendment 14. Decisions: **ADR 0007** (the seed interface), **ADR 0008** (compiled recipes; the
@@ -9115,7 +9120,11 @@ endpoint and keep their existing image read/launch behavior.
 > ADRs 0001–0003, 0005 and 0006 hold unchanged.
 >
 > Every operation touched here keeps `RequireAuth → RequireAdmin`, server-enforced. §Authorization
-> gains exactly one row, for the new remove route, under the same gate.
+> gains exactly two rows, one per new route, under the same gate.
+>
+> **Scope note.** Items 1–11 below implement #352 Implementation Decision 24. Items 12–14 were
+> **added by owner decision on #353 (2026-09-25), beyond Decision 24**, and follow the same
+> additive rules.
 
 What this amendment adds, in one list:
 
@@ -9139,6 +9148,14 @@ What this amendment adds, in one list:
 10. **The static `ENROLLMENT_TOKEN` is deprecated** (§"Enrollment").
 11. **Removing an owned GPU host**: one admin route, `POST /v1/admin/platform/hosts/{id}/remove`,
     which sends `agent-api.md` `host_remove` (§"Removing an owned GPU host").
+12. *(Owner addition, #353, 2026-09-25.)* **`PlatformHostIdentity.below_floor`**, a server-derived
+    boolean read signal for the floor (§"`below_floor`", "The read signal").
+13. *(Owner addition, #353, 2026-09-25.)* **Developer apply**: one admin route,
+    `POST /v1/admin/platform/developer-apply`, with one appended attempt kind,
+    **`developer_apply`** (§"Developer apply").
+14. *(Owner addition, #353, 2026-09-25.)* **The control plane's own machine identity**: optional
+    `install_mode`, `recovery_actor_version`, `recovery_actor_source_commit`, `seed_version` and
+    **`database_mode`** on `PlatformIdentity` (§"The control plane's own machine").
 
 ### Release manifest format 2
 
@@ -9302,6 +9319,23 @@ ADR 0002 unchanged). A host below the floor is not failed: it is offered **only 
   the existing precedence, unchanged, and `below_floor` takes no position in it.
 - A client meeting `below_floor` renders it; one that predates it renders the identifier verbatim.
 
+#### The read signal *(owner addition, #353, 2026-09-25)*
+
+**`PlatformHostIdentity` gains `below_floor`** *(boolean, server-derived)* on the release view's
+`installed.hosts[]`: **true** when the host's reported `agent_version` **or** `recovery_actor_version`
+orders below the installed control plane's floor, by the comparison above (SemVer precedence; an
+absent or unparseable version is never below). It is **derived and served rather than left to a
+client**, in the same posture as `identity_known` and `migrates`: a client reads it and never
+re-derives it, so "below the floor" cannot mean two things. It is what lets the console say
+"must update before it can be managed" and offer that host only an update.
+
+- It **changes no eligibility**: the host's `targets` entry is evaluated exactly as before, and
+  "`eligible: true` always carries `reason: null`" is untouched. The revert refusal's `below_floor`
+  reason is unchanged.
+- A server implementing this amendment **always serializes** it; it is optional in `openapi.yaml`,
+  and a client reads an absent field as `false`. An older control plane does not send it and an
+  older web client ignores it, so neither is affected.
+
 ### Failure reasons
 
 **`ApplyFailureReason` appends five identifiers**, after `signature_invalid`, so no existing value
@@ -9409,6 +9443,10 @@ The ADR 0004 amendment, as it reaches this surface:
   machine's own agent enrolls with a **single-use local enrollment token** the recovery actor
   generates at install and mounts into both containers; the control plane redeems it through the
   same hashed, single-use `host_enrollments` path as a minted token. No route or wire shape changes.
+- **Security note: the local enrollment token never expires** (`expires_at` NULL, `schema.md`
+  `host_enrollments`). That is acceptable because it is single-use, bound to one node name, only
+  ever present on its own machine, and — like every enrollment — refused against a node name whose
+  agent is live, so it cannot be used to take over a running host.
 
 ### Removing an owned GPU host
 
@@ -9433,37 +9471,188 @@ unchanged (it still refuses an online host).
 
 - **`force`** *(boolean, optional, default `false`)* — the same meaning as on the per-host apply:
   the operator agreeing to end the host's live sessions. With `force: false` a host that holds any
-  non-terminal session is refused `409 conflict` and **nothing changes** — drain it first
-  (`POST /v1/hosts/{id}/drain`) and ask again once it is empty. With `force: true` the control plane
-  sends `session_stop` (`reason: "host_draining"`) to each of them and then proceeds without waiting:
-  removing the agent ends them regardless, and the stops give them a clean terminal state. A client
-  MUST name the number of sessions in its confirmation, as for apply.
-- **What it does, in order.** Validate (below); cordon the host exactly as a per-host apply does;
-  with `force`, stop its sessions; mint a `request_id` and send `host_remove`; wait for the ack
-  (the 10 s ack timeout). `ack{ok:true}` answers `202`. The host's connection then closes when its
-  agent is removed and the host reads `offline`; nothing further is reported (`agent-api.md`
-  §`host_remove`).
-- **On any refusal after the cordon** (a negative ack, or no ack) the host's cordon state is put back
-  as it was found, as a failed apply does. Sessions a `force` request already stopped are not
-  brought back.
-- **Errors**, checked in this order:
+  non-terminal session is refused `409 conflict` — drain it first (`POST /v1/hosts/{id}/drain`) and
+  ask again once it is empty. With `force: true` the control plane sends `session_stop`
+  (`reason: "host_draining"`) to each of them and then proceeds without waiting: removing the agent
+  ends them regardless, and the stops give them a clean terminal state. A client MUST name the
+  number of sessions in its confirmation, as for apply.
+- **What it does, in order.**
+  1. **Validate**, changing nothing: the pre-send checks below, in their order.
+  2. **Cordon** the host exactly as a per-host apply does.
+  3. **Check sessions** — only now, so no session can be placed between the check and the cordon.
+     With `force: false` and any non-terminal session on the host, restore the cordon and refuse
+     `409 conflict`. With `force: true`, stop them.
+  4. **Send** `host_remove` with a freshly minted `request_id` and wait for the ack (the 10 s ack
+     timeout). `ack{ok:true}` answers `202`. The host's connection then closes when its agent is
+     removed and the host reads `offline`; nothing further is reported (`agent-api.md`
+     §`host_remove`).
+- **A refusal from step 3 on** puts the host's cordon state back as it was found, as a failed apply
+  does. Sessions a `force` request already stopped are not brought back. So a forced request that is
+  then refused at the ack — `busy`, `updater_unreachable`, or no ack at all — has ended the host's
+  sessions and removed nothing. That is inherent rather than a gap: the sessions must be stopped
+  before the command is sent, and the ack is the first point at which the recovery actor answers
+  for itself; every check the control plane can make from what it already knows runs in step 1.
+- **The control plane's own machine is never removable here.** An agent that shares the control
+  plane's machine (a combined host) is taken apart with the recovery actor's operator `uninstall`
+  command on that machine, never by this route (#352 decision 18: remove host is for GPU hosts).
+  The control plane knows which registered host that is from its own machine's recovery actor,
+  which reports its machine's agent over the local control socket (not frozen, `schema.md`), and it
+  refuses such a host during validation — before any cordon or session stop. The agent's own
+  `invalid` for a combined host (`agent-api.md` §`host_remove`) is only a backstop.
+- **Errors.** Pre-send, checked in this order, each changing nothing:
   - `404 not_found` — no such host.
   - `409 run_active` — a fleet run is active; `409 attempt_in_flight` — this host has an open
     platform-apply attempt. Both exactly as for the per-host apply.
   - `409 host_not_eligible` with `reason: "host_offline"` (the host's agent is not connected; there
     is nobody to tell) or `reason: "updater_absent"` (`updater_present` is false: no recovery actor
     answered) — amendment 1's `EligibilityReason` values, reused.
-  - **`409 host_not_removable`** — the host's `install_mode` is not `owned`, or its agent refused
-    `invalid` because its machine also runs the control plane (a combined host is taken apart with
-    the recovery actor's operator `uninstall` command on that machine), or the ack carried any
-    other rejection; the error message names the ack's identifier.
-  - `409 conflict` — non-terminal sessions remain and `force` is false (above).
+  - **`409 host_not_removable`** — the host's `install_mode` is not `owned`, or its agent is the one
+    on the control plane's own machine (above).
+  - `409 conflict` — non-terminal sessions remain and `force` is false (step 3; the cordon taken in
+    step 2 is restored).
+
+  Ack outcomes, after the command was sent (the cordon is restored on each):
+  - **`409 host_not_removable`** — the ack carried a rejection (`invalid`, `busy`, `updater_absent`,
+    `updater_unreachable`); the error message names the ack's identifier.
   - `501 apply_unsupported` — no ack within the ack timeout: the agent predates amendment 14 and
     nothing was removed. Reused from the per-host apply.
 - **Audited** as **`platform.remove.host`**, target type `host`, with the host id, its `node_name`
   and `force`.
 - **Authored ahead of the server**: the operation carries `x-unimplemented: true` in `openapi.yaml`
   until the RH06 slice that implements it registers the route and removes the marker.
+
+### Developer apply *(owner addition, #353, 2026-09-25)*
+
+> Added by owner decision on #353, beyond #352 Implementation Decision 24. It implements #352
+> decisions 15 and 22: the **product lane**, in which a contributor's branch build reaches an owned
+> install by digest without being published as a release, using ADR 0001's digest and namespace
+> trust unchanged.
+
+#### `POST /v1/admin/platform/developer-apply` — apply an arbitrary digest set to one owned target (admin)
+
+`RequireAuth → RequireAdmin`, server-enforced, listed in §Authorization. A **standalone attempt**
+on one target, exactly like a per-host apply, except that the digests come from the request rather
+than from a release row.
+
+```json
+// request
+{ "target": "host", "host_id": "<uuid>",
+  "components": [
+    { "name": "recovery-actor", "image": "ghcr.io/accreleus/quasar/quasar-recovery-actor", "digest": "sha256:<64 hex>" },
+    { "name": "node-agent",     "image": "ghcr.io/accreleus/quasar/quasar-node-agent",     "digest": "sha256:<64 hex>" }
+  ],
+  "force": false, "external_backup_confirmed": false }
+// 202 Accepted
+{ "attempt": { "id": "<uuid>", "run_id": null, "kind": "developer_apply", "target": "host",
+               "host_id": "<uuid>", "release_id": null, "requested_digests": [ "..." ],
+               "state": "waiting_sessions", "...": "..." } }
+```
+
+- **`target`** *(required)* — `control_plane` or `host`; **`host_id`** *(uuid)* — required when
+  `target` is `host`, absent otherwise. One target per request: a developer apply across a fleet is
+  the control-plane request first, then each host's (ADR 0002).
+- **`components`** *(required, non-empty)* — `{name, image, digest}` exactly as `ApplyComponentDigest`:
+  `image` a repository reference with **no tag and no digest**, `digest` `sha256:` + 64 lowercase hex
+  (ADR 0001). Each name at most once. A `control_plane` target may name `control-plane` and
+  `recovery-actor`; a `host` target may name `node-agent` and `recovery-actor`; `control-plane` is
+  never sent to a host. **The order in the request is not significant**: the control plane orders
+  the list with the rule it uses for every apply — `recovery-actor` first (ADR 0008).
+- **`force`**, **`external_backup_confirmed`** *(optional, default `false`)* — the same meanings as on
+  the per-host apply and the fleet apply.
+- **Owned targets only.** It is the product lane (#352 decision 15): a `source` or Compose (`registry`)
+  target is never given a developer apply, and neither is a host whose install mode is unknown. For
+  the control-plane target the control plane's own `install_mode` (§"The control plane's own
+  machine") must be `owned`.
+- **Trust is ADR 0001's, unchanged.** Every image must be under the registry namespace allowlist.
+  The control plane checks this **up front** against the allowlist it is configured with, with the
+  same rules the recovery actor applies; the **recovery actor's own allowlist remains the
+  enforcement**, and a digest it refuses fails the attempt `namespace_rejected` as for any apply.
+- **ADR 0002 still holds.** The control plane reads each requested image's build identity from the
+  registry — `org.quasar.source.commit` on every image and `org.quasar.schema.version` on the
+  control-plane image, the labels the edge channel already reads — and every requested image must
+  carry the same commit.
+  - A **control-plane** digest whose schema version is **below** the installed control plane's is
+    refused `422 release_below_schema_version`; one **above** it **migrates**.
+  - A **host** digest set is allowed only when its commit is the installed control plane's own, or
+    the commit of a release this instance knows that orders at or below it; any other commit
+    cannot be shown not to be ahead of the control plane and is refused `409 host_not_eligible` with
+    `reason: "release_above_control_plane"` (fail closed). It is refused `reason: "below_floor"`
+    when that known release is below the floor.
+- **A migrating control-plane digest follows #352 decision 14 exactly as a migrating release
+  does**: the instance is drained first (with `force`, its sessions stopped), and then either the
+  Quasar-owned database's pre-update dump is taken (`backup_failed` if it cannot be) or, on an
+  external database, `external_backup_confirmed: true` is required (`backup_unconfirmed`
+  otherwise). A non-migrating one lets live sessions ride through, as a non-migrating release does.
+  The control-plane target otherwise behaves as a fleet run's control-plane step: it cordons every
+  host for its duration and restores those cordons when it ends; success is the booted binary
+  reporting the requested commit.
+- **Signatures (ADR 0003).** A developer apply names no release, so its `release_apply` carries
+  `release.id` `""`, `release.version` `null` and, as `release.source_commit`, the commit the images
+  carry — the value the success rule matches. With verification set to **`require`** the recovery
+  actor therefore refuses it **`signature_missing`**; under **`verify`** it applies unsigned and
+  logs the WARN that ADR 0003 requires for every unverified apply. Off, nothing changes.
+- **Never offered, never unattended.** A developer apply writes no `platform_releases` row, never
+  appears in `available`, raises no release notification and is never started by the unattended
+  pass.
+- **History.** It creates an ordinary `platform_apply_attempts` row with **`kind:
+  "developer_apply"`** (appended after `auto_revert`) and `release_id` null, with the same states,
+  reasons, drain, single-flight and success rules as a per-host apply. A succeeded developer apply
+  is an ordinary revert source: the per-host revert puts the host back on the digests it had before.
+- **Errors**, reusing the apply routes' codes: `400 validation_failed` (a malformed body: an unknown
+  or repeated component, a component the target may not take, an `image` carrying a tag or digest, a
+  malformed `digest`, `host_id` missing or present against the `target`); `404 not_found` (no such
+  host); `409 run_active`; `409 attempt_in_flight`; `409 host_not_eligible` with the host's
+  `EligibilityReason` (`identity_unknown`, `install_mode_source`, `updater_absent`, `host_offline`,
+  `release_above_control_plane`, `below_floor`, `preflight_blocked`); `409 preflight_blocked` (the
+  control-plane target is blocked); `422 release_below_schema_version`; `501 apply_unsupported`. Two
+  are new to this route: **`409 target_not_owned`** — the target is not an owned install (a
+  registry or source host, or a control plane whose own `install_mode` is not `owned`); **`409
+  image_unresolvable`** — a requested digest does not resolve at the registry as seen from the
+  control plane, or carries no readable build identity, or the images disagree on their commit.
+  An image outside the allowlist is **`409 namespace_rejected`**, the failure identifier reused as
+  the refusal.
+- **Audited** as **`platform.apply.developer`**, target type `platform` or `host`, with the target,
+  every component's `name` and `digest`, `force` and `external_backup_confirmed`.
+- **Authored ahead of the server**: the operation carries `x-unimplemented: true` in `openapi.yaml`
+  until the RH06 slice that implements it registers the route and removes the marker.
+
+### The control plane's own machine *(owner addition, #353, 2026-09-25)*
+
+> Added by owner decision on #353, beyond #352 Implementation Decision 24.
+
+**`PlatformIdentity`** — the body of `GET /v1/admin/platform/identity`, and therefore also the
+release view's `installed.control_plane` — gains five **optional** fields describing the machine
+the control plane runs on. No route is added.
+
+```json
+{ "identity": {
+    "version": "0.4.0", "source_commit": "<40 hex>", "built_at": "...", "schema_version": 96,
+    "install_mode": "owned",
+    "recovery_actor_version": "0.4.0",
+    "recovery_actor_source_commit": "<40 hex>",
+    "seed_version": "0.4.0",
+    "database_mode": "owned"
+} }
+```
+
+- **Source.** They come from the control plane's **own machine's recovery actor**, read over its
+  local control socket (not frozen, `schema.md`) on the same cadence as the control plane's
+  preflight facts. The four existing fields are unchanged and still come from the running binary;
+  these five are the one part of the identity read that consults something other than the binary.
+- **`install_mode`** — `owned` when the machine's recovery actor answered; otherwise **null**. The
+  enum is the host's (`registry`, `source`, `owned`) so the two read alike, but this amendment defines
+  only when the control plane reports `owned`.
+- **`recovery_actor_version`**, **`recovery_actor_source_commit`**, **`seed_version`** — exactly the
+  host fields of the same names (§"Owned hosts on the host body and the release view"), for the
+  control plane's machine, including the rule that an unparseable version is null.
+- **`database_mode`** — **`owned`** (Quasar created the database and takes its pre-update dump) or
+  **`external`** (the operator's own database: Quasar only uses it, and a migrating update needs
+  `external_backup_confirmed`). There is no third value: an owned control-plane machine always has a
+  database. It is what lets a client show the external-backup confirmation, and `backup_space`, only
+  where they apply.
+- **Absent or null means unknown** — a control plane that predates this amendment, a machine that is
+  not owned, or a recovery actor that did not answer. An older consumer ignores the new fields and is
+  unaffected; a client meeting an unrecognised `install_mode` or `database_mode` shows it as unknown.
 
 ### Unknown identifiers, restated for every appended vocabulary
 
@@ -9472,6 +9661,10 @@ unchanged (it still refuses an online host).
   know renders it **verbatim** and never drops the row, the attempt or the check.
 - **`install_mode`** (`owned`) — an older control plane stores an unrecognised mode as absent, so the
   host is identity-unknown there; an older client shows an unrecognised mode as unknown.
+- **`PlatformApplyAttempt.kind`** (`developer_apply`, owner addition) — a client meeting a kind it
+  does not know renders it verbatim, as it does for `auto_revert`.
+- **`database_mode`** (`owned`, `external`, owner addition) — a client meeting a value it does not
+  know shows it as unknown.
 - **Component names** (`recovery-actor`) — an agent that does not know a name rejects the command
   `invalid`, so it is never half-applied; a client lists a component name it does not know verbatim.
 - **`format_version`** — a consumer that meets one it does not know, under either asset name, treats
@@ -9510,4 +9703,5 @@ unchanged (it still refuses an online host).
    `platform-release-manifest.json.sig` (Signature bullet above). Releases are cut from this work
    only after the initiative merges, which is after both.
 5. Nothing else is removed: no route, no field, no enum value other than the two preflight ids.
-   `POST /v1/admin/platform/hosts/{id}/remove` is part of the expand step and stays.
+   `POST /v1/admin/platform/hosts/{id}/remove` and `POST /v1/admin/platform/developer-apply` are
+   part of the expand step and stay.

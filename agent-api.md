@@ -229,7 +229,9 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > `signature_missing` / `signature_invalid` as members (§`release_state`); **(4)** one new
 > downstream command, **`host_remove`**, removes an owned GPU host's node agent and recovery
 > actor (§`host_remove`); **(5)** the static enrollment token is **deprecated** (§Auth /
-> enrollment). No existing message, field, value, ack or timeout changes for a host that is not
+> enrollment); and, **added by owner decision on #353 (2026-09-25) beyond Decision 24**, **(6)**
+> `release_apply` may carry a **developer apply**, which names no release (§`release_apply`,
+> `release`). No existing message, field, value, ack or timeout changes for a host that is not
 > `owned`: an agent that predates this amendment registers, applies and reports byte-identically,
 > and an older control plane reads an `owned` host as identity-unknown (the existing rule for an
 > unrecognised `install_mode`) and so never applies to it. The **contract** step that retires the
@@ -2065,6 +2067,10 @@ itself, which is the entire reason the updater exists (`CONTEXT.md` "Updater").
   (§`release_state`), so it is required and never null. The agent must **not** resolve anything
   from these fields; they are not an alternative identity for the images. ADR 0001: what is
   applied is the digest below and only the digest.
+  *(Amendment 14, owner addition on #353:)* a **developer apply** (`control-api.md` §"Developer
+  apply") names no release: it carries `release.id` `""` and `release.version` `null`, and as
+  `release.source_commit` the commit its images carry. No field or shape changes; a host verifying
+  signatures under `require` refuses it `signature_missing`, because it has no version to look up.
 - **`components`** *(array, required, non-empty)* — the target component set **for this host**:
   `name`, `image` (a registry repository reference — **no tag, no digest**) and `digest`
   (`sha256:` + 64 lowercase hex), composed by the agent as `image@digest`. Same shape and order as
