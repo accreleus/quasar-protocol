@@ -2583,13 +2583,10 @@ paths:
     post:
       tags: [admin]
       x-required-role: admin
-      x-unimplemented: true
-      summary: Developer apply - an arbitrary digest set to one owned target (admin). NOT YET SERVED - see x-unimplemented.
+      summary: Developer apply - an arbitrary digest set to one owned target (admin).
       description: >-
-        AMENDMENT 14, OWNER ADDITION on #353 (2026-09-25), beyond #352 decision 24; authored
-        ahead of the server: `x-unimplemented: true` until the RH06 slice that implements it
-        registers the route and removes the marker (and its drift-test allowlist entry) in the
-        same change. The product lane (#352 decisions 15 and 22): a standalone attempt that
+        AMENDMENT 14, OWNER ADDITION on #353 (2026-09-25), beyond #352 decision 24; served
+        since RH06-08 (#360). The product lane (#352 decisions 15 and 22): a standalone attempt that
         applies the requested digests to ONE owned target - the control plane or one host -
         ordered recovery-actor first. Every image digest-only and under the namespace
         allowlist (ADR 0001; the recovery actor's allowlist is the enforcement, the control
