@@ -9153,9 +9153,10 @@ What this amendment adds, in one list:
 13. *(Owner addition, #353, 2026-09-25.)* **Developer apply**: one admin route,
     `POST /v1/admin/platform/developer-apply`, with one appended attempt kind,
     **`developer_apply`** (§"Developer apply").
-14. *(Owner addition, #353, 2026-09-25.)* **The control plane's own machine identity**: optional
-    `install_mode`, `recovery_actor_version`, `recovery_actor_source_commit`, `seed_version` and
-    **`database_mode`** on `PlatformIdentity` (§"The control plane's own machine").
+14. *(Owner addition, #353, 2026-09-25; widened by #361.)* **The control plane's own machine
+    identity**: optional `install_mode`, `recovery_actor_version`, `recovery_actor_source_commit`,
+    `seed_version`, **`database_mode`**, **`machine_role`** and **`machine_node_name`** on
+    `PlatformIdentity` (§"The control plane's own machine").
 
 ### Release manifest format 2
 
@@ -9631,8 +9632,8 @@ than from a release row.
 > Added by owner decision on #353, beyond #352 Implementation Decision 24.
 
 **`PlatformIdentity`** — the body of `GET /v1/admin/platform/identity`, and therefore also the
-release view's `installed.control_plane` — gains five **optional** fields describing the machine
-the control plane runs on. No route is added.
+release view's `installed.control_plane` — gains seven **optional** fields describing the machine
+the control plane runs on. No route is added. Both routes are admin-only.
 
 ```json
 { "identity": {
@@ -9641,7 +9642,9 @@ the control plane runs on. No route is added.
     "recovery_actor_version": "0.4.0",
     "recovery_actor_source_commit": "<40 hex>",
     "seed_version": "0.4.0",
-    "database_mode": "owned"
+    "database_mode": "owned",
+    "machine_role": "combined",
+    "machine_node_name": "living-room-pc"
 } }
 ```
 
@@ -9649,6 +9652,9 @@ the control plane runs on. No route is added.
   local control socket (not frozen, `schema.md`) on the same cadence as the control plane's
   preflight facts. The four existing fields are unchanged and still come from the running binary;
   these five are the one part of the identity read that consults something other than the binary.
+  *(#361:)* `machine_role` and `machine_node_name` are the exception: the recovery actor sets them
+  in the control plane's own configuration when it creates the control plane, and the control plane
+  serves them from there, so they are known whether or not the actor is answering.
 - **`install_mode`** — `owned` when the machine's recovery actor answered; otherwise **null**. The
   enum is the host's (`registry`, `source`, `owned`) so the two read alike, but this amendment defines
   only when the control plane reports `owned`. A **transient** failure to reach the machine's recovery
@@ -9663,8 +9669,17 @@ the control plane runs on. No route is added.
   `external_backup_confirmed`). There is no third value: an owned control-plane machine always has a
   database. It is what lets a client show the external-backup confirmation, and `backup_space`, only
   where they apply.
+- **`machine_role`** *(#361)* — `combined` (this machine also runs a node agent) or `control_only`
+  (it runs none). **Non-null exactly when a recovery actor created this control plane**, whether or
+  not the actor is answering (`install_mode` alone reads null then). Null on a Compose or source
+  control plane, and from an older server. A client meeting an unknown value shows the shape as
+  unknown and treats no host as this machine's.
+- **`machine_node_name`** *(#361)* — non-null exactly when `machine_role` is. On `combined`, the node
+  name the machine's own agent registers under. A client identifies the control plane's own host
+  **only** when `machine_role` is `combined` and the host's `node_name` equals it; it never matches on
+  `control_only`, where a GPU host could share the name.
 - **Absent or null means unknown** — a control plane that predates this amendment, a machine that is
-  not owned, or a recovery actor that did not answer. An older consumer ignores the new fields and is
+  not owned, or a recovery actor that did not answer (the last never for the two #361 fields). An older consumer ignores the new fields and is
   unaffected; a client meeting an unrecognised `install_mode` or `database_mode` shows it as unknown.
 
 ### Unknown identifiers, restated for every appended vocabulary
@@ -9678,6 +9693,8 @@ the control plane runs on. No route is added.
   does not know renders it verbatim, as it does for `auto_revert`.
 - **`database_mode`** (`owned`, `external`, owner addition) — a client meeting a value it does not
   know shows it as unknown.
+- **`machine_role`** (`combined`, `control_only`, #361) — a client meeting a value it does not know
+  shows the machine's shape as unknown and treats no host as this machine's.
 - **Component names** (`recovery-actor`) — an agent that does not know a name rejects the command
   `invalid`, so it is never half-applied; a client lists a component name it does not know verbatim.
 - **`format_version`** — a consumer that meets one it does not know, under either asset name, treats
