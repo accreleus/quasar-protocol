@@ -1867,6 +1867,11 @@ break a feature; `DELETE` is how you clear one.
 > matching — a minted token (hash lookup) is tried first, then the static `ENROLLMENT_TOKEN`
 > (constant-time compare), so an existing deployment upgrades untouched.
 
+> **Amendment 14 (#353):** the static `ENROLLMENT_TOKEN` is **deprecated** and is removed by the
+> RH06 contract step (not in force until RH06-15, #367); an owned machine never uses it, and a
+> combined or control-only machine's own agent enrolls with a single-use local token redeemed
+> through the minted-token path (§"RH06 — Quasar-owned installation", "Enrollment").
+
 **`ENROLLMENT_TOKEN` is optional.** A deployment that enrolls only with minted tokens sets no
 static value; the control plane logs one `WARN` at boot and matches nothing against it (empty
 never matches, so this closes the static path rather than opening it). Requiring it would
@@ -3880,6 +3885,12 @@ bearer is `403`, before any host lookup, per §Authorization) and both return th
 > as identity-unknown again rather than keep a commit nothing is running.
 > A host with **any** of the four null is "identity unknown" and is **never eligible for an apply**
 > (§Platform releases). Canonical schema: `openapi.yaml` `Host`.
+
+> **Amendment 14 (#353), additive.** `install_mode` gains `"owned"`, and the host body gains three
+> fields, `recovery_actor_version`, `recovery_actor_source_commit` and `seed_version`: always
+> serialized by a server implementing the amendment, null until an owned host reports them,
+> replaced wholesale on every `register` like the four above, and not part of "identity unknown".
+> See §"RH06 — Quasar-owned installation", "Owned hosts on the host body and the release view".
 
 ### `POST /v1/hosts/{id}/drain` — cordon a host
 RH05 owner-scoped semantics supersede the single-status rules below; see
@@ -7130,7 +7141,10 @@ is reported. Evaluate in this order and report the first that holds:
 *(Platform-release apply, amendment 2 (#104/#114), **appends** `attempt_in_flight` (9) and
 `run_active` (10) to this list and inserts nothing into it — see §"Platform-release apply". They
 come last because they are the most transient facts on it, which is exactly the rule stated
-below.)*
+below.)* *(Amendment 14 (#353) appends `below_floor`, which is produced by the per-host revert
+refusal and never on a target entry, so it takes no position in this order; it also reads
+"install mode is registry" below as "registry or owned", and `up_to_date` on an owned host as
+"agent and recovery actor both on the release" — §"RH06 — Quasar-owned installation".)*
 
 The durable facts outrank the transient ones deliberately: an offline source-built host reports
 `install_mode_source`, because reconnecting would not change the answer.
@@ -7241,6 +7255,10 @@ verbatim as `PlatformRelease.manifest`. Its shape is exactly:
   **different file** — the release-preflight input set — and predates this. The asset is named
   `platform-release-manifest.json` precisely so the two never collide in a directory, a log line,
   or a conversation.
+- *(Amendment 14, #353:)* an RH06-era release also carries **`platform-release-manifest.v2.json`**,
+  format 2, with a third component (`recovery-actor`) and a `floor`. Nothing above changes for this
+  asset or for a consumer that reads only it; format 2 lives under its own name precisely so that
+  holds. See §"RH06 — Quasar-owned installation", "Release manifest format 2".
 
 ---
 
@@ -7304,6 +7322,12 @@ from the other side). Consequences a client must know:
   plane records the restore as a `kind: auto_revert` attempt — §"Self-update hardening". The
   control-plane rule above is unchanged: a started control plane may have migrated.)* The
   operator's own `POST /v1/admin/platform/hosts/{id}/revert` remains for every other case.
+  *(Amendment 14, #353: on an **owned** machine the control-plane target is applied by the
+  **recovery actor** on that machine over its control socket, possibly moving the actor first, and
+  the ADR 0004 amendment widens the automatic restore to a control plane that never passed a health
+  check on a release that does not migrate; a migrating failure is never restored automatically and
+  names the pre-update dump and the `restore` command instead — §"RH06 — Quasar-owned
+  installation".)*
 
 **The control-plane attempt drains the whole fleet first only when the release carries a
 migration** (amendment 6, #153) — that is, when the release's `migrates` is true, its
@@ -7416,6 +7440,9 @@ refusals **`signature_missing`** and **`signature_invalid`** (#120). `reason` is
 when the state is `failed`. The two signature values are **appended**, so no existing identifier
 moves, and they are **inert unless an operator turns signature verification on** — it is off by
 default (ADR 0003). A client meeting an unrecognized value still renders it verbatim.
+*(Amendment 14, #353, appends `recipe_unsupported`, `owner_conflict`, `backup_failed`,
+`backup_unconfirmed` and `interrupted` after them, produced only by an owned machine —
+§"RH06 — Quasar-owned installation", "Failure reasons".)*
 
 **`EligibilityReason` gains two values, appended to amendment 1's fixed precedence.** They are
 appended rather than inserted, so no existing evaluation changes:
@@ -7458,6 +7485,11 @@ view.
   the fleet body, and not only on the per-host one, because a fleet run whose every target waits
   for a natural drain can otherwise stall indefinitely with no way to say "go now" short of
   cancelling and applying host by host.
+- **`external_backup_confirmed`** *(boolean, optional, default `false`; amendment 14, #353)* — the
+  operator's confirmation that a current backup of an **operator-supplied** database exists. Read
+  only when the release migrates and the control plane's machine is owned with an external
+  database; without it that control-plane step fails `backup_unconfirmed` before anything stops.
+  Ignored everywhere else. See §"RH06 — Quasar-owned installation", "Migrating updates".
 - **Which hosts are targets** is decided **when each target is reached**, not when the run is
   created, and by exactly amendment 1's eligibility rule (`identity_known`, `install_mode` is
   `registry`, `updater_present`, not above the control plane's release, host not offline). A host
@@ -7479,7 +7511,8 @@ view.
   two simultaneous requests cannot both win. **`409 attempt_in_flight`** — a standalone attempt is
   open on some target. `401` / `403` as everywhere.
 - Audited as **`platform.apply.run`**, target type `platform`, with the release id, its
-  `source_commit` and `force` — identifiers only, no digests-as-prose and no notes.
+  `source_commit` and `force` — identifiers only, no digests-as-prose and no notes — and, since
+  amendment 14, `external_backup_confirmed`.
 
 ### `GET /v1/admin/platform/apply/runs` — fleet runs (admin)
 
@@ -7547,7 +7580,10 @@ operator fixing or moving one box, and it is refused while a fleet run is active
   deadline expires, giving `failed` / `timeout`).
 - **Only the node-agent image is sent.** `requested_digests` is the release manifest's `node-agent`
   component and nothing else; the control-plane component is never sent to a host
-  (`agent-api.md` §`release_apply`).
+  (`agent-api.md` §`release_apply`). *(Amendment 14, #353: on an **owned** host the release's
+  `recovery-actor` component is sent too, first, when the host's actor is not on the release —
+  §"RH06 — Quasar-owned installation", "Components of an apply on an owned machine". The
+  control-plane component is still never sent to a host.)*
 - **The host is cordoned for the duration and uncordoned afterwards**, whatever the outcome — a
   host left `draining` by a failed apply would silently drop out of scheduling. A host an admin had
   **already** cordoned stays cordoned: the apply restores the cordon state it found, it does not
@@ -7599,6 +7635,11 @@ that did the same thing would be a second implementation of it.
   `reason: "release_above_control_plane"`. That is only reachable when the control plane itself was
   moved backwards by hand, and it is refused rather than performed because "put the agent back" is
   never worth creating an agent-ahead-of-control-plane fault.
+- *(Amendment 14, #353.)* On an **owned** host the revert also puts the **recovery actor** back when
+  the previous digest set names it, ordered `[node-agent, recovery-actor]`, and it is bounded by the
+  installed control plane's **floor** as well as by its release: a revert from, or to, an agent or
+  recovery actor below the floor is refused `409 host_not_eligible` with `reason: "below_floor"`
+  (§"RH06 — Quasar-owned installation", "`below_floor`").
 - **Errors.** `404 not_found`. **`409 nothing_to_revert`** — this host has no succeeded attempt, or
   its last succeeded attempt recorded no previous digests (`previous_digests` is `[]`, e.g. the
   updater could not determine them). `409 host_not_eligible` (with `reason`), `409
@@ -7987,6 +8028,11 @@ read of its stored readiness rather than a second probe.
 | `image_resolvable` | both | every component manifest of `available[0]` resolves at the registry **as seen from the control plane** (a `GET` of the manifest by digest, no pull; an edge release resolves its commit tag) | the component and the registry's answer. `unknown` with no release listed. This is an instance-wide fact copied onto every target — it says the digests exist where every host will pull from, not that a given host can reach the registry; a host that cannot still fails `pull_failed` at its step. |
 | `agent_connected` | host | the host's agent has a live socket to this control plane right now (#169's `AgentConnected`) | nothing beyond the fact — `host_offline` already makes the target ineligible; the check is here so the card lists every fact in one place |
 | `health_addr_bindable` | host | the address in the agent's `QUASAR_HEALTH_ADDR` is answered by **this** agent (`/health` carries `node` and `pid`, #152) | the address and who answered instead, with `ss -ltnp` and the variable to change. `skip`/`unknown` when the endpoint is disabled. A squatter can only take the port while the agent is down, so on a running post-#152 agent this passes by construction; its value is on an older, tolerant agent (which reports the squatter) and on the *next* start, which is exactly when an apply recreates the agent. |
+
+*(Amendment 14, #353: the vocabulary appends `owner_conflict` and `backup_space`, carried only by
+an owned target; `updater_stack_dir` and `updater_overlays` are not carried by an owned target and
+retire with the RH06 contract step, RH06-15 (#367); on an owned target `updater_socket` checks the
+recovery actor's socket — §"RH06 — Quasar-owned installation", "Preflight".)*
 
 **`preflight_blocked` — where it sits.** Inserted into `EligibilityReason` after
 `control_plane_not_first` and before `attempt_in_flight`:
@@ -9038,3 +9084,348 @@ inventory at reconnect. This deliberate bound prevents a failed current
 version from looping across restarts. Removing placement or re-adopting before
 delayed execution suppresses stale work. Legacy clients ignore this additive
 endpoint and keep their existing image read/launch behavior.
+
+## RH06 — Quasar-owned installation, updates and recovery (amendment 14, #353, additive, admin-gated)
+
+> **Amendment 14 (#353; specification #352, Implementation Decision 24), EXPAND step,
+> additive, requires sign-off** — the owner's standing approval on #352, conditional on an Opus
+> APPROVED verdict. A machine installed the RH06 way is **owned**: one Quasar-owned **recovery
+> actor** per machine creates and replaces its platform services (control plane, node agent,
+> itself) through the Engine API, with no Compose file, `.env` or Compose label (`CONTEXT.md`
+> §"Deployment ownership"). This amendment is what the control plane's admin surface needs to
+> drive such machines. **Everything below is additive and optional for an existing consumer**:
+> every new field is optional in `openapi.yaml`, every new identifier is appended to a vocabulary
+> whose consumers already render an unrecognised value verbatim, a `registry` or `source` host and a
+> format-1 release behave exactly as before, and no route is added, removed or renamed. The
+> **contract** step (§"RH06 contract step" below) is written now and is **not in force** until
+> RH06-15 (#367) lands. The wire twin is `agent-api.md` amendment 14; storage is `schema.md`
+> amendment 14. Decisions: **ADR 0007** (the seed interface), **ADR 0008** (compiled recipes; the
+> recovery actor moves first; the A1 exception), and the **ADR 0004 amendment** (automatic restore
+> of the recovery actor and of a non-migrating control plane that never passed a health check).
+> ADRs 0001–0003, 0005 and 0006 hold unchanged.
+>
+> Every operation touched here keeps `RequireAuth → RequireAdmin`, server-enforced; nothing here
+> changes §Authorization.
+
+What this amendment adds, in one list:
+
+1. **Release manifest format 2** under a new asset name, with a third component and a **floor**
+   (§"Release manifest format 2").
+2. **`install_mode: "owned"`** and three optional recovery-actor and seed identity fields on the
+   host body (§"Owned hosts on the host body and the release view").
+3. **Apply components may name `recovery-actor`**, in a significant order (§"Components of an
+   apply on an owned machine").
+4. **`EligibilityReason`** appends **`below_floor`** (§"`below_floor`").
+5. **`ApplyFailureReason`** appends **`recipe_unsupported`**, **`owner_conflict`**,
+   **`backup_failed`**, **`backup_unconfirmed`** and **`interrupted`**, and confirms amendment 5's
+   `signature_missing` / `signature_invalid` (§"Failure reasons").
+6. **`PreflightCheckId`** appends **`owner_conflict`** and **`backup_space`**, and marks
+   `updater_stack_dir` and `updater_overlays` for retirement (§"Preflight").
+7. **`PlatformApplyRequest`** gains the optional **`external_backup_confirmed`**
+   (§"Migrating updates: the pre-update dump and the external-backup confirmation").
+8. **`PlatformApplyAttempt`** gains the optional **`pre_update_dump`** (same section).
+9. **The control-plane target's automatic restore** is widened by the ADR 0004 amendment
+   (§"Automatic restore on an owned machine").
+10. **The static `ENROLLMENT_TOKEN` is deprecated** (§"Enrollment").
+11. **Removing an owned GPU host** is carried by `agent-api.md` `host_remove` (§"Removing an owned
+    GPU host").
+
+### Release manifest format 2
+
+An RH06-era release carries a second machine-readable asset, **`platform-release-manifest.v2.json`**,
+produced by the same publish workflow from the same tag as the notes and the format-1 asset:
+
+```json
+{
+  "format_version": 2,
+  "version": "0.4.0",
+  "prerelease": false,
+  "source_commit": "<40 lowercase hex>",
+  "built_at": "2026-10-01T12:00:00Z",
+  "schema_version": 96,
+  "components": [
+    { "name": "control-plane",  "image": "ghcr.io/accreleus/quasar/quasar-control-plane",  "digest": "sha256:<64 lowercase hex>" },
+    { "name": "node-agent",     "image": "ghcr.io/accreleus/quasar/quasar-node-agent",     "digest": "sha256:<64 lowercase hex>" },
+    { "name": "recovery-actor", "image": "ghcr.io/accreleus/quasar/quasar-recovery-actor", "digest": "sha256:<64 lowercase hex>" }
+  ],
+  "floor": [
+    { "name": "node-agent",     "version": "0.3.0" },
+    { "name": "recovery-actor", "version": "0.3.0" }
+  ]
+}
+```
+
+- **Every format-1 field keeps its name, grammar and meaning** (§"The release manifest asset"):
+  `version`, `prerelease`, `source_commit`, `built_at`, `schema_version`, and `image` / `digest` on
+  each component. One commit, one `built_at`, one `schema_version` for the whole release. The
+  repository names in the example are illustrative: the manifest carries whatever repositories
+  the release publishes, and the namespace allowlist decides what a machine will pull.
+- **Exactly three components, in this order: `control-plane`, `node-agent`, `recovery-actor`.**
+  The order is normative, as in format 1, and is validated positionally. The recovery actor is a
+  component because it is part of every release and is replaced by it; **the seed and Postgres are
+  not components** — the seed is the operator's manager's to update (ADR 0007), and a Quasar-created
+  Postgres is created once and never replaced in RH06.
+- **`floor`** — exactly two entries, in this order: `node-agent`, then `recovery-actor`. Each names
+  the **oldest release of that component this release's control plane still manages** (#352
+  decision 13; `CONTEXT.md` "Floor"). `version` has exactly the grammar of the top-level `version`
+  (semver without a leading `v`) and must not order above it by SemVer precedence. A control plane
+  running a release declares the same floor its build carries; publishing it in the manifest is what
+  lets the release-time check (ADR 0008) and an operator read it before the release is applied.
+- **No other keys, at either level**, exactly as format 1: an unknown key is invalid.
+- **Signature.** A release that is signed carries **`platform-release-manifest.v2.json.sig`**, a
+  detached signature over the v2 asset's exact bytes in the format ADR 0003 defines. An actor that
+  verifies signatures fetches the v2 pair; nothing about the signature format, the trust
+  configuration or the two signature reasons changes.
+- **Format-1 consumers are unaffected.** A control plane that predates this amendment fetches only
+  `platform-release-manifest.json` and never sees a format-2 document. While the expand step is in
+  force a release may publish **both** assets; the format-1 asset then keeps its exact two-component
+  shape and names the same control-plane and node-agent digests as the format-2 one. A control
+  plane implementing this amendment reads the v2 asset when a release publishes one and the
+  format-1 asset otherwise; a release read from format 1 has no recovery-actor component and no
+  floor, and its applies never name `recovery-actor`.
+- `PlatformRelease.manifest` serves whichever asset was read, **verbatim**; a client tells them apart
+  by `format_version`. A v2 asset that fails validation — an unknown `format_version`, a component
+  missing or out of order, a `floor` entry missing, out of order, malformed or above `version`, an
+  unknown key — is a `manifest_invalid` fault exactly as for format 1, and the release is not listed.
+- The contract step stops publishing the format-1 asset (§"RH06 contract step").
+
+### Owned hosts on the host body and the release view
+
+- **`install_mode` gains `"owned"`** on the host body (§Hosts), on `PlatformHostIdentity` in the
+  release view, and in storage (`schema.md` `hosts.install_mode`). It is reported by the agent
+  (`agent-api.md` §`register`). An owned host takes platform releases exactly like a `registry`
+  host: where this document says "install mode is registry" as an eligibility condition, it now
+  reads "**registry or owned**". `install_mode_source` is unchanged. An older control plane reads an
+  owned host's mode as absent, so the host is identity-unknown there and is never applied to.
+- **`updater_present`** keeps its name and its NULL-is-not-false rule. On an owned host it says
+  whether the recovery actor answered on the agent's socket, and `updater_absent` /
+  `updater_unreachable` mean "no recovery actor socket" / "the recovery actor did not answer".
+- **The host body gains three fields** (`GET /v1/hosts`, `GET /v1/hosts/{id}` and the host list),
+  sourced from `register` and stored on `hosts`:
+  - **`recovery_actor_version`** — semver of the recovery actor serving the host's machine;
+  - **`recovery_actor_source_commit`** — 7–40 lowercase hex, the commit that actor was built from;
+  - **`seed_version`** — opaque, the seed the recovery actor last saw on the machine.
+
+  Each is **null** until an owned host reports it, and null on every host that is not owned. A
+  server implementing this amendment **always serializes** all three; they are optional in
+  `openapi.yaml` so a client written against it still accepts an older server, and a client reads
+  an absent field as null. They follow amendment 1's **wholesale-replace** rule (absent ⇒ null on
+  every `register`). They are **not** part of `identity_known`, which stays the four amendment-1
+  fields.
+- **`up_to_date` on an owned host** requires both halves of the host to be on the release: the
+  agent's `source_commit` equals the release's **and**, when the release names a `recovery-actor`
+  component, so does `recovery_actor_source_commit`. An owned host whose actor commit is null is not
+  up to date. A `registry` host is judged as before.
+
+### Components of an apply on an owned machine
+
+`requested_digests` (and `previous_digests`) may now name **`recovery-actor`** beside
+`control-plane` and `node-agent`, and on an owned machine **their order is the order of
+replacement**: each component is replaced and verified before the next, and the first failure
+stops the sequence (`agent-api.md` §`release_apply`). The planner builds the list; the recovery
+actor never reorders it.
+
+- **A host target** on an owned host is `[recovery-actor, node-agent]` when the host's actor is not on
+  the release, `[node-agent]` when it is, and `[recovery-actor]` when only the actor is behind. A
+  revert is `[node-agent, recovery-actor]` — the agent first, put back by the newer actor, then the
+  actor handing itself back — built from the `previous_digests` of the host's last succeeded
+  attempt, as every revert is. A `registry` host is `[node-agent]`, unchanged.
+- **The control-plane target** on an owned machine is `[recovery-actor, control-plane]` when that
+  machine's actor is not on the release, else `[control-plane]`. It is carried out by the recovery
+  actor on the control plane's own machine over that machine's **control socket**, not over any
+  agent connection; the socket is not frozen (`schema.md`). On a combined host the actor therefore
+  moves in the control-plane step, and that host's own host step names only `node-agent`.
+- **The one place an actor may lead the control plane (ADR 0008, decision A1).** On the control
+  plane's own machine the recovery actor may be one release ahead of the control plane while a
+  control-plane replacement is in flight, or after one failed and was restored. Nowhere else:
+  eligibility and revert targets still never put an agent or an actor above the control plane
+  (ADR 0002).
+- **Success evidence** is unchanged in kind: a host attempt succeeds on the new agent's `register`
+  reporting the release's commit — and, when the request named `recovery-actor`, the same commit as
+  `recovery_actor_source_commit` — or, for a `[recovery-actor]` request, on the relayed terminal
+  `release_state`. A control-plane attempt succeeds when the booted binary reports the release, as
+  today.
+- **Drain and cordon rules are unchanged.** A migrating control-plane step still drains the
+  instance; a host step still drains its host, because replacing the agent ends its sessions. A
+  `[recovery-actor]` host step ends no session, but it still runs inside the ordinary host step and
+  its drain: this amendment does not add a session-preserving path.
+- **Unattended apply is unchanged**: it never applies a migrating release, and it covers agent,
+  recovery-actor and non-migrating control-plane steps alike, because all three are ordinary steps
+  of the same run.
+
+### `below_floor`
+
+**`EligibilityReason` appends `below_floor`**, after `run_active`. It means: **the host's agent or
+recovery actor would be, or already is, older than the floor the installed control plane
+declares** — the oldest node-agent and recovery-actor release it still manages (#352 decision 13,
+ADR 0002 unchanged). A host below the floor is not failed: it is offered **only an update**.
+
+- **Comparison.** SemVer precedence of the host's reported `agent_version` and
+  `recovery_actor_version` against the floor's `version` for that component. A version that is
+  absent or is not `MAJOR.MINOR.PATCH[-prerelease]` (an unstamped developer build) is **never**
+  below the floor — the floor judges only what it can order, the posture `agent_ahead_of_control_plane`
+  takes for an unrecognised commit.
+- **Where it is produced.** `POST /v1/admin/platform/hosts/{id}/revert` answers **`409
+  host_not_eligible` with `reason: "below_floor"`** when the host's own agent or recovery actor is
+  already below the floor, or when the digest set the revert would restore belongs to a release
+  this instance knows whose version is below the floor. The same refusal applies to a revert that
+  would put the recovery actor above the control plane, which reads
+  `release_above_control_plane` exactly as for the agent.
+- **Where it is not.** A `targets` entry is eligibility for an **update to `available[0]`**, which
+  is never older than the installed control plane and so never below its floor. An update is
+  precisely what a below-floor host is offered, so the target entry for such a host is evaluated by
+  the existing precedence, unchanged, and `below_floor` takes no position in it.
+- A client meeting `below_floor` renders it; one that predates it renders the identifier verbatim.
+
+### Failure reasons
+
+**`ApplyFailureReason` appends five identifiers**, after `signature_invalid`, so no existing value
+moves. Full meanings are `agent-api.md` §`release_state`; in one line each:
+
+| reason | target | meaning |
+|---|---|---|
+| `recipe_unsupported` | both | the recovery actor does not carry the recipe revision a requested image declares (ADR 0008); found after the pull, before anything stopped — nothing changed |
+| `owner_conflict` | both | a Quasar-looking container on the machine lacks this installation's labels; the actor refuses to act — nothing changed |
+| `backup_failed` | control plane | a migrating release on a Quasar-owned database, and the pre-update dump could not be taken; refused before the old control plane stopped — nothing changed |
+| `backup_unconfirmed` | control plane | a migrating release on an operator-supplied database, applied without `external_backup_confirmed: true`; refused at admission — nothing changed |
+| `interrupted` | both | the actor, the engine or the machine restarted before the old container was taken out of service; settled as nothing changed, never retried on its own |
+
+Only an owned machine produces them. `interrupted` is a `failed` attempt with this reason; the
+state vocabulary is unchanged. **`signature_missing` and `signature_invalid`** are confirmed as
+members — already in the enum since amendment 5 (#120); on an owned machine the recovery actor
+performs ADR 0003's check, unchanged. A client meeting any unrecognised identifier renders it
+verbatim, as the vocabulary has always required.
+
+### Preflight
+
+**`PreflightCheckId` appends two ids**, and two ids are marked for retirement:
+
+| id | target | passes when | a `fail` detail names |
+|---|---|---|---|
+| `owner_conflict` | both, **owned only** | the machine's recovery actor reports no container that looks like a Quasar platform service without this installation's labels | each conflicting container and the fix (remove it, or remove the manager definition that recreates it). For a host this is also the agent's readiness check id `owner_conflict`, which **never carries `blocks`**: a conflict stops a replacement, not a launch |
+| `backup_space` | control plane, **owned with a Quasar-owned database only** | `available[0]` does not migrate, or the machine has enough free space for the pre-update dump | the space the dump needs and the space free. `unknown` when the recovery actor did not answer |
+
+- A failing `owner_conflict` or `backup_space` makes the target `blocked`, so it produces the
+  existing **`preflight_blocked`** eligibility reason, and everything downstream follows the
+  amendment-9 rules unchanged (the fleet run skips a blocked host; a blocked control plane refuses
+  `409 preflight_blocked`). No new refusal code.
+- **`updater_stack_dir` and `updater_overlays` are marked for retirement with RH06-15 (#367).**
+  They describe a Compose stack, so **an owned target does not carry them**; a `registry` target
+  still does until the contract step. `updater_socket` keeps its id; on an owned target it checks the
+  recovery actor's socket (the control socket for the control plane, the agent socket for a host),
+  and its `detail` names no Compose command.
+- The facts come from the recovery actor's status on the target's machine, read the way amendment 9
+  reads the updater's; nothing about freshness or caching changes.
+
+### Migrating updates: the pre-update dump and the external-backup confirmation
+
+A release **migrates** when its `schema_version` exceeds the installed control plane's (`migrates`,
+amendment 6). On an owned control-plane machine, a migrating control-plane step additionally
+requires a way back:
+
+- **A Quasar-owned database** — the recovery actor takes a **pre-update dump** of the database into
+  its machine-state volume before it stops the old control plane, and refuses the step
+  `backup_failed` if it cannot. It keeps the last three pre-update dumps, each with its schema
+  version.
+- **An operator-supplied (external) database** — Quasar never dumps, restores or resets it. The step
+  requires the operator's confirmation that a current backup exists, and is refused
+  `backup_unconfirmed` without it.
+
+**`PlatformApplyRequest` gains `external_backup_confirmed`** *(boolean, optional, default `false`)* —
+"I have a current backup of my own database". It is read **only** when the release migrates and the
+control plane's database is external; everywhere else it is ignored (a Quasar-owned database gets
+the dump, a non-migrating release needs nothing). The control plane hands it to its recovery actor
+with the control-plane step. It is recorded in the `platform.apply.run` audit event beside `force`.
+It is **not** stored on the run: a run whose control-plane step is started by a control plane that
+did not receive it (one restarted between accepting the run and starting its first step) fails that
+step `backup_unconfirmed`, before anything is stopped, and the operator applies again. An unattended
+run never migrates and never carries it; the per-host apply has no such field, because a host
+carries no schema.
+
+**`PlatformApplyAttempt` gains `pre_update_dump`** *(string or null)* — the name of the pre-update
+dump the recovery actor took for this control-plane attempt, exactly as the operator passes it to the
+recovery actor's `restore` command. **Null** on every host attempt, on a non-migrating control-plane
+attempt, on an external database and on a `registry` control plane. Opaque: a client displays it and
+never parses it. A server implementing this amendment always serializes it; it is optional in
+`openapi.yaml` for the same reason as the host fields.
+
+**A migrating control-plane step that fails is never restored automatically.** The attempt ends
+`failed`, `pre_update_dump` names the dump, and `output` ends with the **one-line `restore` command**
+the operator runs on that machine: it loads the dump into a stopped database and starts the matching
+control plane — the version the dump was taken from. Quasar never runs an older control plane against
+a newer schema (ADR 0002). The command's syntax belongs to the recovery actor and is not frozen here;
+a client shows `output` as it arrives.
+
+### Automatic restore on an owned machine
+
+The ADR 0004 amendment, as it reaches this surface:
+
+- **Node agent and recovery actor** — restored automatically by the recovery actor when the new
+  container fails verification. The host attempt is recorded `failed` with the actor's reason, and
+  the `kind: auto_revert` row is inserted beside it exactly as amendment 9 describes, naming **only
+  the restored component** (in a multi-component request, earlier verified components stay on their
+  new digests).
+- **Control plane** — restored automatically only when the new control plane **never passed a health
+  check** (its container's own healthcheck never reported healthy) **and** the release does not
+  migrate. It is recorded as today's never-started restore is: the attempt ends `failed` and `output`
+  says the previous control plane came back. A migrating step is never restored automatically
+  (above).
+- **A `registry` machine is unchanged**: the updater's rules of amendments 2 and 9 still apply there.
+
+### Enrollment
+
+- **The static `ENROLLMENT_TOKEN` is deprecated.** It keeps working exactly as §Host enrollment
+  tokens describes until the contract step; a control plane implementing this amendment logs one
+  `WARN` at boot while it is set.
+- An owned machine never uses it. A GPU host enrolls with an admin-minted token, as today; the
+  recovery actor passes the enrollment string to the agent it creates. A combined or control-only
+  machine's own agent enrolls with a **single-use local enrollment token** the recovery actor
+  generates at install and mounts into both containers; the control plane redeems it through the
+  same hashed, single-use `host_enrollments` path as a minted token. No route or wire shape changes.
+
+### Removing an owned GPU host
+
+An owned GPU host's platform services are removed by `agent-api.md` **`host_remove`**, relayed to its
+recovery actor, which removes the node agent and then itself. The control plane drains the host
+first; the host then goes offline, and forgetting its row is the existing `DELETE /v1/hosts/{id}`,
+unchanged. **This amendment adds no route.** A removal is not a platform-release attempt and writes
+no `platform_apply_attempts` row.
+
+### Unknown identifiers, restated for every appended vocabulary
+
+- **`EligibilityReason`** (`below_floor`), **`ApplyFailureReason`** (the five above) and
+  **`PreflightCheckId`** (`owner_conflict`, `backup_space`) — a client meeting a value it does not
+  know renders it **verbatim** and never drops the row, the attempt or the check.
+- **`install_mode`** (`owned`) — an older control plane stores an unrecognised mode as absent, so the
+  host is identity-unknown there; an older client shows an unrecognised mode as unknown.
+- **Component names** (`recovery-actor`) — an agent that does not know a name rejects the command
+  `invalid`, so it is never half-applied; a client lists a component name it does not know verbatim.
+- **`format_version`** — a consumer that meets one it does not know, under either asset name, treats
+  the manifest as invalid and does not list the release.
+
+### RH06 contract step — scheduled with RH06-15 (#367), NOT IN FORCE
+
+> Written now so the whole change is reviewed and signed once (#352, owner decision 1). **Nothing in
+> this subsection is in force** until the change that retires the Go updater (RH06-15, #367) lands;
+> that change marks it in force and makes these edits in the same commit as the code. Until then
+> every sentence it retires stays true for a `registry` target.
+
+1. **`updater_stack_dir` and `updater_overlays` retire.** No target evaluates or emits them. They are
+   removed from `PreflightCheckId` in `openapi.yaml` and from the amendment-9 table, and stay
+   **reserved**: neither id is ever reused.
+2. **Compose wording retires** from §"Self-update hardening" and §"Platform-release apply": the
+   `updater_socket` fail details that name `docker compose` commands, "the updater sitting beside it
+   on its own host" for the control-plane target (it reads "the recovery actor"), and the Compose
+   descriptions of `recreating` and `recreate_failed` (`agent-api.md` contract step). The identifiers
+   `updater_absent`, `updater_unreachable` and the field `updater_present` keep their names, and mean
+   the recovery actor.
+3. **The static enrollment token retires.** `ENROLLMENT_TOKEN` is no longer read; §Host enrollment
+   tokens loses its static-token paragraphs, and redemption matches minted tokens and a machine's
+   single-use local token only.
+4. **Format-1 publication stops.** From the first release that ships without the Go updater, releases
+   publish `platform-release-manifest.v2.json` (and, when signed, its `.sig`) and **no**
+   `platform-release-manifest.json`, so a control plane that predates this amendment is never offered
+   an in-place update onto an owned install: it finds no asset it can read and lists no such release.
+   A control plane implementing this amendment stops falling back to format 1. The `ReleaseManifest`
+   (format 1) shape stays documented, because releases already published carry it.
+5. Nothing else is removed: no route, no field, no enum value other than the two preflight ids.

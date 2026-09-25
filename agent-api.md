@@ -214,6 +214,32 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > with `unknown`, never as a fault); an older control plane stores and serves it verbatim, and its
 > verdict ignores it, since only `fail` blocks. See §`readiness`.
 
+> **Amendment 14 — RH06 Quasar-owned installation, updates and recovery (#353; specification
+> #352, Implementation Decision 24), EXPAND step, additive, requires sign-off (the owner's
+> standing approval on #352, conditional on an Opus APPROVED verdict).** A machine installed
+> the RH06 way runs one Quasar-owned **recovery actor** that creates and replaces its platform
+> services through the Engine API (`CONTEXT.md` §"Deployment ownership"). This wire gains, all
+> optional and all additive: **(1)** `register` accepts `install_mode: "owned"` and three
+> optional identity fields, `recovery_actor_version`, `recovery_actor_source_commit` and
+> `seed_version` (§`register`); **(2)** `release_apply` may name the **`recovery-actor`**
+> component beside `node-agent`, in an order that matters (§`release_apply`); **(3)**
+> `release_state`'s wording no longer describes a Compose command, and its closed `reason`
+> vocabulary appends **`recipe_unsupported`**, **`owner_conflict`**, **`backup_failed`**,
+> **`backup_unconfirmed`** and **`interrupted`**, and confirms amendment 5's
+> `signature_missing` / `signature_invalid` as members (§`release_state`); **(4)** one new
+> downstream command, **`host_remove`**, removes an owned GPU host's node agent and recovery
+> actor (§`host_remove`); **(5)** the static enrollment token is **deprecated** (§Auth /
+> enrollment). No existing message, field, value, ack or timeout changes for a host that is not
+> `owned`: an agent that predates this amendment registers, applies and reports byte-identically,
+> and an older control plane reads an `owned` host as identity-unknown (the existing rule for an
+> unrecognised `install_mode`) and so never applies to it. The **contract** step that retires the
+> Compose-specific wording and the static token is written in §"RH06 contract step" at the end
+> of this document and is **not in force** until RH06-15 (#367) lands. Decisions: ADR 0007 (the
+> seed interface), ADR 0008 (compiled recipes; the recovery actor moves first) and the ADR 0004
+> amendment (automatic restore of the recovery actor and of a non-migrating control plane that
+> never passed a health check). The recovery actor's local sockets are **not frozen** (`schema.md`
+> §"Not frozen: the updater's local socket", which amendment 14 widens to the recovery actor).
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -270,6 +296,15 @@ A node must prove it's allowed to join before it can register.
   enrollment rotates `node_secret`, so allowing it against a live host is identity takeover.
   The credential is checked FIRST — this surface is pre-auth, so a bad token gets a plain
   `auth_failed` that says nothing about whether the `node_name` exists or is live.
+  *(Amendment 14, #353:)* **the fleet-wide static value is deprecated.** It is still accepted
+  exactly as above until the contract step (§"RH06 contract step"), and a control plane
+  implementing amendment 14 logs a `WARN` at boot while one is configured. An `owned` machine
+  never uses it: a GPU host's recovery actor hands the admin-minted enrollment string to the
+  node agent it creates, and the agent redeems it as above; a combined or control-only machine's
+  own agent enrolls with a **single-use local enrollment token** the recovery actor generates at
+  install and gives to both the control plane and the agent, which the control plane redeems
+  through the same hashed, single-use path as a minted token. The wire shape is identical in
+  every case: `auth.enrollment_token` stays a string.
 - **Reconnect:** the agent presents `node_name` + `node_secret`; the control plane checks it
   against `node_secret_hash`. No new row is created.
 - End state (Phase 3/4) replaces the shared enrollment token with mTLS / SPIFFE identities;
@@ -392,6 +427,50 @@ capable of recreating its containers, and `source_commit` is already how a compl
 recognised — the **new** agent's `register`, reporting the release's commit, is the success
 evidence for a node-agent apply (§`release_state`). A second "I am mid-apply" field would be a
 second source of truth for something the `platform_apply_attempts` row already owns.
+
+**Owned installs (amendment 14, #353).** `install_mode` gains a third value, and an owned host may
+report three more optional flat fields describing the rest of its machine:
+```json
+{
+  "install_mode": "owned",
+  "updater_present": true,
+  "recovery_actor_version": "0.4.0",
+  "recovery_actor_source_commit": "1f0c1e0e0c5a9d1b7a2f3e4d5c6b7a8901234567",
+  "seed_version": "0.4.0"
+}
+```
+- **`install_mode: "owned"`** — this host's platform services were created, and are replaced, by
+  its **recovery actor** through the Engine API; no Compose file, `.env` or Compose label is read or
+  written for them (`CONTEXT.md` "Install mode"). An `owned` host is given platform releases exactly
+  as a `registry` host is. **An older control plane treats `owned` as absent** (the rule above for
+  any other value), so it reads the host as identity-unknown and never applies to it — the safe
+  failure for a control plane that cannot drive a recovery actor.
+- **`updater_present`** keeps its name and its NULL-is-not-false rule; on an `owned` host it
+  answers "did this host's recovery actor answer on the agent socket" rather than "is there an
+  updater on this stack".
+- **`recovery_actor_version`** — the semver the recovery actor serving this machine reports for
+  itself, without a leading `v`; anything that is not `MAJOR.MINOR.PATCH[-prerelease]` is treated
+  as **absent**. It is what the control plane compares with its declared floor (`control-api.md`
+  §"RH06", `below_floor`).
+- **`recovery_actor_source_commit`** — the git commit that recovery actor was built from, under
+  exactly the `source_commit` rule above (7–40 lowercase hex, stored as sent, anything else absent).
+  It is how the control plane recognises that the actor is on a release, as `source_commit` is for
+  the agent.
+- **`seed_version`** — the version of the **seed** the recovery actor last saw on this machine, as
+  an opaque string, stored as sent. Reported so an operator
+  can see which seed a machine was set up with; the manager, not Quasar, updates the seed (ADR 0007),
+  so nothing is ever decided on it. Absent means the recovery actor saw no seed or could not tell.
+- The three are sent **only with `install_mode: "owned"`**; a control plane ignores them beside any
+  other mode. The agent learns them from its recovery actor over the agent socket, which is not a
+  frozen interface; how is agent-side detail, and this wire fixes only the answer.
+- **Wholesale on every `register`, exactly like the four fields above**: absent is stored NULL. They
+  are **not** part of `identity_known`, which stays the four fields above, so a host that reports
+  none of them keeps the eligibility it had.
+- **When the recovery actor is replaced while the agent stays connected** (an apply whose
+  `components` named `recovery-actor` but not `node-agent`, §`release_apply`), the agent relays the
+  terminal `release_state`, then closes its connection and re-dials, so the next `register` carries
+  the new actor identity. A reconnect is not an enrollment and ends no session (§Reconnect &
+  message correlation). Without it the host would go on reporting the actor it had before.
 
 ### `capacity` — full capacity report
 Sent immediately after `registered`, and again whenever hardware/topology changes. Replaces
@@ -1194,10 +1273,18 @@ one the agent invents, so a state message maps to exactly one
 - **`state`** *(string, required)* — one of **`pending` | `pulling` | `recreating` | `verifying` |
   `succeeded` | `failed`**. Exactly the states the updater's result file carries (#113 prototype
   finding 2). **Monotonic**: a state never goes backwards, and `succeeded` / `failed` are
-  terminal. `pending` = the updater accepted the request and has not started; `pulling` = fetching
-  the component digests; `recreating` = the compose `up -d --force-recreate --no-deps` is running;
-  `verifying` = the container is up and the updater is checking post-state (running, and healthy
-  or health-less) rather than trusting an exit code.
+  terminal. *(Wording amended by amendment 14, #353; no value changes.)* `pending` = the host's
+  actor (its **updater** on a `registry` host, its **recovery actor** on an `owned` host) accepted
+  the request and has not started; `pulling` = fetching the component digests; `recreating` = the
+  actor is **replacing** a component's container — the old one is being taken out of service and the
+  new one created and started (on an `owned` host the old container is stopped and **kept**, with
+  its restart policy disabled, until the new one is verified; on a `registry` host the updater
+  recreates the service); `verifying` = the new container is up and the actor is checking
+  post-state (running, and healthy or health-less) rather than trusting an exit code. For a request
+  naming several components the state stays **monotonic over the whole request**: `pulling` until
+  the first container is taken out of service, then `recreating` — including while a later
+  component is pulled, replaced or verified — and `verifying` only once the last component is
+  being verified.
 - **`reason`** *(string or null, required)* — **non-null exactly when `state` is `"failed"`**, and
   then exactly one identifier from the closed vocabulary below. It is a **stable identifier the
   admin UI maps to text**, never a sentence, for the same reason amendment 1's
@@ -1205,9 +1292,9 @@ one the agent invents, so a state message maps to exactly one
   plane meeting an unrecognised identifier stores and renders it verbatim rather than dropping the
   message.
 - **`components`** *(array, required)* — what was requested, echoed back so a state message is
-  self-describing: `name` (`"node-agent"`), `image` (repository reference, **no tag and no
-  digest**) and `digest` (`sha256:` + 64 lowercase hex). Same shape and same order as the
-  `release_apply` command's `components`.
+  self-describing: `name` (`"node-agent"`, or since amendment 14 also `"recovery-actor"`), `image`
+  (repository reference, **no tag and no digest**) and `digest` (`sha256:` + 64 lowercase hex).
+  Same shape and same order as the `release_apply` command's `components`.
 - **`previous`** *(array, required)* — the digest each component was on **before** this apply:
   `{name, digest}`, `digest` **`null`** when the updater could not determine it (never omitted).
   **Present in every `release_state`, in every state — not only on failure.** It is what makes the
@@ -1218,9 +1305,10 @@ one the agent invents, so a state message maps to exactly one
 - **`output`** *(string, required)* — the **last 8192 bytes** of the failing step's combined
   stdout/stderr, truncated from the **front** at a line boundary (the error is at the end), `""`
   when there is nothing to report. Non-empty only for `failed` in practice. **It never contains a
-  credential or an environment value**: the updater rewrites two variables in the stack's `.env`
-  and reports their **names** only, never their values, and it never echoes the environment
-  wholesale.
+  credential or an environment value**: the actor never echoes a container's environment or a
+  secret file, and where it names a setting it names it, never its value. *(On a `registry` host
+  the updater rewrites two variables in the stack's `.env` and reports their **names** only; that
+  sentence retires with the contract step.)*
 - **`started_at` / `updated_at` / `finished_at`** *(RFC3339 UTC)* — when the updater accepted the
   request, when this state was written, and when it became terminal (`null` until then).
 - **`restored`** *(boolean, optional, additive — amendment 9, #185/#188)* — `true` on a `failed`
@@ -1234,6 +1322,12 @@ one the agent invents, so a state message maps to exactly one
   failed container's last log lines (which is where `health-bind-failed` lands), then one line
   saying the previous digest came back up — or that the restore also failed, in which case
   `previous` is the manual recipe as before.
+  *(Amendment 14, #353, ADR 0004 amendment:)* on an `owned` host the recovery actor restores a
+  failed **`recovery-actor`** component too (a successor that never verified is removed and the
+  previous actor re-enabled). In a request naming several components, `restored` refers to **the
+  component whose replacement failed**: components earlier in the list that were already verified
+  stay on their new digests, later ones were never touched, and the control plane's `auto_revert`
+  row names only the restored component (`control-api.md` §"RH06").
 
 **`reason` — the closed vocabulary.** These are the same identifiers the `release_apply` `ack`
 uses when it rejects (§`release_apply`), deliberately: an attempt that failed at the ack and one
@@ -1242,20 +1336,34 @@ they can be rendered by one mapping.
 
 | reason | meaning |
 |---|---|
-| `updater_absent` | there is no **updater** on this host's stack — no socket to hand the request to. Nothing here can recreate a container, so the apply has no actor. (Ack rejection; also emitted if the socket is proven gone mid-apply.) |
+| `updater_absent` | there is no **updater** on this host's stack — no socket to hand the request to. Nothing here can recreate a container, so the apply has no actor. (Ack rejection; also emitted if the socket is proven gone mid-apply.) *(Amendment 14:)* on an `owned` host, no recovery actor socket is mounted in this agent's container; the identifier is unchanged. |
 | `busy` | an apply is already in flight on this host. **Single-flight per host: refuse, never queue.** (Ack rejection.) |
 | `invalid` | the command was un-actionable on its face — an empty `components` list, an unknown component `name`, a component naming **`control-plane`** (see §`release_apply`), a `request_id` that is not a uuid, an `image` carrying a tag or a digest. (Ack rejection.) |
 | `namespace_rejected` | a component `image` is outside the registry namespace this host will pull platform images from. Reported specifically rather than as `invalid`, because it is the one rejection an operator can fix by configuration. (Ack rejection, or the updater's own allowlist.) |
 | `digest_malformed` | a `digest` is not a well-formed `sha256:` + 64 lowercase hex. (Ack rejection, or the updater's own check.) |
 | `pull_failed` | at least one component digest could not be pulled (registry unreachable, auth denied, manifest not found, or the "mismatched image rootfs and manifest layers" that a digest published without a tag behind it produces). |
-| `recreate_failed` | the compose recreate exited non-zero. The old container is already gone at this point — compose removes it before starting the replacement — so this state is a **stopped service**, and `previous` is the restore recipe. |
+| `recreate_failed` | the new container could not be created or started. On a `registry` host the compose recreate exited non-zero, and the old container is already gone at this point — compose removes it before starting the replacement — so this state is a **stopped service**, and `previous` is the restore recipe. *(Amendment 14:)* on an `owned` host the old container is **kept**, stopped, until the new one is verified, so the recovery actor restores it without a pull (`restored`). |
 | `never_started` | the recreate produced a container that **never started** (`State.StartedAt` is zero). Distinguished from `unhealthy` because it is the one failure in which nothing the new image would have done can have happened — for the control-plane target that is what makes an automatic restore safe (`control-api.md`; ADR 0002 holds because no migration can have run). A node-agent apply that fails this way, or `recreate_failed` / `unhealthy`, **is restored by the updater** since amendment 9 (#185/#188) — it carries no migrations, and the failure is not hidden: the message says `restored: true` and the control plane records the restore as its own attempt. |
 | `unhealthy` | the new container started and then did not reach running-and-healthy within the updater's wait timeout. It ran; assume it did whatever it does. |
-| `updater_unreachable` | the updater's socket could not be reached, or its result file for this `request_id` stopped advancing or disappeared. "I cannot see the actor", as distinct from `updater_absent`'s "there is no actor". |
+| `updater_unreachable` | the updater's socket could not be reached, or its result file for this `request_id` stopped advancing or disappeared. "I cannot see the actor", as distinct from `updater_absent`'s "there is no actor". *(Amendment 14:)* on an `owned` host, the recovery actor's socket did not answer, or its status for this `request_id` stopped advancing; the identifier is unchanged. |
 | `timeout` | the apply did not reach a terminal state within the deadline. Emitted by whichever side observes it first; the control plane writes it on the attempt when no terminal `release_state` arrives (`control-api.md`). |
 | `unsupported` | **written by the control plane, never sent on this wire** — no `ack` arrived within the ack timeout, so this agent build predates this amendment. Listed here because it shares the attempt's `reason` column and one client-side mapping. |
 | `signature_missing` | the host is configured to **require** a signed release (`QUASAR_UPDATER_SIGNATURE_MODE=require`) and this release publishes no signature over its manifest. Distinguished from `signature_invalid` because it is the one signature refusal that says nothing is wrong with the release — only that this host will not take an unsigned one. **Appended by amendment 5 (#120); see the note below.** |
 | `signature_invalid` | the release's manifest signature did not verify: a bad signature, a key outside `QUASAR_UPDATER_TRUSTED_KEYS`, a signed manifest that does not name the very digests this request asks for, a signature that could **not be fetched** at all, or a host told to verify with no trusted keys configured. All of these are one identifier on purpose — each is "this host cannot establish that these digests are the ones that were signed", and the updater's `output` carries which. **Fail closed: "could not tell" is never reported as "unsigned".** **Appended by amendment 5 (#120); see the note below.** |
+| `recipe_unsupported` | *(appended by amendment 14, #353)* the recovery actor does not carry the **recipe revision** a requested image declares (ADR 0008). Found after the pull and **before anything is stopped**, so nothing changed. Reachable only by an apply that moves an image without the recovery actor that supports it — the control plane moves the actor first (§`release_apply`). |
+| `owner_conflict` | *(appended by amendment 14)* a container that looks like a Quasar platform service is on this machine but does not carry this installation's ownership labels (a leftover Compose stack, a definition a manager holds). The recovery actor never acts on a container it did not create, so it refuses and changes nothing; its `output` names the container. (Ack rejection when known at submission; otherwise before any stop.) |
+| `backup_failed` | *(appended by amendment 14)* **control-plane target only**, a migrating release on a Quasar-owned database: the pre-update dump could not be taken (the dump failed, or the machine has too little free space for it). Refused **before** the old control plane is stopped, so nothing changed. Never sent on this wire — the control-plane target is applied over its own machine's local socket — and listed here because it shares the attempt's `reason` column and one client-side mapping, like `unsupported`. |
+| `backup_unconfirmed` | *(appended by amendment 14)* **control-plane target only**, a migrating release on an operator-supplied (external) database, applied without the operator's confirmation that a current backup exists (`control-api.md` `external_backup_confirmed`). Refused at admission, so nothing changed. Never sent on this wire, for the same reason as `backup_failed`. |
+| `interrupted` | *(appended by amendment 14)* the recovery actor, the container engine or the machine restarted part-way, **before** the old container had been taken out of service, and on its next start the recovery actor settled the attempt as **nothing changed** (the partial new container is removed). It is never retried on its own; the operator or the unattended schedule starts a new attempt. An interruption **after** the old container was stopped is not this reason: the actor continues to verification and reports the ordinary outcome, restoring on failure. |
+
+**The five amendment-14 reasons are appended** after the two signature reasons, so no existing
+identifier changes position, and they are emitted only for an `owned` host or an owned
+control-plane machine: a `registry` host's updater never produces them. `interrupted` is a
+`failed` state with this reason, not a new state — the state vocabulary is unchanged. A consumer
+that predates them keeps the standing rule: **store and render an unrecognised identifier
+verbatim**, never reject the message. Amendment 14 also confirms `signature_missing` and
+`signature_invalid` as members of this vocabulary on an `owned` host, where the recovery actor
+performs ADR 0003's verification exactly as the updater does; nothing about them changes.
 
 **The two signature reasons are appended, and are inert until an operator opts in.** Signature
 verification is **off by default** (ADR 0003; `docs/configuration.md` "Release signature
@@ -1271,6 +1379,10 @@ performs **no session logic** at any point. That is why an agent restart mid-app
 the result file is on disk beside the updater, and the reconnecting agent re-reads it. The shape
 of that file and of the local socket carrying it is **deliberately not frozen** — see `schema.md`
 §"Not frozen: the updater's local socket".
+*(Amendment 14:)* on an `owned` host the source is the **recovery actor's status** for this
+`request_id`, read over the agent socket; the recovery actor's journal is on its machine-state
+volume, so an agent restart mid-apply loses nothing there either. Neither the socket nor the
+journal is frozen.
 
 **On reconnect, the agent re-emits the current state for every request id whose result file is
 still present**, immediately after `register` — the same reconciliation posture `register`'s
@@ -1286,6 +1398,10 @@ release's `source_commit` in amendment 1's identity fields. The control plane th
 control-plane target, where the same thing is true of the control plane's own boot. A late
 `release_state{state:"succeeded"}` for an attempt already resolved that way is a no-op, not a
 conflict.
+*(Amendment 14:)* when the request also named `recovery-actor`, that `register` must also report
+the release's commit as `recovery_actor_source_commit`. When it named **only** `recovery-actor`, the
+agent was not replaced, so the relayed terminal `release_state` is the outcome, and the agent's
+re-`register` after it (§`register`) refreshes the host's recorded actor identity.
 
 **Session consequence, stated on the wire because it is not obvious:** recreating the agent
 **kills every session on the host** (prototype finding 3). The `quasar-sess-*` / `quasar-pulse-*`
@@ -1293,7 +1409,8 @@ siblings survive the recreate untouched and are then force-removed by the new ag
 orphan sweep, so nothing is orphaned and the apply is safe to retry at any time — but the sessions
 are gone. Draining to zero sessions first is the **control plane's** job, done before it sends
 `release_apply` at all (`control-api.md`); the agent never checks, waits, or refuses on this
-basis.
+basis. *(Amendment 14:)* replacing the **recovery actor** alone ends no session; replacing the
+agent still ends them all, on an `owned` host exactly as on a `registry` one.
 
 ---
 
@@ -1904,7 +2021,8 @@ reserved.
 > whole of how the control plane times it out.*
 
 Reserve/prepare semantics like `image_ensure`: the agent acks **acceptance** immediately, hands
-the request to this host's **updater**, and then relays progress via `release_state`. The agent
+the request to this host's **updater** (on an `owned` host, since amendment 14, its **recovery
+actor**, over the agent socket), and then relays progress via `release_state`. The agent
 runs no compose command itself and never recreates itself directly — a container cannot recreate
 itself, which is the entire reason the updater exists (`CONTEXT.md` "Updater").
 
@@ -1951,6 +2069,19 @@ itself, which is the entire reason the updater exists (`CONTEXT.md` "Updater").
   **Today it is always exactly one entry, `"node-agent"`.** It is an array rather than a flat pair
   so that a host stack that later gains a second agent-side component needs no new message; it is
   **not** an invitation to send more than the agent knows.
+  *(Amendment 14, #353 — the second component arrives.)* On an **`owned`** host the list may also
+  name **`"recovery-actor"`**, the image of the recovery actor serving that machine, and **the order
+  is significant**: the recovery actor replaces the components **in the order sent**, each one fully
+  (replaced and verified) before the next, and **a failure stops the sequence** — later components
+  are not touched. Each name appears at most once. The control plane sends `recovery-actor`
+  **first** on an apply, when the host's actor is not already on the release (so the actor that
+  renders a release's node agent is always that release's actor, ADR 0008), and **last** on a
+  revert (the newer actor puts the agent back, then hands itself back). The shapes it sends are
+  therefore `[node-agent]`, `[recovery-actor, node-agent]`, `[recovery-actor]` (only the actor is
+  behind) and, on a revert, `[node-agent, recovery-actor]`. It never sends `recovery-actor` to a
+  host that is not `owned`; an agent that receives one there, or an agent that predates this
+  amendment, rejects it `invalid` under the rule below. The actor's image is subject to the same
+  namespace and digest rules as the agent's.
 - **The control plane NEVER asks an agent to update the control plane.** A `components` entry
   named **`control-plane`** — or any name this agent build does not know — is rejected
   `ack{ok:false, error:"invalid"}`, unconditionally and without contacting the updater. The
@@ -1958,7 +2089,10 @@ itself, which is the entire reason the updater exists (`CONTEXT.md` "Updater").
   socket, and never over this WebSocket; a control plane asking an agent to replace the control
   plane is the shape of a confused-deputy bug and this contract makes it unrepresentable.
   (Related, and enforced on the other side: **the updater never accepts a request naming itself** —
-  prototype finding 2.)
+  prototype finding 2.) *(Amendment 14:)* the recovery actor, by contrast, **does** accept a request
+  naming itself — it replaces itself by handing over to a successor (ADR 0008) — but the agent
+  socket it mounts into the node agent accepts only `node-agent` and `recovery-actor`, so the
+  confused-deputy guard holds on both sides: an agent can never ask for the control plane.
 - **`force`** *(boolean, optional, default `false`)* — **"the control plane has decided sessions
   may be killed."** It is a statement of a decision already taken, not an instruction, and **the
   agent does no session logic on it or on anything else**: with `force` true or false the agent
@@ -1980,7 +2114,9 @@ rejected apply **never fails a session and never changes host status**:
   **`updater_absent`** (no updater on this stack), **`busy`** (an apply is already in flight —
   single-flight per host: refuse, never queue), **`invalid`** (malformed, empty, or a component
   this agent must not apply, including `control-plane`), **`namespace_rejected`** (an `image`
-  outside this host's platform-image namespace) or **`digest_malformed`**. Runtime failures — pull,
+  outside this host's platform-image namespace) or **`digest_malformed`** — and, on an `owned` host
+  since amendment 14, **`owner_conflict`** when the recovery actor refuses at submission because a
+  container it did not create is in the way. Runtime failures — pull,
   recreate, health — are **not** ack failures: they follow an `ok:true` ack as
   `release_state{state:"failed", reason}`, exactly as `image_ensure`'s runtime failures follow via
   `image_state`.
@@ -2001,6 +2137,48 @@ rejected apply **never fails a session and never changes host status**:
   - Contrast with `session_display_update`, where a timeout reads as a rejection: an apply that was
     never received changed nothing, so attributing silence to an old build costs nothing and names
     the actual remedy — the same call `session_capture` makes.
+
+### `host_remove` — remove an owned GPU host's platform services (amendment 14, #353)
+> *Additive amendment. A new downstream command; an older agent silently ignores the unknown
+> `type` and is wire-silent, exactly as for `release_apply`. It is the **remove request** of
+> #352 decision 24: the console's "remove host" for a GPU host (D12) is carried out by that
+> host's recovery actor, and this is how the request reaches it.*
+
+```json
+{ "type": "host_remove", "id": "<command-id>", "request_id": "3c0a6f2e-8d1b-4f7e-9a55-2b8e1c0d9f41" }
+```
+
+- **`id`** *(required)* — the ordinary command id the `ack` echoes.
+- **`request_id`** *(uuid, required)* — minted by the control plane, for the same reason as
+  `release_apply`'s: the recovery actor is idempotent on it, so a re-sent command after a lost ack
+  is the same removal, not a second one.
+- **What it does.** The agent hands the request to its recovery actor over the agent socket as a
+  **remove** of this machine's platform services, in the fixed order **node agent, then recovery
+  actor**. The actor stops and removes the node agent's container, records in the seed's state
+  file that this installation is uninstalled (so the seed does not re-create it, ADR 0007), then
+  removes itself. It removes containers and nothing else, exactly as the operator `uninstall`
+  command without `--purge` does: data stays on the machine, and the seed stays wherever the
+  operator's manager put it. The message carries no component list: a GPU host's removal always
+  means exactly these two, and the socket the agent holds may name nothing else.
+- **Only for an `owned` GPU host.** The agent rejects `ack{ok:false, error:"invalid"}` when its
+  host is not `owned`, or when its machine also runs a control plane (a combined host is taken
+  apart with the recovery actor's operator `uninstall` command on that machine, never over this
+  wire).
+- **Ack.** `ack{ok:true}` means the recovery actor accepted the removal. `ack{ok:false, error}` is
+  one identifier from the `release_state` `reason` vocabulary: `invalid` (above), `updater_absent`
+  (no recovery actor socket in this container), `updater_unreachable` (the socket did not answer)
+  or `busy` (a replacement is in flight; single-flight, refuse, never queue). No ack within the
+  10 s ack timeout means the agent predates this amendment and nothing was removed.
+- **No `release_state` follows.** The agent that would relay progress is the first thing removed.
+  The evidence of a completed removal is that the host's connection closes and never
+  re-registers; a removal that fails part-way leaves the host visibly still there (online, or
+  offline with its recovery actor present), and the recovery actor's own `uninstall` command on
+  the machine finishes it. A removal is **not** a platform-release attempt and produces no
+  `platform_apply_attempts` row.
+- **Draining is the control plane's job**, done before it sends this command: the agent does no
+  session logic, and removing the agent ends every session on the host. Forgetting the host's row
+  afterwards is the existing `control-api.md` `DELETE /v1/hosts/{id}`, which requires the host to be
+  offline.
 
 ---
 
@@ -2877,3 +3055,31 @@ executes settings and proves application. Unowned groups retain the legacy
 writer and its restart behavior. A legacy `restart_confirm` does not approve
 RH05 idle apply for a typed-owned group. This amendment does not change console
 or Steam source policy delivery.
+
+## RH06 contract step (amendment 14, #353) — scheduled with RH06-15 (#367), NOT IN FORCE
+
+> Written now, beside the expand step above, so the whole change is reviewed and signed once
+> (#352, owner decision 1: the standing approval covers "the retirement half delivered with the
+> Compose-updater retirement ticket"). **Nothing in this section is in force** until the change
+> that retires the Go updater (RH06-15, #367) lands; that change edits this heading to "in force"
+> and makes the edits listed here, in the same commit as the code. Until then every sentence this
+> section retires stays true for a `registry` host.
+
+1. **§Auth / enrollment — the static token is removed.** `auth.enrollment_token` redeems a minted
+   token or a machine's single-use local enrollment token and nothing else. The control plane no
+   longer reads a fleet-wide static value, so a `register` presenting one fails `auth_failed`
+   like any other unknown token. The "or the fleet-wide static value" alternative and its
+   deprecation note are deleted.
+2. **§`release_state` — the Compose wording retires.** `recreating` loses its "on a `registry`
+   host the updater recreates the service" clause, `recreate_failed` loses its compose sentence,
+   `output` loses its `.env` sentence, and "the updater's result file" stops being named as the
+   relay source. After the step the word **updater** in `updater_absent`, `updater_unreachable`
+   and `updater_present` means the host's recovery actor; **the identifiers are unchanged** and are
+   never renamed, because they are stored, rendered and mapped by every consumer.
+3. **§`release_apply`** — "hands the request to this host's updater" reads "recovery actor". A
+   `registry` host (published images started by Compose, with no recovery actor) has nothing that
+   can replace its containers once the Go updater is gone: its agent reports
+   `updater_present: false`, and the release surface says `updater_absent`.
+4. **Nothing is removed from any message shape or vocabulary.** `install_mode: "registry"` stays a
+   value an agent may report, and every identifier this document defines stays reserved: none is
+   deleted, and none is ever reused with another meaning.

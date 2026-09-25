@@ -2447,8 +2447,10 @@ paths:
       summary: Apply one platform release to one host (admin).
       description: >-
         A STANDALONE attempt - no run, no fleet ordering - refused while a fleet run is
-        active. ONLY THE NODE-AGENT IMAGE IS SENT; the control-plane component is never
-        sent to a host. With force false the host is cordoned and the attempt sits in
+        active. ONLY THE NODE-AGENT IMAGE IS SENT to a registry host; an owned host
+        (amendment 14, #353) is also sent the release's recovery-actor image, first, when its
+        actor is not on the release. The control-plane component is never sent to a host.
+        With force false the host is cordoned and the attempt sits in
         waiting_sessions until the non-terminal session count reaches zero; with force
         true the wait is skipped and the N sessions running are stopped, and a client MUST
         show N in the confirmation - force is the operator agreeing to end N live
@@ -2523,8 +2525,8 @@ paths:
         "409":
           description: >-
             nothing_to_revert (no succeeded attempt on this host, or its last succeeded
-            attempt recorded no previous digests); host_not_eligible (with `reason`);
-            attempt_in_flight; run_active.
+            attempt recorded no previous digests); host_not_eligible (with `reason`; since
+            amendment 14 that reason may be below_floor); attempt_in_flight; run_active.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
         "501":
           description: "apply_unsupported - as for apply."
@@ -2769,6 +2771,8 @@ paths:
     # tokens replacing the fleet-wide static ENROLLMENT_TOKEN as the primary join path.
     # The `register` wire shape is unchanged: `auth.enrollment_token` stays a string and the
     # server matches a minted token (hash lookup) before the static one (config compare).
+    # Amendment 14 (#353): the static ENROLLMENT_TOKEN is DEPRECATED and retires with the RH06
+    # contract step (RH06-15, #367); no route or shape here changes.
     get:
       tags: [admin]
       summary: List minted host-enrollment tokens (never the plaintext token).
@@ -5251,16 +5255,34 @@ components:
           description: "When that agent binary was built."
         install_mode:
           type: [string, "null"]
-          enum: [registry, source, null]
+          enum: [registry, source, owned, null]
           description: >-
             How this host got its platform images (CONTEXT.md "Install mode"): registry = pulled
-            published images, source = built on the host. A source host can be TOLD about a
-            platform release but never given one.
+            published images, source = built on the host, owned (amendment 14, #353) = created
+            and replaced by the machine's recovery actor. A source host can be TOLD about a
+            platform release but never given one. A client meeting an unrecognized mode shows
+            it as unknown.
         updater_present:
           type: [boolean, "null"]
           description: >-
             Whether an updater sits on this host's stack. NULL IS NOT false: null = no
-            amendment-aware agent has registered, false = an agent looked and found none.
+            amendment-aware agent has registered, false = an agent looked and found none. On an
+            owned host (amendment 14): whether its recovery actor answered on the agent socket.
+        # amendment 14 (#353), additive: the recovery actor's and the seed's identity on an
+        # OWNED host, as reported on `register`. A server implementing the amendment ALWAYS
+        # SERIALIZES all three (null until reported, and null on every host that is not owned);
+        # they are OPTIONAL here so a client still accepts an older server, and a client reads
+        # an absent field as null. Replaced wholesale on every register, like the four fields
+        # above. NOT part of identity_known.
+        recovery_actor_version:
+          type: [string, "null"]
+          description: "Semver (no leading v) of the recovery actor serving this host's machine. Compared with the installed control plane's floor (below_floor)."
+        recovery_actor_source_commit:
+          type: [string, "null"]
+          description: "The git commit that recovery actor was built from: 7-40 lowercase hex, stored exactly as sent. With source_commit, what up_to_date compares on an owned host."
+        seed_version:
+          type: [string, "null"]
+          description: "Opaque version of the seed the recovery actor last saw on the machine. Informational; nothing is decided on it (ADR 0007)."
         capacity:
           # UI v3 amendment (2026-08-28, additive): the per-host roll-up of what
           # GET /v1/hosts/{id}/gpus already serves per GPU. Exists to remove the 1+N
@@ -5851,13 +5873,17 @@ components:
         agent_version: { type: [string, "null"] }
         source_commit: { type: [string, "null"], description: "7-40 lowercase hex, stored exactly as the agent sent it; null until reported." }
         built_at: { type: [string, "null"], format: date-time }
-        install_mode: { type: [string, "null"], enum: [registry, source, null] }
+        install_mode:
+          type: [string, "null"]
+          enum: [registry, source, owned, null]
+          description: "owned is appended by amendment 14 (#353) and is eligible exactly like registry."
         updater_present:
           type: [boolean, "null"]
           description: >-
             Whether an updater sits on this host's stack. NULL IS NOT false: null = no
             amendment-aware agent has registered, false = an agent looked and found none.
-            The first is an old agent, the second a real gap an operator must close.
+            The first is an old agent, the second a real gap an operator must close. On an
+            owned host (amendment 14): whether its recovery actor answered on the agent socket.
         identity_known:
           type: boolean
           description: >-
@@ -5914,8 +5940,13 @@ components:
         manifest:
           oneOf:
             - { $ref: "#/components/schemas/ReleaseManifest" }
+            - { $ref: "#/components/schemas/ReleaseManifestV2" }
             - { type: "null" }
-          description: "The release manifest asset verbatim. NULL ON EDGE, which publishes no asset."
+          description: >-
+            The release manifest asset verbatim. NULL ON EDGE, which publishes no asset.
+            Amendment 14 (#353): the format-2 asset (platform-release-manifest.v2.json) when the
+            release publishes one and this control plane reads it, else the format-1 asset; a
+            client tells them apart by format_version.
         migrates:
           type: boolean
           description: >-
@@ -5952,6 +5983,14 @@ components:
         changes is one that is BOTH blocked and mid-apply, which now reads
         preflight_blocked. The failing check and its fix are on the same target's
         `preflight`. A preflight of `unknown` never produces this reason.
+        AMENDMENT 14 (#353) APPENDS below_floor: the host's agent or recovery actor would be,
+        or already is, older than the floor the installed control plane declares (the oldest
+        agent and recovery-actor release it still manages). It is produced by the per-host
+        revert refusal (409 host_not_eligible) and NEVER on a targets entry - a target is
+        evaluated for an update to available[0], which is what a below-floor host is offered -
+        so it takes no position in the precedence above. Amendment 14 also reads "install mode
+        is registry" as "registry or owned", and up_to_date on an owned host as "agent AND
+        recovery actor on the release's commit".
       enum:
         - no_release
         - identity_unknown
@@ -5964,6 +6003,7 @@ components:
         - preflight_blocked
         - attempt_in_flight
         - run_active
+        - below_floor
     PlatformReleaseTarget:
       type: object
       description: >-
@@ -6001,7 +6041,14 @@ components:
         health_addr_bindable - are ALSO that agent's readiness check ids
         (agent-api.md `readiness`), so preflight and the host's readiness card say the same
         words about the same fact. Full per-value semantics: control-api.md §"Self-update
-        hardening".
+        hardening". AMENDMENT 14 (#353) APPENDS owner_conflict (both targets, owned only: a
+        Quasar-looking container without this installation's labels is on the machine; also
+        the host agent's readiness check id, never carrying blocks) and backup_space (the
+        control-plane target, owned with a Quasar-owned database only: room for the
+        pre-update dump when available[0] migrates). updater_stack_dir and updater_overlays
+        describe a Compose stack, are NOT CARRIED BY AN OWNED TARGET, and are MARKED FOR
+        RETIREMENT with RH06-15 (#367), after which no target emits them and the ids stay
+        reserved. A client meeting an unrecognized id renders it verbatim.
       enum:
         - updater_socket
         - updater_stack_dir
@@ -6009,6 +6056,8 @@ components:
         - image_resolvable
         - agent_connected
         - health_addr_bindable
+        - owner_conflict
+        - backup_space
     PlatformPreflightCheck:
       type: object
       required: [id, status, detail]
@@ -6268,7 +6317,10 @@ components:
         release_state.state, relayed unchanged. queued and waiting_sessions are
         control-plane-only and precede the wire (the command has not been sent);
         cancelled applies ONLY to an attempt a cancel caught in one of those two states -
-        CANCEL NEVER INTERRUPTS AN ATTEMPT THAT HAS BEEN SENT.
+        CANCEL NEVER INTERRUPTS AN ATTEMPT THAT HAS BEEN SENT. Amendment 14 (#353) rewords,
+        without changing any value: recreating means the target's actor is replacing a
+        component's container (on an owned machine the old one is stopped and kept until the
+        new one is verified), not a Compose command.
       enum: [queued, waiting_sessions, pending, pulling, recreating, verifying, succeeded, failed, cancelled]
     ApplyFailureReason:
       type: string
@@ -6285,8 +6337,16 @@ components:
         not verify (bad signature, untrusted key, digests not named by the signed
         manifest, a signature that could not be fetched, or verification on with no
         trusted keys - all fail closed). Signature verification is OFF BY DEFAULT (ADR
-        0003), so neither occurs unless an operator turns it on. Full per-value
-        semantics: agent-api.md §release_state.
+        0003), so neither occurs unless an operator turns it on. AMENDMENT 14 (#353) APPENDS
+        five values, produced only by an owned machine and each meaning "nothing changed":
+        recipe_unsupported (the recovery actor lacks the recipe revision an image declares,
+        ADR 0008), owner_conflict (a Quasar-looking container without this installation's
+        labels is in the way), backup_failed (control plane, migrating release, Quasar-owned
+        database: the pre-update dump could not be taken), backup_unconfirmed (control plane,
+        migrating release, external database, no external_backup_confirmed) and interrupted
+        (the actor, engine or machine restarted before the old container was taken out of
+        service; settled, never retried). Amendment 14 also confirms signature_missing and
+        signature_invalid as members. Full per-value semantics: agent-api.md §release_state.
       enum:
         - updater_absent
         - busy
@@ -6302,6 +6362,11 @@ components:
         - unsupported
         - signature_missing
         - signature_invalid
+        - recipe_unsupported
+        - owner_conflict
+        - backup_failed
+        - backup_unconfirmed
+        - interrupted
     ApplyComponentDigest:
       type: object
       description: >-
@@ -6309,7 +6374,7 @@ components:
         ReleaseManifestComponent and as agent-api.md release_apply.components.
       required: [name, image, digest]
       properties:
-        name: { type: string, description: "The component. Only \"node-agent\" is ever sent to a host; \"control-plane\" is applied by the updater beside the control plane and never over an agent connection." }
+        name: { type: string, description: "The component. Only \"node-agent\" is ever sent to a registry host; an owned host (amendment 14, #353) may also be sent \"recovery-actor\", and the ORDER of the list is the order of replacement. \"control-plane\" is applied by the updater or recovery actor beside the control plane and never over an agent connection." }
         image: { type: string, description: "Registry repository reference with NO TAG AND NO DIGEST. Consumers compose image@digest (ADR 0001)." }
         digest: { type: string, description: "sha256: followed by 64 lowercase hex." }
     ApplyPreviousDigest:
@@ -6359,7 +6424,9 @@ components:
             insert (the updater reports `restored` only for a restore that came up; a
             restore that itself failed leaves no row and both failures in the failed
             apply's output), was never driven over the wire, and its requested_digests
-            are the failed apply's previous_digests.
+            are the failed apply's previous_digests. Amendment 14 (#353): on an owned host the
+            recovery actor did the restore, and the row names ONLY the restored component
+            (the one whose replacement failed), which may be recovery-actor.
         target: { type: string, enum: [control_plane, host] }
         host_id: { type: [string, "null"], format: uuid, description: "Null exactly when target is control_plane." }
         node_name: { type: [string, "null"] }
@@ -6398,7 +6465,21 @@ components:
           description: >-
             The bounded tail (last 8192 bytes, truncated from the front at a line
             boundary) of the failing step's output. "" when there is nothing to report.
-            NEVER a credential or an environment value.
+            NEVER a credential or an environment value. Amendment 14 (#353): a failed
+            MIGRATING control-plane attempt on an owned machine is never restored
+            automatically, and its output ends with the one-line restore command naming
+            pre_update_dump and the version it returns to.
+        pre_update_dump:
+          type: [string, "null"]
+          maxLength: 255
+          description: >-
+            ADDITIVE (amendment 14, #353). The DUMP REFERENCE: the name of the pre-update dump
+            the recovery actor took before replacing the control plane with a migrating
+            release, exactly as the operator passes it to the restore command. Opaque - display
+            it, never parse it. Null on every host attempt, on a non-migrating or
+            external-database control-plane attempt, and on a registry control plane. A server
+            implementing the amendment always serializes it; optional here so a client still
+            accepts an older server (absent reads as null).
         requested_by: { type: [string, "null"], format: uuid }
         created_at: { type: string, format: date-time }
         started_at: { type: [string, "null"], format: date-time }
@@ -6470,6 +6551,15 @@ components:
         release_id: { type: string, format: uuid, description: "A platform_releases row id, as served in GET /v1/admin/platform/releases available[].id." }
         force: { type: boolean, default: false, description: "Applies to EVERY target in this run, the control plane included. Skips each host's zero-sessions wait, and - on a release whose migrates is true - makes the control-plane step STOP the instance's sessions and wait for zero rather than wait for them to end on their own (amendment 6, #153; force still means the operator is agreeing to end N live sessions). A non-migrating control-plane step has no such wait to skip: a recreate alone no longer ends a running session." }
         retry_of: { type: string, format: uuid, description: "ADDITIVE (amendment 9, #185). The succeeded_partial run this apply is finishing; recorded on the new run as retry_of and nothing else changes. 404 not_found when no such run exists." }
+        external_backup_confirmed:
+          type: boolean
+          description: >-
+            ADDITIVE (amendment 14, #353). Optional; absent means false. The operator's
+            confirmation that a current backup of an OPERATOR-SUPPLIED database exists. Read only when the release migrates and the
+            control plane's machine is owned with an external database; without it that
+            control-plane step fails backup_unconfirmed before anything is stopped, and the run
+            stops there. Ignored everywhere else (a Quasar-owned database gets a pre-update
+            dump). Recorded in the platform.apply.run audit event; not stored on the run.
     PlatformHostApplyRequest:
       type: object
       required: [release_id]
@@ -6481,7 +6571,9 @@ components:
       description: >-
         A revert takes no target: the digests are the previous_digests recorded on this
         host's last succeeded attempt, and nothing else. THERE IS NO VERSION PICKER
-        (ADR 0002).
+        (ADR 0002). Amendment 14 (#353): on an owned host it also puts the recovery actor
+        back when those digests name it, and it is refused host_not_eligible / below_floor
+        from or to an agent or recovery actor below the installed control plane's floor.
       properties:
         force: { type: boolean, default: false, description: "As for apply." }
     PlatformApplyRunEnvelope:
@@ -6590,6 +6682,62 @@ components:
         digest:
           type: string
           description: "sha256:<64 lowercase hex>. The only form that cannot be moved under a running fleet."
+    ReleaseManifestV2:
+      type: object
+      description: >-
+        AMENDMENT 14 (#353). The platform-release-manifest.v2.json asset of an RH06-era release:
+        format 1's fields with their grammar and meaning unchanged, THREE components and a
+        FLOOR. Published under its own asset name so a consumer that reads only the format-1
+        asset never sees it. Served back VERBATIM as PlatformRelease.manifest. A signed release
+        carries platform-release-manifest.v2.json.sig, ADR 0003's document format over this
+        asset's exact bytes. Full semantics: control-api.md §"RH06 — Quasar-owned
+        installation", "Release manifest format 2".
+      # Unknown keys are invalid at every level, exactly as for format 1.
+      additionalProperties: false
+      required: [format_version, version, prerelease, source_commit, built_at, schema_version, components, floor]
+      properties:
+        format_version:
+          type: integer
+          description: "2 for this shape. A consumer that meets a format_version it does not know treats the manifest as INVALID (manifest_invalid) rather than guessing."
+        version: { type: string, description: "Semver without a leading \"v\"." }
+        prerelease: { type: boolean, description: "Mirrors the tag's prerelease status." }
+        source_commit: { type: string, description: "40 lowercase hex. One commit for every component." }
+        built_at: { type: string, format: date-time }
+        schema_version: { type: integer, description: "The highest migration the release's control-plane image embeds (ADR 0002's ordering key)." }
+        components:
+          type: array
+          description: >-
+            EXACTLY THREE ENTRIES, IN THIS NORMATIVE ORDER: control-plane, node-agent,
+            recovery-actor - validated positionally, as in format 1. The seed and Postgres are
+            never components.
+          minItems: 3
+          maxItems: 3
+          items: { $ref: "#/components/schemas/ReleaseManifestV2Component" }
+        floor:
+          type: array
+          description: >-
+            EXACTLY TWO ENTRIES, IN THIS ORDER: node-agent, recovery-actor. Each names the
+            OLDEST release of that component this release's control plane still manages
+            (CONTEXT.md "Floor"); a host below it reads below_floor and is offered only an
+            update. No floor version may order above the manifest's own version.
+          minItems: 2
+          maxItems: 2
+          items: { $ref: "#/components/schemas/ReleaseManifestFloorEntry" }
+    ReleaseManifestV2Component:
+      type: object
+      additionalProperties: false
+      required: [name, image, digest]
+      properties:
+        name: { type: string, enum: [control-plane, node-agent, recovery-actor] }
+        image: { type: string, description: "A registry reference with NO TAG AND NO DIGEST, exactly as in format 1 (ADR 0001)." }
+        digest: { type: string, description: "sha256:<64 lowercase hex>." }
+    ReleaseManifestFloorEntry:
+      type: object
+      additionalProperties: false
+      required: [name, version]
+      properties:
+        name: { type: string, enum: [node-agent, recovery-actor] }
+        version: { type: string, description: "Semver without a leading \"v\" - the same grammar as ReleaseManifestV2.version. Compared by SemVer precedence." }
 
     # ─── remote access (first-run wizard v2 §S6) ───────────────────────────
     TLSCertificateInfo:

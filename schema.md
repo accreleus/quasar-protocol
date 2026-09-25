@@ -547,6 +547,19 @@
 > behaviour, no DDL** beyond the two columns above. See
 > `docs/design/plans/2026-08-08-image-management-p5-spec.md` in the quasar repo.
 
+> **Amendment 14 — RH06 Quasar-owned installation (#353; specification #352, Implementation
+> Decision 24), EXPAND step, purely additive, requires sign-off.** Three **nullable** columns on
+> `hosts` for the recovery actor's and the seed's identity (`recovery_actor_version`,
+> `recovery_actor_source_commit`, `seed_version`), the `hosts.install_mode` `CHECK` widened to
+> admit `owned`, and one **nullable** dump reference on `platform_apply_attempts`
+> (`pre_update_dump`). No new table, no default, no backfill, no existing column, type or
+> constraint narrowed. Authored as one additive migration by the implementing slice; its number is
+> assigned when it integrates, so it is not fixed here. The recovery actor's sockets, journal and
+> machine state stay outside this contract (§"Not frozen: the updater's local socket", widened by
+> this amendment). The contract step (§"RH06 — amendment 14" at the end of this document) drops
+> nothing from the schema. See `control-api.md` §"RH06 — Quasar-owned installation" and
+> `agent-api.md` amendment 14.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
@@ -745,6 +758,11 @@ single-use invite). Index: `(created_by)` for the admin list view.
 > default, expiring, optionally bound to one `node_name`. Replaces the fleet-wide static
 > `ENROLLMENT_TOKEN` as the primary join path; the static value keeps working as a fallback.
 > Same custody model as `invites`.*
+>
+> *Amendment 14 (#353), no DDL: the static value is **deprecated** and retires with the RH06
+> contract step (RH06-15, #367). A combined or control-only machine's single-use **local
+> enrollment token** is an ordinary row of this table — `max_uses = 1`, `created_by` NULL
+> (no admin minted it) — so it is hashed, single-use and redeemed exactly like a minted token.*
 
 | column | type | notes |
 |---|---|---|
@@ -959,8 +977,11 @@ capacity (CPU/mem) lives here; GPU capacity is per-row in `gpus`.
 | `readiness_block_homes` | `BOOLEAN` NOT NULL DEFAULT `false` | *(amendment 11, migration 0085, additive, derived)* as above for `blocks.scope = "homes"`: excludes the host for a launch that would mount a managed home. Not served. |
 | `source_commit` | `TEXT` NULL | *(platform-release amendment 1, migration 0074, additive)* the git commit the running **agent binary** was built from, as reported on `register` (`agent-api.md`): 7–40 lowercase hex, stored exactly as sent. **Replaced wholesale on every `register`; absent ⇒ NULL** — deliberately *not* keep-if-absent like `storage`/`codecs`/`readiness`. Those describe hardware an older agent merely fails to re-report; this describes the binary connected right now, so a downgrade to a pre-amendment agent must read as unknown rather than keep a commit nothing is running. |
 | `built_at` | `TIMESTAMPTZ` NULL | *(platform-release amendment 1, migration 0074, additive)* when that agent binary was built. Same wholesale-replace rule. |
-| `install_mode` | `TEXT` NULL | *(platform-release amendment 1, migration 0074, additive)* `CHECK (install_mode IS NULL OR install_mode IN ('registry','source'))`. How this host got its platform images (`CONTEXT.md` "Install mode"): `registry` = pulled published images, `source` = built on the host. A `source` host can be **told** about a platform release but never given one. Same wholesale-replace rule. |
-| `updater_present` | `BOOLEAN` NULL | *(platform-release amendment 1, migration 0074, additive)* whether an **updater** sits on this host's stack. **NULL is not `false`**: NULL = no amendment-aware agent has registered (nobody has said), `false` = an agent looked and found none — the first is an old agent, the second a real gap an operator must close, and the release surface reports them differently. Same wholesale-replace rule. |
+| `install_mode` | `TEXT` NULL | *(platform-release amendment 1, migration 0074, additive)* `CHECK (install_mode IS NULL OR install_mode IN ('registry','source'))`, **widened by amendment 14 (#353) to `('registry','source','owned')`** — a plain `CHECK` swap, the enum convention above. How this host got its platform images (`CONTEXT.md` "Install mode"): `registry` = pulled published images, `source` = built on the host, `owned` = created and replaced by the machine's recovery actor. A `source` host can be **told** about a platform release but never given one. Same wholesale-replace rule. |
+| `updater_present` | `BOOLEAN` NULL | *(platform-release amendment 1, migration 0074, additive)* whether an **updater** sits on this host's stack. **NULL is not `false`**: NULL = no amendment-aware agent has registered (nobody has said), `false` = an agent looked and found none — the first is an old agent, the second a real gap an operator must close, and the release surface reports them differently. Same wholesale-replace rule. *(Amendment 14:)* on an `owned` host, whether its recovery actor answered on the agent socket. |
+| `recovery_actor_version` | `TEXT` NULL | *(amendment 14, #353, additive)* the semver the **recovery actor** serving this host's machine reports, as sent on `register` (`agent-api.md`). NULL unless the host is `owned` and reported it. Same wholesale-replace rule as `source_commit`. Compared with the installed control plane's floor (`control-api.md` `below_floor`); never parsed for anything else. |
+| `recovery_actor_source_commit` | `TEXT` NULL | *(amendment 14, additive)* the git commit that recovery actor was built from: 7–40 lowercase hex, stored exactly as sent. What `up_to_date` compares for the actor half of an owned host. Same wholesale-replace rule. |
+| `seed_version` | `TEXT` NULL | *(amendment 14, additive)* the version of the **seed** the recovery actor last saw on the machine, opaque, stored as sent. Informational only: nothing is decided on it (ADR 0007). Same wholesale-replace rule. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
 ### Host status state machine (P3-01)
@@ -2164,14 +2185,15 @@ cannot disagree.
 | `target` | `TEXT` NOT NULL | `CHECK (target IN ('control_plane','host'))`. |
 | `host_id` | `UUID` NULL → `hosts(id)` **ON DELETE CASCADE** | the host, NULL for the control-plane target. CASCADE (not SET NULL) so the `target`/`host_id` CHECK below can be a real invariant rather than one a host deletion silently breaks; the precedent is `DELETE /v1/hosts/{id}`, which already cascades a forgotten host's GPUs and terminal session history. |
 | `release_id` | `UUID` NULL → `platform_releases(id)` **ON DELETE SET NULL** | the release the digests came from, when they came from one. **NULL is legitimate on a `revert`**, whose digest set is read from an earlier attempt's `previous_digests` and may correspond to no row this instance still has. SET NULL rather than RESTRICT precisely because `requested_digests` — not this column — is the authority for what an attempt did; the release row is provenance. (The opposite call from `platform_apply_runs.release_id`, and for the opposite reason.) |
-| `requested_digests` | `JSONB` NOT NULL | what was asked for: a JSON array of `{name, image, digest}` in manifest order, the exact `components` array sent on `agent-api.md` `release_apply`. **The authority for what this attempt did.** Stored rather than re-derived because a manifest can be re-fetched and a release row can be cleaned up, while this row must stay true forever. `CHECK (octet_length(requested_digests::text) <= 4096)`. |
+| `requested_digests` | `JSONB` NOT NULL | what was asked for: a JSON array of `{name, image, digest}` in manifest order, the exact `components` array sent on `agent-api.md` `release_apply`. **The authority for what this attempt did.** Stored rather than re-derived because a manifest can be re-fetched and a release row can be cleaned up, while this row must stay true forever. `CHECK (octet_length(requested_digests::text) <= 4096)`. *(Amendment 14, no DDL: on an owned machine the array may also name `recovery-actor`, and its order is the order of replacement.)* |
 | `previous_digests` | `JSONB` NOT NULL DEFAULT `'[]'` | what the target was on **before**: a JSON array of `{name, digest}` (`digest` may be `null` when the updater could not determine it), as reported in **every** `release_state`, not only failing ones. `'[]'` until first reported. This is what `POST /v1/admin/platform/hosts/{id}/revert` reads back, and what the manual restore recipe in a failure is copied from. `CHECK (octet_length(previous_digests::text) <= 4096)`. |
 | `updater_request_id` | `UUID` NULL | the request id the control plane **minted and persisted before sending** (`agent-api.md` `release_apply.request_id`; for the control-plane target, before calling its own host's updater socket). NULL only while the attempt is `queued` or `waiting_sessions`. It is what a control plane **polls on boot** to learn the outcome of the apply that replaced it — prototype finding 2: reading the result once at boot is wrong, because the new container is up before the executor is terminal. |
 | `state` | `TEXT` NOT NULL | `CHECK (state IN ('queued','waiting_sessions','pending','pulling','recreating','verifying','succeeded','failed','cancelled'))`. The six middle values are exactly `agent-api.md` `release_state.state`, relayed. `queued` and `waiting_sessions` precede the wire (the command has not been sent); `cancelled` follows a cancel that caught the attempt **before** it was sent. |
-| `reason` | `TEXT` NULL | the failure identifier, from the closed vocabulary in `agent-api.md` §`release_state` plus the control-plane-only `unsupported` (no ack within the timeout — the agent predates the amendment). `CHECK ((state = 'failed') = (reason IS NOT NULL))`: a failure always says why, and nothing else ever carries a reason. |
+| `reason` | `TEXT` NULL | the failure identifier, from the closed vocabulary in `agent-api.md` §`release_state` plus the control-plane-only `unsupported` (no ack within the timeout — the agent predates the amendment). *(Amendment 14, no DDL: the column carries no value `CHECK`, so the five appended identifiers need none.)* `CHECK ((state = 'failed') = (reason IS NOT NULL))`: a failure always says why, and nothing else ever carries a reason. |
 | `sessions_remaining` | `INTEGER` NULL | `CHECK (sessions_remaining IS NULL OR sessions_remaining >= 0)`. The **N in "waiting on N sessions"**: the last observed non-terminal session count on the host while `state = 'waiting_sessions'`. Advisory and last-observed, never a gate — the drain decision is made against the live `sessions` table, not against this column. **On a control-plane attempt it is the FLEET-WIDE count**, not one host's — a control-plane recreate is instance-wide. It is only ever set on a control-plane attempt whose release **carries a migration** (amendment 6, #153): since #128 a recreate alone no longer ends a `running` session, so a non-migrating control-plane attempt never enters `waiting_sessions` and leaves this NULL throughout. A migrating one still drains, because every migration here was authored under "no session is live while I run". NULL once the attempt has been sent. |
 | `force` | `BOOLEAN` NOT NULL DEFAULT `false` | copied from the run, or from the standalone request body. History must be readable without joining the run. |
 | `output` | `TEXT` NOT NULL DEFAULT `''` | the bounded tail of the failing step's output, as relayed. `CHECK (octet_length(output) <= 8192)` — twice the 4096 ceiling used elsewhere, because a compose failure's tail is the one artifact an operator has and truncating it further would cost the diagnosis; the agent already truncates to this bound before sending, so **the CHECK fails the report, never the apply**. Never a credential or an environment value (`agent-api.md`). |
+| `pre_update_dump` | `TEXT` NULL | *(amendment 14, #353, additive)* the **dump reference**: the name of the pre-update dump the recovery actor took before replacing the control plane with a migrating release, exactly as the operator passes it to the recovery actor's `restore` command. Opaque — stored and served, never parsed; the dump itself stays in the machine's machine-state volume, never in Postgres. `CHECK (pre_update_dump IS NULL OR target = 'control_plane')` and `CHECK (pre_update_dump IS NULL OR octet_length(pre_update_dump) <= 255)`. NULL on every host attempt, on a non-migrating or external-database control-plane attempt, and on every attempt a `registry` control plane made. |
 | `requested_by` | `UUID` NULL → `users(id)` ON DELETE SET NULL | the admin who asked, copied from the run or taken from the standalone request. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 | `started_at` | `TIMESTAMPTZ` NULL | when the command was sent / the local updater was called. |
@@ -2192,6 +2214,9 @@ cannot disagree.
 
 ### Not frozen: the updater's local socket
 
+*(Amendment 14, #353, widens this section to the recovery actor's local interfaces — see the last
+paragraph. The heading is kept so existing references stay valid.)*
+
 The **updater** (`CONTEXT.md`) is reached over a **unix socket in a named volume shared by the
 containers of one host's stack**, and it reports through **one result file per request id** in that
 same volume. That local request/result interface — the socket path and mode, the request body, the
@@ -2204,6 +2229,21 @@ target, by polling `platform_apply_attempts.updater_request_id` against its own 
 after it reboots), and those *are* frozen. Do not mistake a field name in an updater result file
 for a contract, and do not move one here — if something about an apply must be durable across
 components, it belongs in `release_state` and in the tables above.
+
+**The recovery actor's local interfaces are not frozen either** *(amendment 14, #353)*. On an
+owned machine the recovery actor creates two scoped unix sockets and mounts each only into the
+container it creates for it: the **control socket** into the control plane (which may name the
+control plane, the node agent and the recovery actor) and the **agent socket** into the node agent
+(which may name only the node agent and the recovery actor). Their paths, request and status
+bodies, the recovery actor's journal, its machine-state volume layout, its compiled recipes and its
+operator commands (`restore`, `uninstall`, `reconfigure`, `status`) are **explicitly NOT frozen and
+not part of any contract in `protocol/`**: both ends ship in the same platform release, and their
+request and status shapes are pinned instead by shared JSON fixtures tested in Go and in Rust in the
+`quasar` repository. The control plane learns what they carry only through `agent-api.md`
+`register` / `release_state` and the tables above. **One local artefact is frozen, outside this
+repository's contracts:** the seed's interface — its state file, its two labels and the compiled
+actor profile — recorded as ADR 0007 in the `quasar` repository, because a seed deployed years ago
+must keep working against every later recovery actor.
 
 ## Session state machine (shared contract)
 This is the canonical lifecycle. `agent-api.md` and `control-api.md` use exactly these
@@ -3211,3 +3251,26 @@ Rolling down after RH05 use loses policy, attempts, claims or image evidence
 and is not a safe live rollback: export and reconcile first, then use a binary
 compatible with the applied schema. No down migration deletes `user_homes`,
 images or session rows.
+
+## RH06 — amendment 14 (#353): owned installs, the recovery actor and the dump reference
+
+> *Expand step, purely additive, requires sign-off (the owner's standing approval on #352,
+> conditional on an Opus APPROVED verdict). One migration, authored by the RH06 slice that first
+> writes these columns; its number is assigned at integration.*
+
+| table | change | notes |
+|---|---|---|
+| `hosts` | `install_mode` `CHECK` widened to `('registry','source','owned')` | a plain `CHECK` swap; existing rows are untouched |
+| `hosts` | `ADD recovery_actor_version TEXT NULL` | wholesale-replaced on every `register`, like amendment 1's identity columns |
+| `hosts` | `ADD recovery_actor_source_commit TEXT NULL` | as above |
+| `hosts` | `ADD seed_version TEXT NULL` | as above |
+| `platform_apply_attempts` | `ADD pre_update_dump TEXT NULL` with `CHECK (pre_update_dump IS NULL OR target = 'control_plane')` and `CHECK (pre_update_dump IS NULL OR octet_length(pre_update_dump) <= 255)` | the dump reference a failed migrating control-plane attempt's `restore` command names |
+
+- **No DDL for the rest of the amendment.** The appended failure reasons ride the existing
+  `platform_apply_attempts.reason` column, which has no value `CHECK`; `requested_digests` /
+  `previous_digests` may name `recovery-actor` inside their existing JSON shape; a local enrollment
+  token is an ordinary `host_enrollments` row; the external-backup confirmation is carried on the
+  request and in the audit event, not stored on `platform_apply_runs`; host removal writes no row.
+- **Contract step (scheduled with RH06-15, #367; NOT IN FORCE):** nothing in this schema is
+  dropped. `hosts.updater_present` keeps its name and, after the step, means "the recovery actor
+  answered"; `install_mode` keeps `registry` as a value an agent may still report.
