@@ -1869,21 +1869,14 @@ break a feature; `DELETE` is how you clear one.
 > matching — a minted token (hash lookup) is tried first, then the static `ENROLLMENT_TOKEN`
 > (constant-time compare), so an existing deployment upgrades untouched.
 
-> **Amendment 14 (#353):** the static `ENROLLMENT_TOKEN` is **deprecated** and is removed by the
-> RH06 contract step (not in force until RH06-15, #367); an owned machine never uses it, and a
-> combined or control-only machine's own agent enrolls with a single-use local token redeemed
-> through the minted-token path (§"RH06 — Quasar-owned installation", "Enrollment"). The boot
-> `WARN` below inverts under amendment 14: it is logged when a static value **is** set, and not
-> when it is unset.
+> **RH06 contract step (amendment 14, #353; in force since RH06-15, #367):** the static
+> `ENROLLMENT_TOKEN` is **retired**. The control plane no longer reads it, and redemption matches
+> a minted token or a machine's single-use local enrollment token only (§"RH06 — Quasar-owned
+> installation", "Enrollment"); anything else fails `auth_failed`.
 
-**`ENROLLMENT_TOKEN` is optional.** A deployment that enrolls only with minted tokens sets no
-static value; the control plane logs one `WARN` at boot and matches nothing against it (empty
-never matches, so this closes the static path rather than opening it). Requiring it would
-force every operator to keep the fleet-wide credential minted tokens exist to replace.
-
-Why: the static `ENROLLMENT_TOKEN` is shared by the whole fleet, never expires, cannot be
-rotated without a control-plane restart, and — because enrollment upserts on `node_name` —
-carries the authority to **become** an already-enrolled host, not merely to add one (#96).
+Why: a static token would be shared by the whole fleet, never expire, and — because enrollment
+upserts on `node_name` — carry the authority to **become** an already-enrolled host, not merely
+to add one (#96).
 A minted token is per-host, hashed at rest, single-use by default, expiring, and optionally
 bound to one `node_name`. Same custody model as invites (LP-SEC-01).
 
@@ -7134,7 +7127,7 @@ The vocabulary is **closed** (`openapi.yaml` `EligibilityReason`):
 | `identity_unknown` | the target cannot be compared to a release at all: for a **host**, `identity_known` is false (any of the four fields null — an agent predating this amendment, or one that could not determine its own install); for the **control plane**, its `source_commit` is null (an unstamped build). |
 | `up_to_date` | the target's `source_commit` already equals the newest listed release's. Not an error, and the UI says so; it is the common case on a current fleet. |
 | `install_mode_source` | **host only** — `install_mode` is `"source"`. A source-built host is *told* about the release and shown the manual commands, and is never offered an apply: the images it runs were never pulled, so there is nothing to re-pin (`CONTEXT.md` "Install mode"). |
-| `updater_absent` | **host only** — a registry install whose `updater_present` is false. Nothing on that host can recreate its containers, so an apply would have no actor. Every install predating the updater is in this state until an operator adds one once. |
+| `updater_absent` | **host only** — a host whose `updater_present` is false: no recovery actor answers on it (a host not installed with the seed has none). Nothing on that host can replace its containers, so an apply would have no actor. |
 | `host_offline` | **host only** — the host's agent is not connected (`status` is `offline`). There is nobody to tell. A `draining` host is **not** in this state: a cordon is exactly the condition an apply wants. |
 | `release_above_control_plane` | **host only** — the newest listed release's `schema_version` is strictly **above** the installed control plane's. An agent may never be moved past the control plane (ADR 0002), so this is a ceiling, not a queueing position: it stands until the control plane itself moves. |
 | `control_plane_not_first` | **host only** — the release is *not* above the control plane's schema version, but the control plane is not running it yet (equal `schema_version`, different `source_commit` — the ordinary shape of consecutive edge builds, and of a stable release carrying no migration). Ordering, not a ceiling: apply the control plane and this clears (ADR 0002). |
@@ -7310,7 +7303,7 @@ produce `platform_apply_attempts` rows and both appear in the history; a run is 
 a different kind of work.
 
 **The control-plane target does not use `agent-api.md`.** The control plane is applied by the
-**updater** sitting beside it on its own host, over that host's local socket — not over an agent
+**recovery actor** on its own machine, over that machine's control socket — not over an agent
 WebSocket, and never by asking a node agent (`agent-api.md` §`release_apply` states the same rule
 from the other side). Consequences a client must know:
 
@@ -8007,9 +8000,7 @@ on a decision, a blocked one is waiting on an operator with a shell. Every targe
     "checked_at": "2026-09-11T09:12:44Z",
     "checks": [
       { "id": "agent_connected",      "status": "pass", "detail": "the agent is connected" },
-      { "id": "updater_socket",       "status": "pass", "detail": "updater 0.2.5 answered on /run/quasar-updater/updater.sock" },
-      { "id": "updater_stack_dir",    "status": "pass", "detail": "/srv/quasar/deploy, 2 compose files" },
-      { "id": "updater_overlays",     "status": "pass", "detail": "quasar-node-agent was started with the same compose files as the updater" },
+      { "id": "updater_socket",       "status": "pass", "detail": "Recovery actor 0.5.0 answered on /run/quasar-recovery/agent.sock" },
       { "id": "health_addr_bindable", "status": "fail", "detail": "127.0.0.1:9091 is answered by node gpu-host-01 pid 4121, not this agent (pid 3980) — free the port (ss -ltnp | grep 9091) or set QUASAR_HEALTH_ADDR to a free address and recreate the agent" },
       { "id": "image_resolvable",     "status": "pass", "detail": "both component manifests resolve at ghcr.io" }
     ] } }
@@ -8035,17 +8026,16 @@ read of its stored readiness rather than a second probe.
 
 | id | target | passes when | a `fail` detail names |
 |---|---|---|---|
-| `updater_socket` | both | the updater's socket exists AND `GET /v1/self` over it answered | the three-way #184 distinction: **no mount directory** → "the socket volume is not mounted in this container; recreate the control plane" (`docker compose up -d --force-recreate --no-deps quasar-control-plane`); **directory but no socket** → "the updater is not running" (`docker compose up -d quasar-updater`); **socket but no answer** → the error. For a host the same three, about the agent's container. |
-| `updater_stack_dir` | both | the updater reports a discovered working directory and compose-file list (it fails closed at boot otherwise, so a serving updater always passes; the check exists so an updater that is *not* serving is explained by `updater_socket` and not by silence) | `QUASAR_STACK_DIR` and the host path the updater needs |
-| `updater_overlays` | both | the compose files the target's own container was started with (its `com.docker.compose.project.config_files` label, read by the updater) are the same set the updater was started with | both lists and the service: an operator who brought the agent up with an overlay the updater does not know would otherwise learn it as a recreate that dropped the overlay |
+| `updater_socket` | both | the target's recovery actor answers on its socket (the control socket for the control plane, the agent socket for a host) | the socket and the error, and where to look (the recovery actor's container and its log); no Compose command. A target with no recovery actor (not installed with the seed) fails it, naming that. |
 | `image_resolvable` | both | every component manifest of `available[0]` resolves at the registry **as seen from the control plane** (a `GET` of the manifest by digest, no pull; an edge release resolves its commit tag) | the component and the registry's answer. `unknown` with no release listed. This is an instance-wide fact copied onto every target — it says the digests exist where every host will pull from, not that a given host can reach the registry; a host that cannot still fails `pull_failed` at its step. |
 | `agent_connected` | host | the host's agent has a live socket to this control plane right now (#169's `AgentConnected`) | nothing beyond the fact — `host_offline` already makes the target ineligible; the check is here so the card lists every fact in one place |
 | `health_addr_bindable` | host | the address in the agent's `QUASAR_HEALTH_ADDR` is answered by **this** agent (`/health` carries `node` and `pid`, #152) | the address and who answered instead, with `ss -ltnp` and the variable to change. `skip`/`unknown` when the endpoint is disabled. A squatter can only take the port while the agent is down, so on a running post-#152 agent this passes by construction; its value is on an older, tolerant agent (which reports the squatter) and on the *next* start, which is exactly when an apply recreates the agent. |
 
 *(Amendment 14, #353: the vocabulary appends `owner_conflict` and `backup_space`, carried only by
-an owned target; `updater_stack_dir` and `updater_overlays` are not carried by an owned target and
-retire with the RH06 contract step, RH06-15 (#367); on an owned target `updater_socket` checks the
-recovery actor's socket — §"RH06 — Quasar-owned installation", "Preflight".)*
+an owned target; `updater_stack_dir` and `updater_overlays` retired with the RH06 contract step,
+RH06-15 (#367): no target evaluates or emits them, and both stay reserved — neither id is ever
+reused; `updater_socket` checks the recovery actor's socket — §"RH06 — Quasar-owned
+installation", "Preflight".)*
 
 **`preflight_blocked` — where it sits.** Inserted into `EligibilityReason` after
 `control_plane_not_first` and before `attempt_in_flight`:
@@ -8103,7 +8093,7 @@ when no such run exists. A client links the two in both directions from the run 
 
 **`PlatformApplyAttempt.kind` gains `auto_revert`**, appended. When a node-agent apply's new
 container **fails its health wait** — `never_started`, `recreate_failed` or `unhealthy` — the
-host's **updater restores the previous digests itself** (`.env.prev` back, `up` again), records
+host's **recovery actor restores the previous container itself**, records
 the failed container's last log lines in `output` (which is where `health-bind-failed` lands, the
 #152 field case), and reports the failure with `restored: true` (`agent-api.md` `release_state`).
 The restored agent replays that result on its reconnect (#193), and the control plane then:
@@ -8117,9 +8107,9 @@ The restored agent replays that result on its reconnect (#193), and the control 
 3. finishes a fleet run that was on that host `failed` (the stop rule is unchanged: a second host
    failing the same way is likely the same cause).
 
-Why the updater and not the control plane: the agent that would carry a control-plane-issued
-revert is the one that is down. The updater already holds `.env.prev` and the previous digests,
-and already does exactly this for a never-started control plane. The old rule — "a node-agent
+Why the recovery actor and not the control plane: the agent that would carry a control-plane-issued
+revert is the one that is down. The recovery actor already keeps the old container and the
+previous digests, and already does exactly this for a never-started control plane. The old rule — "a node-agent
 apply is never auto-restored, because a silent revert hides the failure" — is superseded because
 the revert is not silent: `restored`, the log tail, and the `auto_revert` row are the record
 (ADR 0004). **The control-plane rule is unchanged**: a started control plane may have migrated,
@@ -9112,8 +9102,7 @@ endpoint and keep their existing image read/launch behavior.
 > format-1 release behave exactly as before, and two admin routes are added
 > (`POST /v1/admin/platform/hosts/{id}/remove`, and the owner-added
 > `POST /v1/admin/platform/developer-apply`) while none is removed or renamed. The
-> **contract** step (§"RH06 contract step" below) is written now and is **not in force** until
-> RH06-15 (#367) lands. The wire twin is `agent-api.md` amendment 14; storage is `schema.md`
+> **contract** step (§"RH06 contract step" below) is **in force** since RH06-15 (#367). The wire twin is `agent-api.md` amendment 14; storage is `schema.md`
 > amendment 14. Decisions: **ADR 0007** (the seed interface), **ADR 0008** (compiled recipes; the
 > recovery actor moves first; the A1 exception), and the **ADR 0004 amendment** (automatic restore
 > of the recovery actor and of a non-migrating control plane that never passed a health check).
@@ -9369,9 +9358,8 @@ verbatim, as the vocabulary has always required.
   existing **`preflight_blocked`** eligibility reason, and everything downstream follows the
   amendment-9 rules unchanged (the fleet run skips a blocked host; a blocked control plane refuses
   `409 preflight_blocked`). No new refusal code.
-- **`updater_stack_dir` and `updater_overlays` are marked for retirement with RH06-15 (#367).**
-  They describe a Compose stack, so **an owned target does not carry them**; a `registry` target
-  still does until the contract step. `updater_socket` keeps its id; on an owned target it checks the
+- **`updater_stack_dir` and `updater_overlays` retired with RH06-15 (#367)** (the contract step):
+  they described a Compose stack, and no target carries them. `updater_socket` keeps its id; on an owned target it checks the
   recovery actor's socket (the control socket for the control plane, the agent socket for a host),
   and its `detail` names no Compose command.
 - The facts come from the recovery actor's status on the target's machine, read the way amendment 9
@@ -9434,12 +9422,10 @@ The ADR 0004 amendment, as it reaches this surface:
 
 ### Enrollment
 
-- **The static `ENROLLMENT_TOKEN` is deprecated.** It keeps working exactly as §Host enrollment
-  tokens describes until the contract step. The boot warning **inverts**: §Host enrollment tokens
-  has the control plane log one `WARN` when *no* static value is set; a control plane implementing
-  this amendment instead logs one `WARN` when a static value **is** set (naming the deprecation and
-  the contract step) and logs nothing when it is unset, because unset is now the recommended state.
-- An owned machine never uses it. A GPU host enrolls with an admin-minted token, as today; the
+- **The static `ENROLLMENT_TOKEN` is retired** by the contract step (in force since RH06-15,
+  #367): it is not read, and redemption matches minted tokens and a machine's single-use local
+  token only (§Host enrollment tokens).
+- An owned machine never used it. A GPU host enrolls with an admin-minted token, as today; the
   recovery actor passes the enrollment string to the agent it creates. A combined or control-only
   machine's own agent enrolls with a **single-use local enrollment token** the recovery actor
   generates at install and mounts into both containers; the control plane redeems it through the
@@ -9700,12 +9686,11 @@ the control plane runs on. No route is added. Both routes are admin-only.
 - **`format_version`** — a consumer that meets one it does not know, under either asset name, treats
   the manifest as invalid and does not list the release.
 
-### RH06 contract step — scheduled with RH06-15 (#367), NOT IN FORCE
+### RH06 contract step — in force (RH06-15, #367)
 
-> Written now so the whole change is reviewed and signed once (#352, owner decision 1). **Nothing in
-> this subsection is in force** until the change that retires the Go updater (RH06-15, #367) lands;
-> that change marks it in force and makes these edits in the same commit as the code. Until then
-> every sentence it retires stays true for a `registry` target.
+> Written beside the expand step so the whole change was reviewed and signed once (#352, owner
+> decision 1). **In force** since the change that retired the Go updater (RH06-15, #367), which
+> made these edits in the same change as the code.
 
 1. **`updater_stack_dir` and `updater_overlays` retire.** No target evaluates or emits them. They are
    removed from `PreflightCheckId` in `openapi.yaml` and from the amendment-9 table, and stay

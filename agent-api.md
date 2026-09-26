@@ -236,7 +236,7 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > and an older control plane reads an `owned` host as identity-unknown (the existing rule for an
 > unrecognised `install_mode`) and so never applies to it. The **contract** step that retires the
 > Compose-specific wording and the static token is written in §"RH06 contract step" at the end
-> of this document and is **not in force** until RH06-15 (#367) lands. Decisions: ADR 0007 (the
+> of this document and is **in force** since RH06-15 (#367). Decisions: ADR 0007 (the
 > seed interface), ADR 0008 (compiled recipes; the recovery actor moves first) and the ADR 0004
 > amendment (automatic restore of the recovery actor and of a non-migrating control plane that
 > never passed a health check). The recovery actor's local sockets are **not frozen** (`schema.md`
@@ -286,25 +286,20 @@ node-agent                         control-plane
 ## Auth / enrollment
 A node must prove it's allowed to join before it can register.
 - **Enrollment (first contact):** the agent presents an `enrollment_token` plus its stable
-  `node_name`. The token is **either** a per-host token minted by an admin
+  `node_name`. The token is a per-host token minted by an admin
   (`control-api.md` §Host enrollment tokens — hashed, single-use by default, expiring,
-  optionally bound to this `node_name`; the primary path since 2026-09-03) **or** the
-  fleet-wide static value from control-plane config (delivered out of band; kept as a
-  fallback so existing deployments upgrade untouched, and itself optional — a deployment may
-  run with minted tokens only). The wire shape is identical for both. The control plane
+  optionally bound to this `node_name`) or a machine's single-use local enrollment token
+  (below), and nothing else: a `register` presenting any other value fails `auth_failed`
+  like any other unknown token. The control plane
   creates the `hosts` row, mints a per-node `node_secret`, returns it in `registered`, and
   stores `node_secret_hash`. The agent persists the secret locally.
   **Enrollment onto a `node_name` whose agent is currently live is refused** (#96):
   enrollment rotates `node_secret`, so allowing it against a live host is identity takeover.
   The credential is checked FIRST — this surface is pre-auth, so a bad token gets a plain
   `auth_failed` that says nothing about whether the `node_name` exists or is live.
-  *(Amendment 14, #353:)* **the fleet-wide static value is deprecated.** It is still accepted
-  exactly as above until the contract step (§"RH06 contract step"), and a control plane
-  implementing amendment 14 logs a `WARN` at boot while one is configured (and, inverting the
-  earlier rule in `control-api.md` §Host enrollment tokens, no longer warns when none is). An `owned` machine
-  never uses it: a GPU host's recovery actor hands the admin-minted enrollment string to the
-  node agent it creates, and the agent redeems it as above; a combined or control-only machine's
-  own agent enrolls with a **single-use local enrollment token** the recovery actor generates at
+  *(Amendment 14, #353:)* On an `owned` machine a GPU host's recovery actor hands the
+  admin-minted enrollment string to the node agent it creates, and the agent redeems it as
+  above; a combined or control-only machine's own agent enrolls with a **single-use local enrollment token** the recovery actor generates at
   install and gives to both the control plane and the agent, which the control plane redeems
   through the same hashed, single-use path as a minted token. The wire shape is identical in
   every case: `auth.enrollment_token` stays a string.
@@ -1283,9 +1278,8 @@ one the agent invents, so a state message maps to exactly one
   the request and has not started; `pulling` = fetching the component digests; `recreating` = the
   actor is **replacing** a component's container — the old one is being taken out of service and the
   new one created and started (on an `owned` host the old container is stopped and **kept**, with
-  its restart policy disabled, until the new one is verified; on a `registry` host the updater
-  recreates the service); `verifying` = the new container is up and the actor is checking
-  post-state (running, and healthy or health-less) rather than trusting an exit code. For a request
+  its restart policy disabled, until the new one is verified); `verifying` = the new container is
+  up and the actor is checking post-state (running, and healthy or health-less) rather than trusting an exit code. For a request
   naming several components the state stays **monotonic over the whole request**: `pulling` until
   the first container is taken out of service, then `recreating` — including while a later
   component is pulled, replaced or verified — and `verifying` only once the last component is
@@ -1311,9 +1305,7 @@ one the agent invents, so a state message maps to exactly one
   stdout/stderr, truncated from the **front** at a line boundary (the error is at the end), `""`
   when there is nothing to report. Non-empty only for `failed` in practice. **It never contains a
   credential or an environment value**: the actor never echoes a container's environment or a
-  secret file, and where it names a setting it names it, never its value. *(On a `registry` host
-  the updater rewrites two variables in the stack's `.env` and reports their **names** only; that
-  sentence retires with the contract step.)*
+  secret file, and where it names a setting it names it, never its value.
 - **`started_at` / `updated_at` / `finished_at`** *(RFC3339 UTC)* — when the updater accepted the
   request, when this state was written, and when it became terminal (`null` until then).
 - **`restored`** *(boolean, optional, additive — amendment 9, #185/#188)* — `true` on a `failed`
@@ -1347,7 +1339,7 @@ they can be rendered by one mapping.
 | `namespace_rejected` | a component `image` is outside the registry namespace this host will pull platform images from. Reported specifically rather than as `invalid`, because it is the one rejection an operator can fix by configuration. (Ack rejection, or the updater's own allowlist.) |
 | `digest_malformed` | a `digest` is not a well-formed `sha256:` + 64 lowercase hex. (Ack rejection, or the updater's own check.) |
 | `pull_failed` | at least one component digest could not be pulled (registry unreachable, auth denied, manifest not found, or the "mismatched image rootfs and manifest layers" that a digest published without a tag behind it produces). |
-| `recreate_failed` | the new container could not be created or started. On a `registry` host the compose recreate exited non-zero, and the old container is already gone at this point — compose removes it before starting the replacement — so this state is a **stopped service**, and `previous` is the restore recipe. *(Amendment 14:)* on an `owned` host the old container is **kept**, stopped, until the new one is verified, so the recovery actor restores it without a pull (`restored`). |
+| `recreate_failed` | the new container could not be created or started; `previous` is the restore recipe. *(Amendment 14:)* on an `owned` host the old container is **kept**, stopped, until the new one is verified, so the recovery actor restores it without a pull (`restored`). |
 | `never_started` | the recreate produced a container that **never started** (`State.StartedAt` is zero). Distinguished from `unhealthy` because it is the one failure in which nothing the new image would have done can have happened — for the control-plane target that is what makes an automatic restore safe (`control-api.md`; ADR 0002 holds because no migration can have run). A node-agent apply that fails this way, or `recreate_failed` / `unhealthy`, **is restored by the updater** since amendment 9 (#185/#188) — it carries no migrations, and the failure is not hidden: the message says `restored: true` and the control plane records the restore as its own attempt. |
 | `unhealthy` | the new container started and then did not reach running-and-healthy within the updater's wait timeout. It ran; assume it did whatever it does. |
 | `updater_unreachable` | the updater's socket could not be reached, or its result file for this `request_id` stopped advancing or disappeared. "I cannot see the actor", as distinct from `updater_absent`'s "there is no actor". *(Amendment 14:)* on an `owned` host, the recovery actor's socket did not answer, or its status for this `request_id` stopped advancing; the identifier is unchanged. |
@@ -1378,25 +1370,22 @@ position, and a consumer that predates them keeps the contract's standing behavi
 identifier it does not recognise: **store it and render it verbatim**, never reject the message.
 
 **The agent relays; it does not author.** Every field above except the message framing comes from
-the **updater's result file** for this `request_id`. The agent polls that file and emits a
-`release_state` on change; it runs no compose command itself, keeps no apply state of its own, and
-performs **no session logic** at any point. That is why an agent restart mid-apply loses nothing:
-the result file is on disk beside the updater, and the reconnecting agent re-reads it. The shape
-of that file and of the local socket carrying it is **deliberately not frozen** — see `schema.md`
-§"Not frozen: the updater's local socket".
-*(Amendment 14:)* on an `owned` host the source is the **recovery actor's status** for this
-`request_id`, read over the agent socket; the recovery actor's journal is on its machine-state
-volume, so an agent restart mid-apply loses nothing there either. Neither the socket nor the
-journal is frozen.
+the **recovery actor's status** for this `request_id`, read over the agent socket. The agent
+emits a `release_state` on change; it keeps no apply state of its own and performs **no session
+logic** at any point. The recovery actor's journal is on its machine-state volume, so an agent
+restart mid-apply loses nothing: the reconnecting agent reads it again. Neither the socket nor
+the journal is frozen — see `schema.md` §"Not frozen: the updater's local socket".
+After the contract step the word **updater** in `updater_absent`, `updater_unreachable` and
+`updater_present` means the host's recovery actor; the identifiers are unchanged.
 
-**On reconnect, the agent re-emits the current state for every request id whose result file is
-still present**, immediately after `register` — the same reconciliation posture `register`'s
+**On reconnect, the agent re-emits the current state of every request id the recovery actor
+still reports for it**, immediately after `register` — the same reconciliation posture `register`'s
 `images` snapshot has. A control plane that missed frames catches up without asking.
 
 **A successful node-agent apply is usually never reported by the agent that started it, and the
 control plane must not wait for one.** The recreate kills the process that was sending these
-messages; the `succeeded` state is written to the result file by an updater whose reader has just
-been replaced. **The real success evidence is the NEW agent's `register`** carrying the requested
+messages; the `succeeded` state is recorded by the recovery actor while the agent that would
+read it has just been replaced. **The real success evidence is the NEW agent's `register`** carrying the requested
 release's `source_commit` in amendment 1's identity fields. The control plane therefore treats a
 `register` from that host, arriving after the attempt started and reporting the requested
 `source_commit`, as the attempt's success — exactly as prototype finding 2 established for the
@@ -2026,10 +2015,12 @@ reserved.
 > whole of how the control plane times it out.*
 
 Reserve/prepare semantics like `image_ensure`: the agent acks **acceptance** immediately, hands
-the request to this host's **updater** (on an `owned` host, since amendment 14, its **recovery
-actor**, over the agent socket), and then relays progress via `release_state`. The agent
-runs no compose command itself and never recreates itself directly — a container cannot recreate
-itself, which is the entire reason the updater exists (`CONTEXT.md` "Updater").
+the request to this host's **recovery actor**, over the agent socket, and then relays progress
+via `release_state`. The agent never recreates itself directly — a container cannot recreate
+itself, which is the entire reason the recovery actor exists (`CONTEXT.md` "Recovery actor"). A
+`registry` host (published images started by Compose, with no recovery actor) has nothing that
+can replace its containers: its agent reports `updater_present: false`, and the release surface
+says `updater_absent`.
 
 ```json
 {
@@ -3066,14 +3057,12 @@ writer and its restart behavior. A legacy `restart_confirm` does not approve
 RH05 idle apply for a typed-owned group. This amendment does not change console
 or Steam source policy delivery.
 
-## RH06 contract step (amendment 14, #353) — scheduled with RH06-15 (#367), NOT IN FORCE
+## RH06 contract step (amendment 14, #353) — in force (RH06-15, #367)
 
-> Written now, beside the expand step above, so the whole change is reviewed and signed once
-> (#352, owner decision 1: the standing approval covers "the retirement half delivered with the
-> Compose-updater retirement ticket"). **Nothing in this section is in force** until the change
-> that retires the Go updater (RH06-15, #367) lands; that change edits this heading to "in force"
-> and makes the edits listed here, in the same commit as the code. Until then every sentence this
-> section retires stays true for a `registry` host.
+> Written beside the expand step above, so the whole change was reviewed and signed once (#352,
+> owner decision 1: the standing approval covers "the retirement half delivered with the
+> Compose-updater retirement ticket"). **In force** since the change that retired the Go updater
+> (RH06-15, #367), which made the edits listed here in the same change as the code.
 
 1. **§Auth / enrollment — the static token is removed.** `auth.enrollment_token` redeems a minted
    token or a machine's single-use local enrollment token and nothing else. The control plane no

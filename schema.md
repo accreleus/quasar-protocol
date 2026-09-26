@@ -762,8 +762,8 @@ single-use invite). Index: `(created_by)` for the admin list view.
 > `ENROLLMENT_TOKEN` as the primary join path; the static value keeps working as a fallback.
 > Same custody model as `invites`.*
 >
-> *Amendment 14 (#353), no DDL: the static value is **deprecated** and retires with the RH06
-> contract step (RH06-15, #367). A combined or control-only machine's single-use **local
+> *Amendment 14 (#353), no DDL: the static value is **retired** by the RH06 contract step (in
+> force since RH06-15, #367): the control plane no longer reads it. A combined or control-only machine's single-use **local
 > enrollment token** is an ordinary row of this table, hashed, single-use and redeemed exactly
 > like a minted token: `max_uses = 1`; `created_by` NULL (no admin minted it); `node_name` bound
 > to the node name the recovery actor gives the machine's own agent, so the token can enroll only
@@ -3281,6 +3281,5 @@ images or session rows.
   `previous_digests` may name `recovery-actor` inside their existing JSON shape; a local enrollment
   token is an ordinary `host_enrollments` row; the external-backup confirmation is carried on the
   request and in the audit event, not stored on `platform_apply_runs`; host removal writes no row.
-- **Contract step (scheduled with RH06-15, #367; NOT IN FORCE):** nothing in this schema is
-  dropped. `hosts.updater_present` keeps its name and, after the step, means "the recovery actor
-  answered"; `install_mode` keeps `registry` as a value an agent may still report.
+- **Contract step (in force since RH06-15, #367):** nothing in this schema is
+  dropped. `hosts.updater_present` keeps its name and means "the recovery actor answered"; `install_mode` keeps `registry` as a value an agent may still report.
