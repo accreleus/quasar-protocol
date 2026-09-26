@@ -8262,14 +8262,21 @@ gone quiet is already excluded by not being `online`, and stale evidence must no
 
 A check with `enforced_by: "agent"` is excluded from placement like any other block, so a launch
 is refused cleanly instead of failing on the host — but the agent refuses those launches itself
-regardless, and no override lifts them.
+regardless, and no override lifts them. *(Clarified 2026-09-19:)* an agent-side refusal that does
+reach a session — possible only before the host's first readiness report, since after it the
+control plane excludes the host — ends the session `failed` with **`failure_code` null**: no
+defined failure code describes an agent's safety refusal, and none is added here.
 
 ### `503 host_not_ready` — retryable
 
-Returned by `POST /v1/sessions` when **the candidate query finds nothing, and the same query with
-only the readiness filter removed would have found a GPU** — readiness is then the sole reason
-the launch cannot be placed. It is diagnosed by a second query in the position of the free-VRAM
-veto's diagnostic, never by the totals probe. In every other case the existing classification
+Returned by `POST /v1/sessions` when **readiness is the sole reason the launch cannot be placed**.
+Both of these must hold *(clarified 2026-09-19 — the first condition alone, as originally worded,
+contradicted the outcome rule below)*: (1) the candidate query finds nothing while the same query
+with only the readiness filter removed would have found a GPU, i.e. the gate excluded a GPU that
+would otherwise have been picked; **and** (2) no gate-eligible GPU could serve the request on
+totals (any host pin included) — there is no ready host that is merely full or VRAM-vetoed. It is
+diagnosed by a second query in the position of the free-VRAM veto's diagnostic, never by folding
+the gate into the totals probe. In every other case the existing classification
 stands unchanged: nothing online or nothing that could ever serve the request is
 `no_host_available`; a ready host that is full, or vetoed on VRAM, is `capacity_exhausted` — also
 when some *other* host is blocked by readiness, because the caller's remedy is then still to
@@ -8328,7 +8335,11 @@ hides the check, applies to that `check_id` on that host only, and ends when the
 
 `PUT /v1/admin/hosts/{id}/readiness-overrides/{check_id}` — no body. **`200`** with the override
 object (the shape above), idempotent: repeating it returns the existing override and writes no
-second audit row. **`404`** unknown host. **`409 conflict`** when the host's current report has no
+second audit row. *(Clarified 2026-09-19:)* the `409` precondition below is evaluated on **every**
+`PUT`, including a repeat — idempotency covers a repeat that would itself succeed. A repeat after
+the check stopped being an overridable block (it went `unknown`, was renamed, or became
+agent-enforced) is `409` even though the row still exists; the row is untouched, and is removed
+only by lapse or `DELETE`. **`404`** unknown host. **`409 conflict`** when the host's current report has no
 check with that id carrying `blocks` and status `fail`, or when that check's
 `enforced_by` is `agent` — an override that would exclude nothing, or that the agent would ignore,
 is refused rather than stored. The message says which. **`400 validation_failed`** for a
