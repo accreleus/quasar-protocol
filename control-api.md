@@ -9351,7 +9351,7 @@ moves. Full meanings are `agent-api.md` §`release_state`; in one line each:
 | `interrupted` | both | the actor, the engine or the machine restarted before the old container was taken out of service; settled as nothing changed, never retried on its own |
 
 Only an owned machine produces them. `interrupted` is a `failed` attempt with this reason; the
-state vocabulary is unchanged. **`signature_missing` and `signature_invalid`** are confirmed as
+state vocabulary is unchanged. *(Clarification, #362.)* In a request naming several components, `interrupted` describes the component being replaced when the restart came: that component was not changed and later ones were never touched, while components earlier in the list that were already replaced and verified stay on their new digests (ADR 0004 amendment, "one service per failure"), and `output` names them. For the recovery actor's own component, its old container counts as taken out of service once the running actor has released the machine's lease to its successor. **`signature_missing` and `signature_invalid`** are confirmed as
 members — already in the enum since amendment 5 (#120); on an owned machine the recovery actor
 performs ADR 0003's check, unchanged. A client meeting any unrecognised identifier renders it
 verbatim, as the vocabulary has always required.
