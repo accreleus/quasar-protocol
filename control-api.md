@@ -2044,9 +2044,10 @@ all. Shape: `AccessCheck` in `openapi.yaml`.
 SubjectPublicKeyInfo). The admin console composes the second-host installer command with it:
 `curl -k --pinnedpubkey 'sha256//<spki_sha256>' https://<this origin>/enroll-host.sh`, so a
 self-signed control plane is trusted by its key, never by `-k` alone; a real-CA certificate gets
-neither flag. `/enroll-host.sh` is a static file the SPA build copies from `deploy/enroll-host.sh`
-and the SPA handler serves from the web root — not an API route, and not part of this contract
-beyond this note.
+neither flag. `/enroll-host.sh` is the web root's copy of `deploy/enroll-host.sh` (the SPA build
+copies it there), served with the seed and node-agent image digests this control plane's Add host
+command installs written into its two pinned-image lines (RH-06). Each control plane therefore
+serves its own rendering. It is not an API route, and not part of this contract beyond this note.
 
 Admin-gated by the existing `RequireAuth → RequireAdmin`. It reflects `Host` and `Origin`, so
 both are **length-capped at 256 characters** and are only ever rendered as JSON string values —
