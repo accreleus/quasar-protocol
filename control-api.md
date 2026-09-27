@@ -1150,6 +1150,7 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `GET /v1/me/highlights` | user (self only) | *(home-rail amendment, 2026-08-05)* the caller's server-ranked home rail, derived from their own session history. No `user_id` parameter and no admin variant. **Entitlement-filtered**, and that filter is load-bearing rather than cosmetic — see below. |
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
+| `POST /v1/admin/storage/home-claims/release` | **admin** | *(amendment 15, #379/#347)* release a conflicting managed-home claim whose owner host is gone and which records no location on a host that still exists. Bookkeeping only: no file is moved or deleted. `204`; `400 validation_failed`; `404 not_found`; `409 conflict` (the claim changed since it was read); `409 home_in_use`; `409 claim_not_releasable`. Audited as `storage.home_claim.release` |
 | `GET /v1/me/storage` | user (self) | *(P5-01)* the caller's own per-app storage usage |
 | `PUT /v1/me/favourites/{app_id}` | user (self) | *(UI-P1)* favourite an app; owner is the bearer identity — no endpoint takes a `user_id`. Idempotent `204`; `404` under the same visibility rule as `GET /v1/apps/{id}`. **(Phase 2: `403 forbidden` when the caller is not entitled — checked *after* the `404`, and applied to every role including admin, because `/v1/me/*` is the user surface by definition)** |
 | `DELETE /v1/me/favourites/{app_id}` | user (self) | *(UI-P1)* unfavourite; idempotent **and unconditional** `204` for a well-formed UUID — deliberately never `404` |
@@ -8856,6 +8857,32 @@ The #341 admin claim console SHOULD show the flag and direct the operator to
 the audited repair workflow in #347 when it remains after a reconnect or
 synthetic reap; any rendering follows `design_handoff_v3/` and is visually
 verified. The API field remains authoritative even if that UI work is deferred.
+
+> **Amendment 15 (#379, the first slice of #347), additive and admin-gated.**
+> `POST /v1/admin/storage/home-claims/release` is the audited repair for a claim that
+> cannot be repaired any other way because the machine that held the home is gone.
+> Body: `{"user_id":"<uuid>","app_id":"<uuid>","expected_state":"conflict",
+> "expected_conflict_reason":"claim_owner_missing","attestation":"<1–500 characters>"}`.
+> `app_id` may name a derived tile; it resolves to the canonical parent, as in the read.
+> The request is a compare-and-swap: `expected_state` and `expected_conflict_reason`
+> must equal the stored claim, otherwise `409 conflict` and nothing changes. A claim is
+> releasable only when all of these hold under the claim lock:
+> - its state is `conflict`;
+> - it has no owner host (`host_id` is NULL);
+> - no `user_homes` row for it names a host that still exists;
+> - it holds no pending home operation, and no non-terminal session exists for that
+>   user and canonical app (otherwise `409 home_in_use`).
+>
+> Any other claim is `409 claim_not_releasable`: a claim with a live location keeps
+> waiting for the rest of #347's repair workflow. On success the claim row and the
+> claim's host-less `user_homes` rows are deleted in one transaction, and the response
+> is `204`. These rows are bookkeeping for a backing store no agent can reach; no file
+> is moved or deleted anywhere. The next launch creates a claim and a home as for a
+> first launch. On a machine that comes back under the same home root, that home
+> resolves to the same path, so data left there is reattached rather than recreated.
+> The audit record carries the actor, the claim identity, the previous state and
+> reason, the number of rows removed and the attestation text. The attestation is the
+> admin's statement of what they checked; the server stores it and does not interpret it.
 
 `legacy_location_uncertain` means legacy rows are divergent, null-host or
 otherwise cannot establish one owner; `claim_owner_missing` means the claimed

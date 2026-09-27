@@ -2944,6 +2944,23 @@ paths:
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/storage/home-claims/release:
+    post:
+      tags: [admin]
+      summary: Release a conflicting managed-home claim whose owner host is gone (amendment 15). Bookkeeping only.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminHomeClaimReleaseRequest" }
+      responses:
+        "204": { description: Released. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "conflict (the claim changed), home_in_use, or claim_not_releasable.", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /v1/admin/storage/homes/{id}:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     delete:
@@ -8555,6 +8572,16 @@ components:
           type: array
           items: { type: string, format: uuid }
           description: Distinct sorted host IDs from known bookkeeping rows, including tombstones; not physical inventory evidence.
+    AdminHomeClaimReleaseRequest:
+      type: object
+      additionalProperties: false
+      required: [user_id, app_id, expected_state, expected_conflict_reason, attestation]
+      properties:
+        user_id: { type: string, format: uuid }
+        app_id: { type: string, format: uuid, description: "A derived tile resolves to its canonical parent app." }
+        expected_state: { type: string, enum: [reserved, materialized, conflict] }
+        expected_conflict_reason: { type: string, enum: [legacy_location_uncertain, claim_owner_missing, location_mismatch, gc_pending] }
+        attestation: { type: string, minLength: 1, maxLength: 500, description: "What the admin checked. Stored in the audit record, never interpreted." }
     AdminHomeClaimsResponse:
       type: object
       additionalProperties: false
