@@ -7194,7 +7194,10 @@ duplicate its auth and audit wiring, and make a UI issue two calls to render one
 ```
 
 - **`release_channel`** — `stable` | `beta` | `edge`, **default `stable`** (`beta` added by
-  amendment 3, §Platform-release beta channel). Anything else is `400
+  amendment 3, §Platform-release beta channel). *(Amendment 16: an owned install — a control plane
+  running under a recovery actor — starts on `edge` instead, because every release of owned
+  installs is an edge build until a stable one ships. Seeded once, at the first boot, and never
+  rewritten; `schema.md` `instance_settings.release_channel`.)* Anything else is `400
   validation_failed`. Takes effect immediately, with no redeploy: the next
   `GET /v1/admin/platform/releases` selects a different set of rows.
 - **`release_edge_branch`** — **default `develop`**. Validation: non-empty, at most **255**
