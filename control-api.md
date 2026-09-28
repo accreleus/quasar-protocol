@@ -3891,6 +3891,24 @@ bearer is `403`, before any host lookup, per §Authorization) and both return th
 > replaced wholesale on every `register` like the four above, and not part of "identity unknown".
 > See §"RH06 — Quasar-owned installation", "Owned hosts on the host body and the release view".
 
+> **Amendment 17 (RH07 #393; specification #390), additive.** The host body gains three fields
+> naming the host's **container engine** and **engine mode** (`CONTEXT.md` "Engines and
+> privilege"), sourced from the agent's `register` (`agent-api.md` §`register`, "Engine facts") and
+> stored on `hosts` (`schema.md`):
+> - **`engine`** — `"docker"`, `"podman"`, or another lowercase token a newer agent reports; a
+>   client shows an unrecognised value verbatim.
+> - **`engine_version`** — the engine's own product version, opaque, never parsed or ordered.
+> - **`engine_mode`** — `"rootful"` or `"rootless"`; there is no third value.
+>
+> A server implementing the amendment **always serializes** all three on `GET /v1/hosts`,
+> `GET /v1/hosts/{id}` and the host list, **null** until an amendment-aware agent reports them. They
+> are optional in `openapi.yaml` so a client written against it still accepts an older server, and a
+> client reads an absent field as null ("engine unknown"). They follow amendment 1's
+> **wholesale-replace** rule (absent ⇒ null on every `register`). They are **informational**: not
+> part of `identity_known`, and no admission, scheduling, readiness-gate, platform-release or
+> authorization decision reads them. A capability an engine mode lacks is reported by the host's
+> readiness checks (`readiness`), never inferred by a client from these fields.
+
 ### `POST /v1/hosts/{id}/drain` — cordon a host
 RH05 owner-scoped semantics supersede the single-status rules below; see
 "Active admission reasons on the existing Host response".

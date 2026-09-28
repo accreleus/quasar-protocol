@@ -5393,6 +5393,23 @@ components:
         seed_version:
           type: [string, "null"]
           description: "Opaque version of the seed the recovery actor last saw on the machine. Informational; nothing is decided on it (ADR 0007)."
+        # amendment 17 (RH07 #393), additive: the host's container engine and engine mode, as
+        # reported on `register`. A server implementing the amendment ALWAYS SERIALIZES all three
+        # (null until reported); they are OPTIONAL here so a client still accepts an older server,
+        # and a client reads an absent field as null (engine unknown). Replaced wholesale on every
+        # register. Informational: NOT part of identity_known, and nothing is decided on them.
+        engine:
+          type: [string, "null"]
+          pattern: "^[a-z][a-z0-9-]{0,31}$"
+          description: "The container engine the host's agent drives: docker, podman, or another lowercase token a newer agent reports (a client shows an unrecognized value verbatim)."
+        engine_version:
+          type: [string, "null"]
+          pattern: "^[!-~]{1,64}$"
+          description: "The engine's own product version, opaque; never parsed or ordered."
+        engine_mode:
+          type: [string, "null"]
+          enum: [rootful, rootless, null]
+          description: "Whether that engine runs as root on its host (rootful) or as an ordinary user (rootless). A capability a mode lacks is reported by readiness checks, never inferred from this field."
         capacity:
           # UI v3 amendment (2026-08-28, additive): the per-host roll-up of what
           # GET /v1/hosts/{id}/gpus already serves per GPU. Exists to remove the 1+N

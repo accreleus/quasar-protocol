@@ -242,6 +242,22 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > never passed a health check). The recovery actor's local sockets are **not frozen** (`schema.md`
 > §"Not frozen: the updater's local socket", which amendment 14 widens to the recovery actor).
 
+> **Amendment 17 — RH07 engine facts (#393; specification #390), additive, requires sign-off
+> (the owner's standing pre-approval of RH07 contract amendments, 2026-09-28, conditional on an
+> independent Opus review).** Quasar runs on Docker and on Podman, each **rootful** or
+> **rootless** (`CONTEXT.md` "Engines and privilege"). This wire gains, all optional and all
+> additive: **(1)** three flat `register` fields, `engine`, `engine_version` and `engine_mode`,
+> naming the **container engine** the agent drives and its **engine mode** (§`register`,
+> "Engine facts"); **(2)** a clarification that readiness `skip` also covers an **optional
+> diagnostic the host was not prepared to grant**, with `summary` naming the host setting that
+> would grant it (§`readiness`); and **(3)** an informative list of the readiness check ids the
+> agent uses for RH07 (§`readiness`, "RH07 checks"), which stay agent-owned. No existing message,
+> field, value, ack, timeout, readiness status or `blocks` scope changes. An agent that predates
+> the amendment registers byte-identically and reads as "engine unknown"; an older control plane
+> ignores the three fields. **They gate nothing**: no admission, scheduling, placement or
+> platform-release decision reads them. See §`register`, §`readiness`, `control-api.md` §Hosts and
+> `schema.md` `hosts.engine` / `hosts.engine_version` / `hosts.engine_mode`.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -471,6 +487,39 @@ report three more optional flat fields describing the rest of its machine:
   terminal `release_state`, then closes its connection and re-dials, so the next `register` carries
   the new actor identity. A reconnect is not an enrollment and ends no session (§Reconnect &
   message correlation). Without it the host would go on reporting the actor it had before.
+
+**Engine facts (amendment 17, RH07 #393).** Any host, whatever its `install_mode`, may report
+three more optional flat fields describing the container engine its agent drives:
+```json
+{
+  "engine": "podman",
+  "engine_version": "5.8.4",
+  "engine_mode": "rootless"
+}
+```
+- **`engine`** — which **container engine** answers on the Engine API socket the agent uses. Known
+  values: `"docker"` (Docker Engine) and `"podman"`. It is an **open** token: any value matching
+  `^[a-z][a-z0-9-]{0,31}$` is stored exactly as sent, so a later engine needs no amendment; anything
+  else is treated as **absent**. A consumer meeting an unrecognised value shows it verbatim and
+  decides nothing on it.
+- **`engine_version`** — the engine's own product version as the engine reports it (Docker's
+  `Version`, Podman's), **opaque**: 1–64 printable ASCII characters (`0x21`–`0x7E`), stored exactly
+  as sent, never parsed or ordered; anything else is treated as **absent**. It is not the Engine API
+  version the agent negotiated.
+- **`engine_mode`** — `"rootful"` (the engine runs as root on its host) or `"rootless"` (it runs as
+  an ordinary user, inside a user namespace). It describes the **engine**, as the engine itself
+  reports it, not the uid of the agent's own process. Any other value is treated as **absent**; there
+  is no third value.
+- **Wholesale on every `register`, exactly like amendment 1's identity fields**: each is written from
+  this message and an absent (or invalid) field is stored NULL. An agent that moves to another engine
+  or mode, or is downgraded to a pre-amendment build, must not keep reading as the engine it had.
+- **Discovery is not a capability claim.** These fields say which engine and mode the agent found. They
+  do not say that GPU injection, input, homes or any other capability works on it; each capability is
+  reported by its own readiness check (§`readiness`, "RH07 checks").
+- **They gate nothing.** They are **not** part of `identity_known`, and no admission, scheduling,
+  placement, readiness-gate or platform-release decision may read them. They exist so an operator can
+  see which engine profile a host runs.
+- How the agent determines them is agent-side detail; this wire fixes only the answer it reports.
 
 ### `capacity` — full capacity report
 Sent immediately after `registered`, and again whenever hardware/topology changes. Replaces
@@ -702,6 +751,17 @@ already sent beyond the original `pass | fail | skip`)*:
 | `unknown` | *(amendment 11)* **indeterminate**: a host probe could not be concluded — a deadline passed, a reply was lost, the runtime went away, a launch pre-empted it. `summary` carries the reason. It is neither a failure nor `skip` |
 | `unsupported` | *(amendment 12 addendum, #311)* **observed: this hardware does not provide the capability** — not a fault, nothing to fix. Today only a codec probe reports it, for a GPU whose encode pipeline cannot open that codec's encoder at all. It is a **definitive** result (retained like `pass` and `fail`), it never blocks, it carries no `blocks` (so it is never overridable), and a consumer MUST NOT present it as a fault (a needs-attention count, a failure marker, a remediation prompt). It differs from `skip` (the check does not apply to this host) and from `fail` (the capability should work and does not) |
 
+*(Amendment 17, RH07 #393 — a clarification of `skip`, not a new status.)* "Not applicable to this
+host" includes an **optional diagnostic the host was not prepared to grant**: a check that needs
+access Quasar holds only when the operator chose to grant it (kernel-log access for GPU fault
+messages is the first), on a host where it was not granted. Such a check reports `skip`, and its
+`summary` names the host setting that would grant it and says the diagnostic is optional (for
+example: GPU fault messages are not collected because this host keeps the kernel log restricted;
+host preparation can allow it). `remediation` stays empty, because a skip asks nothing of the
+operator. It carries no `blocks`, and a consumer presents it as it presents any `skip` — never as a
+fault, a needs-attention count or a remediation prompt. `skip` still never means "we could not
+tell": a diagnostic the host did grant, whose read failed, is `fail` or `unknown` as before.
+
 **Optional per-check fields** *(amendment 11, all additive; an agent that predates them omits
 them and nothing changes for it)*:
 
@@ -745,6 +805,26 @@ from that GPU's set and blocks nothing. *(amendment 12 addendum, #311)* When the
 the codec's encoder at all, the check's `status` is `unsupported` (a hardware fact, not a fault);
 any other definitive failure of a codec probe is `fail`. No `blocks` scope is added for it; the `blocks` vocabulary above is
 unchanged. This sentence exists so a `codec` scope is not added later without a decision.
+
+**RH07 checks (amendment 17, informative).** The check set stays agent-owned: the ids below are
+recorded so RH07's tickets and consoles agree on vocabulary, **not** so a consumer can key on them,
+and renaming one later needs no amendment. Each uses only the existing statuses, fields and
+`blocks` scopes above.
+
+| id | new or existing | what it reports |
+|---|---|---|
+| `runtime_endpoint` | existing | the Engine API socket the agent found. Its `summary` and `remediation` name the detected engine and socket rather than Docker's alone, and never tell the operator to run Quasar as root. An unreachable or ambiguous socket is `fail` (with the agent-enforced `host` block it already carries), never a fall-back to another engine. **Ambiguous** means only this: `DOCKER_HOST` and `CONTAINER_HOST` are both set and name different endpoints. A single configured or default socket is never ambiguous, even when other engines are installed on the host. |
+| `runtime_engine` | new | the engine, its version and engine mode the agent identified (the `register` engine facts in words). `pass` when identified; `warn` when the combination is an experimental or unsupported **engine profile**, naming it. Never `blocks`. |
+| `runtime_cdi` | existing | how GPUs reach containers: CDI, or `--gpus` on a rootful Docker engine that reports no CDI. On an NVIDIA host whose engine can inject the GPU by neither, `fail`, naming the missing host preparation. Since the engine's own answer is evidence, on a host where every usable GPU is NVIDIA the one `runtime_cdi` check may carry `blocks` (`host`). |
+| `runtime_cdi_gpu<N>` | new | on a **mixed** host (NVIDIA beside another vendor), one check per NVIDIA GPU instead of a blocking `runtime_cdi`: the same meaning for that GPU, and it may carry `blocks` with scope `gpu` and that GPU's `gpu_index`. The other GPUs stay schedulable. `<N>` is the GPU's `capacity.gpus[].index`, as for codec probes. |
+| `uinput` | existing | the agent can open `/dev/uinput` for writing. On a rootless engine the fix is host preparation's device rule, never running as root. |
+| `input_device_access` | new | the host rule that gives the Quasar user the input devices Quasar creates, and only those, is in effect, so they can be passed into sessions without `mknod`. `fail` names host preparation. It may carry `blocks` (`host`), so a session with dead input is refused rather than started, **only when it rests on evidence**: an input device the agent itself created, observed with the Quasar user's access (or the existing input host probe). A check that only reads rule files is a proxy and carries no `blocks`. |
+| `homes_root_writable` | existing | on a rootless engine, writable by the Quasar user, with session files mapped to it. The fix never re-owns files recursively. |
+| `engine_restart_on_boot` | new | the engine will start Quasar's containers again at boot. On Podman its boot restart service is enabled (rootful: the system `podman-restart.service`; rootless: the Quasar user's, plus lingering). On rootless Docker the Quasar user's Docker service is enabled and lingering is on. `fail` names the host preparation. `skip` only on rootful Docker, whose system daemon applies restart policies itself. |
+| `engine_healthchecks` | new | on Podman, the engine can run container health checks (rootless: a systemd user session for the Quasar user; rootful: systemd as init). `fail` names the fix. `skip` on Docker. |
+| `media_reachability` | existing id, **new method** | evidence from **real media-path traffic** replaces the reading of host firewall rules, in every engine mode, and needs no new message. The traffic must **originate off the host** and arrive at one of the host's own ICE candidates: a remote WebRTC peer's connectivity checks, observed during a real session over the existing signaling relay. Traffic the host sends to itself (loopback, its own address, a container on the same host) never crosses the host firewall and proves nothing. `source` is `runtime`. `pass` means a remote peer reached this host; behind a stateful firewall its checks may have been let in as replies to the host's own, so the `summary` must not claim the media port range is open. `fail` only when the remote peer's candidates were received over signaling, ICE ran to failure, and no connectivity check from that peer arrived at any host candidate; it carries the firewall fix for the media port range. A session that ended before ICE finished, or one that connected through any candidate, is inconclusive for `fail`. Before any such session, or when a result is inconclusive, the last definitive result or `unknown`, per the amendment 11 rule above — **never `warn`**. Never `blocks`, as before. |
+| `xid_visibility` | existing | an **optional diagnostic**: `skip` under the clarification above when the host keeps the kernel log restricted and the agent was not given access to it. |
+| `console_display`, `console_audio`, `console_ddc` | new | console mode's local display, local audio (the host's PipeWire when one runs, otherwise ALSA) and monitor control, reported always; `skip` while console mode is off for the host. A display another process holds is `fail`, naming it. Never `blocks` a streamed session. |
 
 ### `heartbeat` — liveness + live utilization
 ```json

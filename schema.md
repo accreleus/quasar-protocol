@@ -563,6 +563,13 @@
 > nothing from the schema. See `control-api.md` §"RH06 — Quasar-owned installation" and
 > `agent-api.md` amendment 14.
 
+> **Amendment 17 — RH07 engine facts (#393; specification #390), purely additive, requires
+> sign-off.** Three **nullable** columns on `hosts` naming the host's container engine, its version
+> and its engine mode (`engine`, `engine_version`, `engine_mode`), wholesale-replaced on every
+> `register` like amendment 1's identity columns and informational only. No new table, default or
+> backfill; nothing existing narrowed. See §"RH07 — amendment 17" at the end of this document,
+> `agent-api.md` amendment 17 and `control-api.md` §Hosts.
+
 The persistence model for the control plane. This **replaces Wolf's TOML-based state**:
 all durable control-plane state lives in Postgres (architecture invariant #5 — *State
 is external*). The node agent holds no durable state; everything authoritative is here.
@@ -991,6 +998,9 @@ capacity (CPU/mem) lives here; GPU capacity is per-row in `gpus`.
 | `recovery_actor_version` | `TEXT` NULL | *(amendment 14, #353, additive)* the semver the **recovery actor** serving this host's machine reports, as sent on `register` (`agent-api.md`). NULL unless the host is `owned` and reported it. Same wholesale-replace rule as `source_commit`. Compared with the installed control plane's floor (`control-api.md` `below_floor`); never parsed for anything else. **Deliberately unlike `agent_version`** (stored as sent): a reported value that is not `MAJOR.MINOR.PATCH[-prerelease]` is stored NULL, because this column exists only to be ordered. |
 | `recovery_actor_source_commit` | `TEXT` NULL | *(amendment 14, additive)* the git commit that recovery actor was built from: 7–40 lowercase hex, stored exactly as sent. What `up_to_date` compares for the actor half of an owned host. Same wholesale-replace rule. |
 | `seed_version` | `TEXT` NULL | *(amendment 14, additive)* the version of the **seed** the recovery actor last saw on the machine, opaque, stored as sent. Informational only: nothing is decided on it (ADR 0007). Same wholesale-replace rule. |
+| `engine` | `TEXT` NULL | *(amendment 17, RH07 #393, additive)* the **container engine** the host's agent drives, as reported on `register` (`agent-api.md` "Engine facts"): `docker`, `podman`, or another token matching `^[a-z][a-z0-9-]{0,31}$`, stored exactly as sent; the control plane stores NULL for anything else. `CHECK (engine IS NULL OR engine ~ '^[a-z][a-z0-9-]{0,31}$')`. Same wholesale-replace rule as `source_commit`. Informational only: nothing is decided on it. |
+| `engine_version` | `TEXT` NULL | *(amendment 17, additive)* the engine's own product version, opaque, 1–64 printable ASCII characters, stored exactly as sent and never parsed; NULL for anything else. `CHECK (engine_version IS NULL OR engine_version ~ '^[!-~]{1,64}$')`. Same wholesale-replace rule. Informational only. |
+| `engine_mode` | `TEXT` NULL | *(amendment 17, additive)* `CHECK (engine_mode IS NULL OR engine_mode IN ('rootful','rootless'))`. Whether that engine runs as root on its host. Any other reported value is stored NULL. Same wholesale-replace rule. Informational only: no admission, scheduling or release decision reads it. Not the storage code's "rootless" (a host with no storage root). |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
 ### Host status state machine (P3-01)
@@ -3283,3 +3293,21 @@ images or session rows.
   request and in the audit event, not stored on `platform_apply_runs`; host removal writes no row.
 - **Contract step (in force since RH06-15, #367):** nothing in this schema is
   dropped. `hosts.updater_present` keeps its name and means "the recovery actor answered"; `install_mode` keeps `registry` as a value an agent may still report.
+
+## RH07 — amendment 17 (#393): engine facts on `hosts`
+
+> *Purely additive, requires sign-off (the owner's standing pre-approval of RH07 contract
+> amendments, 2026-09-28, conditional on an independent Opus review). One migration, authored by the
+> RH07 slice that first writes these columns (provisionally 0098); its number is assigned when it
+> integrates.*
+
+| table | change | notes |
+|---|---|---|
+| `hosts` | `ADD engine TEXT NULL` with `CHECK (engine IS NULL OR engine ~ '^[a-z][a-z0-9-]{0,31}$')` | wholesale-replaced on every `register`, like amendment 1's identity columns |
+| `hosts` | `ADD engine_version TEXT NULL` with `CHECK (engine_version IS NULL OR engine_version ~ '^[!-~]{1,64}$')` | as above |
+| `hosts` | `ADD engine_mode TEXT NULL` with `CHECK (engine_mode IS NULL OR engine_mode IN ('rootful','rootless'))` | as above |
+
+- No default, no backfill, no index; no existing table, column, type or constraint changes. The
+  down migration drops only these three columns.
+- The readiness clarification and the RH07 check ids ride the existing `hosts.readiness` column,
+  which stores the agent's report verbatim: no DDL.
