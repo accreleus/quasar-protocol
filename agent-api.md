@@ -588,7 +588,13 @@ created. On an `owned` host the recovery actor creates the agent with the consol
 (display, sound, monitor control) only while console mode is on, so a change of
 `config_update.console_config.enabled` makes the agent ask its recovery actor to replace it,
 and the new agent must pass the actor's verification before console mode counts as on; a
-failure puts the previous agent back.
+failure puts the previous agent back. **What starts a replacement:** a received `enabled` that
+differs from the access this agent has (`true` against any state but `on`, `false` against
+`on`), while no attempt is `applying`. A resent or unchanged `config_update`, including the
+full one after a reconnect, starts nothing when the two already agree. The attempt is bounded
+by the recovery actor's own verification deadline, after which it settles as `restored` (for
+example `unhealthy`, or `interrupted` if the actor restarted), so `applying` cannot last
+indefinitely.
 ```json
 "access": {
   "state": "restored",
@@ -607,9 +613,12 @@ failure puts the previous agent back.
     verified that agent.
   - **`on`**: this agent was created with console access, and the recovery actor verified it.
   - **`restored`**: the last replacement toward `target` failed and the previous agent, which
-    is this one, was put back. Console access is as it was before the attempt.
+    is this one, was put back. The host has console access `!target` now, exactly as before
+    the attempt.
   - **`unsupported`**: this host cannot have console access through its recovery actor (for
-    example, a rootless engine, until RH07-15). `summary` says why. Nothing is replaced.
+    example, a rootless engine, until RH07-15). `summary` says why. Nothing is replaced, and
+    `target` and `request_id` are `null`. (Not to be confused with `release_state`'s failure
+    reason `unsupported`: a different field with a different meaning.)
 
   A value this list does not name is shown verbatim and treated as `off`.
 - **`target`** *(boolean or null, required)* — the console access the current or last attempt
@@ -625,10 +634,13 @@ failure puts the previous agent back.
 - **`summary`** *(string, required)* — one operator-facing sentence, under the same rules as a
   readiness check's `summary`.
 
-The agent re-sends `capacity` whenever `access` changes. Absent ⇒ console mode needs no
-replacement on this host (a Compose or source install, whose operator grants console access in
-the stack), or the agent predates the amendment: the control plane stores no access state and
-behaves as before. The agent refuses no work because of `access`; what the control plane does
+The agent re-sends `capacity` whenever `access` changes, and every `capacity` it sends carries
+the current `access`, so a report may repeat a settled attempt; a consumer acts on a settled
+attempt at most once per `request_id`. Absent ⇒ console mode needs no replacement on this host
+(a Compose or source install, whose operator grants console access in the stack), or the agent
+predates the amendment: a `capacity` without `console_capabilities.access`, including one
+without `console_capabilities` at all, **clears** any access state the control plane stored,
+and the host behaves as before. The agent refuses no work because of `access`; what the control plane does
 with it, including placing no new session on the host while it is `applying`, is in
 `control-api.md` §Console mode.
 

@@ -1478,7 +1478,7 @@ spike's `QUASAR_LOCAL_DISPLAY` env hardcode.
 | `host_id` | `UUID` PRIMARY KEY → `hosts(id)` ON DELETE CASCADE | one row per host; cascades on host removal |
 | `config` | `JSONB` NOT NULL DEFAULT `'{}'` | the console-config object (below). Sparse — absent keys resolve to defaults at read time. **Validated server-side on every PATCH** (unknown keys / bad types / bad enum / non-reported device rejected), never trusted blindly — same discipline as `host_settings.overrides`. |
 | `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | app-maintained |
-| `updated_by` | `UUID` NULL → `users(id)` | last admin to write; no cascade (audit trail) |
+| `updated_by` | `UUID` NULL → `users(id)` | last admin to write; no cascade (audit trail). *(Amendment 18:)* null after the control plane itself reset `enabled` following a restored console-access attempt. |
 
 Migration: `0022_console_config.up.sql` — `CREATE TABLE console_config (...)`. Down drops it.
 
@@ -1491,12 +1491,16 @@ Wave 3.2 adds `console_capabilities.outputs`, a typed per-card DRM connector/mod
 preserves card/render association and exact millihertz timing identity rather than flattening
 connector names. The existing `connectors` array remains an additive compatibility projection.
 
-*Amendment 18 (RH07 #395), no DDL.* The stored capabilities report may carry the agent's
-`access` object (`agent-api.md` `capacity.console_capabilities.access`), kept verbatim in the
-same JSONB. When the agent reports a restored attempt whose `target` equals the stored
-`enabled`, the control plane writes `enabled` back to the opposite value with `updated_by` null
-(`control-api.md` §Console mode), so `console_config.config.enabled` never claims console access
-the host does not have.
+*Amendment 18 (RH07 #395), no DDL.* The host's latest capabilities report is stored in the
+`console_capabilities` table (migration 0022: `host_id` PK → `hosts(id)` ON DELETE CASCADE,
+`capabilities` JSONB, `updated_at`). That report may now carry the agent's `access` object
+(`agent-api.md` `capacity.console_capabilities.access`), kept verbatim in the same JSONB, beside
+the control plane's own record of the last restored `request_id` it handled; a report without
+`access` clears both. When the agent reports a restored attempt whose `target` equals the
+stored `enabled`, the control plane writes `enabled` back to the opposite value with
+`updated_by` **null, which here means the system rather than an admin** (`control-api.md`
+§Console mode), once per `request_id`, so `console_config.config.enabled` never claims console
+access the host does not have.
 
 **The `config` object (resolved shape + defaults).** Console-mode is **local-only by
 default** (`stream:false`) and **off by default** (`enabled:false`):

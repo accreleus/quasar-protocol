@@ -5903,7 +5903,13 @@ any override — the standalone lever for applying an already-persisted restart-
 > reports (`agent-api.md` `capacity.console_capabilities.access`); a PATCH that changes
 > `enabled` gains one refusal, `409 conflict`, while a change cannot be accepted; and a failed,
 > restored attempt resets the stored `enabled`, so the setting never claims what the host does
-> not have. Hosts whose agent reports no `access` behave exactly as before.
+> not have. Hosts whose agent reports no `access` behave exactly as before. **Rollout order:**
+> the control plane moves before the agents (ADR 0002 on the release path); a developer or
+> source apply must keep that order too, because an agent with this amendment under an older
+> control plane replaces itself with no placement hold and no reset. **Existing rows:** a stored
+> `enabled:true` on an owned host did nothing before this amendment; the first agent with it
+> finds `enabled` differing from its access and turns console mode on, which ends the host's
+> sessions once, with no separate confirmation.
 
 ### `GET /v1/admin/hosts/{id}/console-config` — read a host's console config + capabilities (admin)
 `RequireAuth → RequireAdmin`. Returns the resolved config (defaults applied) plus the host's
@@ -5962,17 +5968,23 @@ key to its default (except `audio_output`/`default_app`, where `null` is the mea
   `restart_confirm`** — console config is not restart-class (it is not `gst::init`-latched).
 - **Console access** *(amendment 18)*. On a host whose latest report carries `access`, a PATCH
   that changes `enabled` is refused with `409 conflict` while `access.state` is `applying` (one
-  replacement at a time), and a PATCH setting `enabled:true` is refused with `409 conflict`
-  while it is `unsupported` (the message carries `access.summary`). Every other key is accepted
+  replacement at a time), and a PATCH that changes `enabled` from false to true is refused with
+  `409 conflict` while it is `unsupported` (the message carries `access.summary`). Every other key is accepted
   in either state. The admin's confirmation that the host's live sessions end belongs to the
   UI; the control plane does not drain first.
-- **Placement** *(amendment 18)*. While a host's `access.state` is `applying`, the control plane
-  places no new session on it; the host is placeable again once the report settles.
+- **Placement** *(amendment 18)*. The control plane places no new session on a host from an
+  accepted PATCH that changes `enabled` (on a host that reports `access`) until the host's next
+  `access` report, and for as long as that report's `state` is `applying`; the host is
+  placeable again once the report settles. A stored `access` is cleared by any `capacity`
+  without it (`agent-api.md`), so a host whose agent stops reporting it is never held.
 - **Restored attempt** *(amendment 18)*. When the agent reports `access.state = restored` with a
-  `target` equal to the stored `enabled`, the control plane sets the stored `enabled` to the
-  opposite of `target`, stamps `updated_by` as null (the system, not an admin), records an audit
-  event naming the attempt and its `reason`, and pushes the resolved `console_config` as usual.
-  An admin's "try again" is then an ordinary PATCH.
+  `target` equal to the stored `enabled`, and the control plane has not already handled that
+  `request_id`, it sets the stored `enabled` to the opposite of `target`, stamps `updated_by`
+  as null (the system, not an admin), records the audit event `console.access.restored`
+  (`host_id`, `request_id`, `target`, `reason`), and pushes the resolved `console_config` as
+  usual. It records the handled `request_id` with the stored report and **acts at most once
+  per `request_id`**, so a report the agent repeats (every `capacity` carries the current
+  `access`) never undoes an admin's later "try again", which is an ordinary PATCH.
 - **Errors:** `404 not_found` — no such host; `400 validation_failed` — bad enum / unknown
   device / unknown `default_app`; `409 conflict` — the two console access refusals above; `403`
   for non-admin.
