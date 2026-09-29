@@ -1491,6 +1491,13 @@ Wave 3.2 adds `console_capabilities.outputs`, a typed per-card DRM connector/mod
 preserves card/render association and exact millihertz timing identity rather than flattening
 connector names. The existing `connectors` array remains an additive compatibility projection.
 
+*Amendment 18 (RH07 #395), no DDL.* The stored capabilities report may carry the agent's
+`access` object (`agent-api.md` `capacity.console_capabilities.access`), kept verbatim in the
+same JSONB. When the agent reports a restored attempt whose `target` equals the stored
+`enabled`, the control plane writes `enabled` back to the opposite value with `updated_by` null
+(`control-api.md` §Console mode), so `console_config.config.enabled` never claims console access
+the host does not have.
+
 **The `config` object (resolved shape + defaults).** Console-mode is **local-only by
 default** (`stream:false`) and **off by default** (`enabled:false`):
 ```json

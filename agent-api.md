@@ -258,6 +258,19 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > platform-release decision reads them. See §`register`, §`readiness`, `control-api.md` §Hosts and
 > `schema.md` `hosts.engine` / `hosts.engine_version` / `hosts.engine_mode`.
 
+> **Amendment 18 — console access on owned hosts (RH07 #395; specification #390), additive,
+> requires sign-off (the owner's standing pre-approval of RH07 contract amendments under D20,
+> conditional on an independent Opus review; the owner routed this one there on 2026-09-29).**
+> On an `owned` host, console mode needs a node agent created with the host's display, sound
+> and monitor control, so turning it on or off makes the host's recovery actor **replace the
+> agent**, with verify-and-restore. This wire gains one optional object,
+> `capacity.console_capabilities.access`, through which the agent reports that replacement:
+> off, applying, on, restored after a failed attempt, or unsupported, and why (§`capacity`).
+> No existing message, field, value or ack changes; `config_update.console_config` stays the
+> only carrier of the admin's setting. An agent that does not manage console access (a Compose
+> or source install, or an agent that predates the amendment) omits `access`, and everything
+> reads as before. See `control-api.md` §Console mode for what the control plane does with it.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -568,6 +581,56 @@ paths. It rides `capacity` because these are **hardware/topology** facts: the ag
 `capacity` when topology changes (e.g. a display hotplug), keeping the UI's lists fresh. Absent
 ⇒ the control plane reports empty capability arrays and the UI offers only `auto`. The control
 plane stores the latest report and returns it in `GET /v1/admin/hosts/{id}/console-config`.
+
+`console_capabilities.access` *(amendment 18, RH07 #395, optional, additive)* reports whether
+this agent **can** run console mode, on a host where that is decided by how the agent was
+created. On an `owned` host the recovery actor creates the agent with the console additions
+(display, sound, monitor control) only while console mode is on, so a change of
+`config_update.console_config.enabled` makes the agent ask its recovery actor to replace it,
+and the new agent must pass the actor's verification before console mode counts as on; a
+failure puts the previous agent back.
+```json
+"access": {
+  "state": "restored",
+  "target": true,
+  "request_id": "3f0812c4-6e1d-4f7a-9d55-8c1b0e2d44a2",
+  "reason": "unhealthy",
+  "started_at": "2026-09-29T14:12:03Z",
+  "finished_at": "2026-09-29T14:13:40Z",
+  "summary": "The node agent with console access did not become healthy, so the recovery actor put the previous one back."
+}
+```
+- **`state`** *(string, required)* — one of:
+  - **`off`**: this agent has no console access, and none is being applied.
+  - **`applying`**: a replacement toward `target` is in progress. The agent sends it before it
+    is replaced, and the replacing agent keeps sending it until the recovery actor has
+    verified that agent.
+  - **`on`**: this agent was created with console access, and the recovery actor verified it.
+  - **`restored`**: the last replacement toward `target` failed and the previous agent, which
+    is this one, was put back. Console access is as it was before the attempt.
+  - **`unsupported`**: this host cannot have console access through its recovery actor (for
+    example, a rootless engine, until RH07-15). `summary` says why. Nothing is replaced.
+
+  A value this list does not name is shown verbatim and treated as `off`.
+- **`target`** *(boolean or null, required)* — the console access the current or last attempt
+  moves to; `null` when there has been no attempt.
+- **`request_id`** *(uuid or null, required)* — the recovery actor's attempt, for the operator's
+  Details; `null` when there has been no attempt. It is not a `release_apply` id and never
+  appears in `release_state`.
+- **`reason`** *(string or null, required)* — set exactly when `state` is `restored`: an
+  identifier from §`release_state`'s failure vocabulary, as the recovery actor reported it.
+- **`started_at`**, **`finished_at`** *(RFC 3339 or null, required)* — the attempt's start and,
+  once it settled, its end; `null` when there has been no attempt, and `finished_at` is `null`
+  while `applying`.
+- **`summary`** *(string, required)* — one operator-facing sentence, under the same rules as a
+  readiness check's `summary`.
+
+The agent re-sends `capacity` whenever `access` changes. Absent ⇒ console mode needs no
+replacement on this host (a Compose or source install, whose operator grants console access in
+the stack), or the agent predates the amendment: the control plane stores no access state and
+behaves as before. The agent refuses no work because of `access`; what the control plane does
+with it, including placing no new session on the host while it is `applying`, is in
+`control-api.md` §Console mode.
 
 `host.storage` *(NEW, host-observability, optional, additive)* reports the filesystem
 capacity/availability (statvfs) of the storage roots the agent can see — at minimum its data

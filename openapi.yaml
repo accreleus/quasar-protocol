@@ -3272,6 +3272,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   # ─── admin: stream profiles / policy (not yet in prose) ──────────────────
   /v1/admin/profile-policy:
@@ -8337,6 +8338,19 @@ components:
             properties:
               path: { type: string }
               label: { type: string }
+        access: { $ref: "#/components/schemas/ConsoleAccess" }
+    ConsoleAccess:
+      type: object
+      description: "Amendment 18 (RH07 #395): whether the host's node agent can run console mode, on an owned host where its recovery actor replaces the agent to grant it (agent-api capacity.console_capabilities.access). Absent when the agent reports none."
+      required: [state, target, request_id, reason, started_at, finished_at, summary]
+      properties:
+        state: { type: string, description: "off | applying | on | restored | unsupported; an unknown value is shown verbatim and treated as off." }
+        target: { type: [boolean, "null"] }
+        request_id: { type: [string, "null"], format: uuid }
+        reason: { type: [string, "null"], description: "A release_state failure identifier; set exactly when state is restored." }
+        started_at: { type: [string, "null"], format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        summary: { type: string }
     DrmOutputCapability:
       type: object
       required: [id, card, render_node, connector, connected, active_mode, modes]

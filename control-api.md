@@ -5897,6 +5897,13 @@ any override — the standalone lever for applying an already-persisted restart-
 > `console_config`. Delivery to the agent: `agent-api.md` `config_update.console_config`
 > (additive) + capability enumeration in `capacity.console_capabilities` (additive). The
 > node-agent reads this instead of the spike's `QUASAR_LOCAL_DISPLAY` env hardcode.
+>
+> **Amendment 18 — console access on owned hosts (RH07 #395), additive, requires sign-off (D20,
+> as `agent-api.md` amendment 18).** `capabilities` gains the optional `access` object the agent
+> reports (`agent-api.md` `capacity.console_capabilities.access`); a PATCH that changes
+> `enabled` gains one refusal, `409 conflict`, while a change cannot be accepted; and a failed,
+> restored attempt resets the stored `enabled`, so the setting never claims what the host does
+> not have. Hosts whose agent reports no `access` behave exactly as before.
 
 ### `GET /v1/admin/hosts/{id}/console-config` — read a host's console config + capabilities (admin)
 `RequireAuth → RequireAdmin`. Returns the resolved config (defaults applied) plus the host's
@@ -5926,6 +5933,11 @@ latest reported capabilities so the UI can populate selectors.
 - **`capabilities`** — the host's latest `console_capabilities` report (`agent-api.md`
   `capacity`); empty arrays if the agent hasn't reported (older/offline agent) — the UI then
   offers only `auto`.
+- **`capabilities.access`** *(amendment 18, optional)* — the agent's latest console access
+  report, passed through as sent (`agent-api.md` `capacity.console_capabilities.access`).
+  Absent when the agent reports none. When present, `config.enabled` is the admin's wish and
+  `access.state` is what the host has: console mode is **on** only when both say so, and the UI
+  never shows it as on while `access.state` is `applying` or `restored`.
 - **Errors:** `404 not_found` — no such host; `403` for non-admin (precedes lookup).
 
 ### `PATCH /v1/admin/hosts/{id}/console-config` — update a host's console config (admin)
@@ -5948,8 +5960,22 @@ key to its default (except `audio_output`/`default_app`, where `null` is the mea
   resolved `console_config` to the agent immediately** via `config_update` (`agent-api.md`).
   Takes effect on the next session build; the agent re-arms its hotplug watcher live. **No
   `restart_confirm`** — console config is not restart-class (it is not `gst::init`-latched).
+- **Console access** *(amendment 18)*. On a host whose latest report carries `access`, a PATCH
+  that changes `enabled` is refused with `409 conflict` while `access.state` is `applying` (one
+  replacement at a time), and a PATCH setting `enabled:true` is refused with `409 conflict`
+  while it is `unsupported` (the message carries `access.summary`). Every other key is accepted
+  in either state. The admin's confirmation that the host's live sessions end belongs to the
+  UI; the control plane does not drain first.
+- **Placement** *(amendment 18)*. While a host's `access.state` is `applying`, the control plane
+  places no new session on it; the host is placeable again once the report settles.
+- **Restored attempt** *(amendment 18)*. When the agent reports `access.state = restored` with a
+  `target` equal to the stored `enabled`, the control plane sets the stored `enabled` to the
+  opposite of `target`, stamps `updated_by` as null (the system, not an admin), records an audit
+  event naming the attempt and its `reason`, and pushes the resolved `console_config` as usual.
+  An admin's "try again" is then an ordinary PATCH.
 - **Errors:** `404 not_found` — no such host; `400 validation_failed` — bad enum / unknown
-  device / unknown `default_app`; `403` for non-admin.
+  device / unknown `default_app`; `409 conflict` — the two console access refusals above; `403`
+  for non-admin.
 
 ---
 
