@@ -5976,7 +5976,8 @@ key to its default (except `audio_output`/`default_app`, where `null` is the mea
   UI; the control plane does not drain first.
 - **Placement** *(amendment 18)*. The control plane places no new session on a host from an
   accepted PATCH that changes `enabled` (on a host that reports `access`) until an `access`
-  report that is `applying`, `unsupported`, or already agrees with the stored `enabled`, and for
+  report that is `applying`, `unsupported`, or already agrees with the stored `enabled` (in the
+  has-access sense, so a `restored` report counts), and for
   as long as a report's `state` is `applying`; the host is placeable again once the report
   settles. A stored `access` is cleared by any `capacity`
   without it (`agent-api.md`), so a host whose agent stops reporting it is never held.
