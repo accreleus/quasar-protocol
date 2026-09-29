@@ -1496,7 +1496,7 @@ connector names. The existing `connectors` array remains an additive compatibili
 `capabilities` JSONB, `updated_at`). That report may now carry the agent's `access` object
 (`agent-api.md` `capacity.console_capabilities.access`), kept verbatim in the same JSONB, beside
 the control plane's own record of the last restored `request_id` it handled; a report without
-`access` clears both. When the agent reports a restored attempt whose `target` equals the
+`access` clears `access` and keeps that record. When the agent reports a restored attempt whose `target` equals the
 stored `enabled`, the control plane writes `enabled` back to the opposite value with
 `updated_by` **null, which here means the system rather than an admin** (`control-api.md`
 §Console mode), once per `request_id`, so `console_config.config.enabled` never claims console

@@ -5942,8 +5942,10 @@ latest reported capabilities so the UI can populate selectors.
 - **`capabilities.access`** *(amendment 18, optional)* — the agent's latest console access
   report, passed through as sent (`agent-api.md` `capacity.console_capabilities.access`).
   Absent when the agent reports none. When present, `config.enabled` is the admin's wish and
-  `access.state` is what the host has: console mode is **on** only when both say so, and the UI
-  never shows it as on while `access.state` is `applying` or `restored`.
+  `access` is what the host has (**has access**: `state` is `on`, or `restored` with `target`
+  false; `agent-api.md`). Console mode reads as **on** only when `enabled` is true and the host
+  has access, and never while `access.state` is `applying`; a restored attempt is shown as a
+  failure beside the access the host kept.
 - **Errors:** `404 not_found` — no such host; `403` for non-admin (precedes lookup).
 
 ### `PATCH /v1/admin/hosts/{id}/console-config` — update a host's console config (admin)
@@ -5973,9 +5975,10 @@ key to its default (except `audio_output`/`default_app`, where `null` is the mea
   in either state. The admin's confirmation that the host's live sessions end belongs to the
   UI; the control plane does not drain first.
 - **Placement** *(amendment 18)*. The control plane places no new session on a host from an
-  accepted PATCH that changes `enabled` (on a host that reports `access`) until the host's next
-  `access` report, and for as long as that report's `state` is `applying`; the host is
-  placeable again once the report settles. A stored `access` is cleared by any `capacity`
+  accepted PATCH that changes `enabled` (on a host that reports `access`) until an `access`
+  report that is `applying`, `unsupported`, or already agrees with the stored `enabled`, and for
+  as long as a report's `state` is `applying`; the host is placeable again once the report
+  settles. A stored `access` is cleared by any `capacity`
   without it (`agent-api.md`), so a host whose agent stops reporting it is never held.
 - **Restored attempt** *(amendment 18)*. When the agent reports `access.state = restored` with a
   `target` equal to the stored `enabled`, and the control plane has not already handled that

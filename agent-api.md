@@ -588,9 +588,10 @@ created. On an `owned` host the recovery actor creates the agent with the consol
 (display, sound, monitor control) only while console mode is on, so a change of
 `config_update.console_config.enabled` makes the agent ask its recovery actor to replace it,
 and the new agent must pass the actor's verification before console mode counts as on; a
-failure puts the previous agent back. **What starts a replacement:** a received `enabled` that
-differs from the access this agent has (`true` against any state but `on`, `false` against
-`on`), while no attempt is `applying`. A resent or unchanged `config_update`, including the
+failure puts the previous agent back. **Has access** means `state` is `on`, or `state` is
+`restored` with `target` false (a failed attempt to turn it off); every other state means no
+access. **What starts a replacement:** a received `enabled` that differs from whether this agent
+has access, while no attempt is `applying` and the state is not `unsupported`. A resent or unchanged `config_update`, including the
 full one after a reconnect, starts nothing when the two already agree. The attempt is bounded
 by the recovery actor's own verification deadline, after which it settles as `restored` (for
 example `unhealthy`, or `interrupted` if the actor restarted), so `applying` cannot last
