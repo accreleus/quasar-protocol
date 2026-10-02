@@ -672,7 +672,7 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 > > save is what makes an edit to the Steam app — an image bump, a new GPU flag, a new mount —
 > > propagate to **every** derived tile with no re-sync and no stale copies. It is the same
 > > decision UI-P3 made for runtime presets, for the same reason. It is a `CHECK` and not a
-> > convention because **a validated Tower experiment hardcoded a host path into a tile's
+> > convention because **a validated lab-host experiment hardcoded a host path into a tile's
 > > `runtime_spec.mounts`**; the constraint exists so that cannot ship, and so it survives an
 > > admin editing the row directly.
 >
@@ -2254,7 +2254,7 @@ has deliberately named a specific app and needs an actionable answer.
 **The app write shape and `kind` (UI-P1).** `kind` is **optional** on create and patch.
 **Absent = the schema default on create, unchanged on patch. Absence is never a zero value.**
 This is the `cb97bfb` trap made explicit: an omitted field that decodes to `""` / `0` and is
-then written **clobbers the column default** — that is how four Tower apps reached
+then written **clobbers the column default** — that is how four lab-host apps reached
 `default_encode_slots = 0` and silently bypassed admission. So `kind` must decode through a
 pointer (or an equivalent presence-aware decode), exactly like the numeric `default_*` fields.
 An explicit `kind: ""` is **not** "use the default": it is `400 validation_failed`, as is any
@@ -4090,7 +4090,7 @@ current values without an N+1 fan-out; absent when a session has no telemetry ye
 > ```json
 > { "items": [ { "id": "743a921f-…", "user_id": "7622e7d4-…", "username": "deltest",
 >                "app_id": "e808ef43-…", "app_name": "Redout: Enhanced Edition",
->                "host_id": "741dc00a-…", "host_name": "tower", "state": "running", "…": "…" } ],
+>                "host_id": "741dc00a-…", "host_name": "gpu-host-1", "state": "running", "…": "…" } ],
 >   "next_cursor": null }
 > ```
 > - Resolved by a **`LEFT JOIN`** on the admin read path only. Each field is **omitted** when the
@@ -4789,7 +4789,7 @@ Query: `user_id`, `app_id`, `pending_gc` (bool) — all optional filters. Pagina
 `GET /v1/users`.
 ```json
 { "items": [ { "id": "…", "user_id": "…", "app_id": "…", "host_id": "…",
-  "username": "mike", "app_name": "Steam", "host_name": "tower",
+  "username": "mike", "app_name": "Steam", "host_name": "gpu-host-1",
   "provider": "volume", "ref": "quasar-home-…", "bytes_used": 123456789,
   "created_at": "…", "last_used_at": "…", "gc_after": null } ], "next_cursor": null }
 ```
@@ -5086,7 +5086,7 @@ A row with `parent_app_id` set must satisfy, at the handler and again at the dat
 
 | rule | why |
 |---|---|
-| `runtime_spec = '{}'` | the merge happens at launch, so a parent edit reaches every tile with no re-sync. A validated Tower experiment hardcoded a host path into a tile's `runtime_spec.mounts`; the `CHECK` is why that cannot ship |
+| `runtime_spec = '{}'` | the merge happens at launch, so a parent edit reaches every tile with no re-sync. A validated lab-host experiment hardcoded a host path into a tile's `runtime_spec.mounts`; the `CHECK` is why that cannot ship |
 | `managed_home = false` | the tile borrows a home, it does not declare one. The single-writer guard must read the **parent's** `managed_home`, or it does not fire for derived tiles at all — the exact inverse of its purpose |
 | `runtime_preset_id IS NULL` | a preset is container configuration, and the tile contributes none |
 | `library_provider = ''` | a tile cannot itself be a provider |

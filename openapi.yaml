@@ -47,7 +47,7 @@ info:
 servers:
   - url: http://{host}:{port}
     description: |
-      A Quasar control-plane instance (e.g. hermes :8080, tower :18080). The server
+      A Quasar control-plane instance (e.g. a stack on :8080, a second stack on :18080). The server
       base carries NO path prefix — every path below is absolute from the origin and
       begins with /v1 (this matches the Go router's registered patterns, which the
       drift test compares against).
@@ -4781,7 +4781,7 @@ components:
             flattening at save is what makes an edit to the parent - an image bump, a new GPU
             flag, a new mount - reach every derived tile with no re-sync and no stale copies. It
             is the same decision as UI-P3's runtime presets, and it is the reason the validated
-            Tower experiment (which hardcoded a host path into a tile's runtime_spec.mounts)
+            lab-host experiment (which hardcoded a host path into a tile's runtime_spec.mounts)
             cannot ship. A parent may not itself be derived: one level, never a chain.
             One tile per (parent_app_id, external_source, external_id) fleet-wide - a duplicate
             is 409 conflict, from the apps_parent_external_uk unique index.
