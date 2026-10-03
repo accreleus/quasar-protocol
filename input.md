@@ -37,6 +37,30 @@ A client MAY attach two optional fields to a relative-mouse-move message for inp
 
 Both fields are **optional**. A sender MAY omit them entirely; the host MUST treat absence as "not instrumented" and continue normally. A sender MUST NOT make correctness depend on the host reading them — they are observational only. The host ignores these fields on the live input-injection path; they are consumed only when input-trace logging is enabled (`QUASAR_INPUT_TRACE=1` on the agent). The wire shape of `mm` is otherwise unchanged: `dx` and `dy` are required and keep their Phase-0 meaning.
 
+## Messages (host -> client) — gamepad force-feedback (PROPOSAL P-GP-FF, additive)
+
+> **Status: PROPOSAL — not yet implemented on either side.** Additive, optional,
+> backwards-compatible: a client that ignores these degrades to no force-feedback; a host
+> that never sends them changes nothing. Carried on the same `input` DataChannel (video PC),
+> reverse direction. `i` matches the `player` index in the capability report's
+> `controllers[]` (`native-client.md`); a host MUST only send what that controller's
+> advertised `rumble`/`haptics` capabilities accept.
+
+```json
+{ "t": "rumble", "i": 0, "low": 0.6, "high": 0.3, "duration_ms": 200 }
+{ "t": "haptic", "i": 1, "left_trigger": { "mode": "resist", "start": 0.2, "strength": 0.8 },
+                  "right_trigger": { "mode": "off" } }
+```
+- `rumble`: dual-rumble; `low`/`high` are `0.0..1.0` motor intensities (low-frequency /
+  high-frequency), `duration_ms` bounded (host clamp 5000). A new `rumble` for the same `i`
+  replaces the previous one; `low=high=0` stops immediately.
+- `haptic`: DualSense adaptive-trigger effects; trigger objects are forward-extensible
+  (`mode` discriminated: `off | resist | weapon | vibrate`, parameters per mode). Clients
+  without trigger haptics ignore the message (or actuate rumble-equivalent if they choose).
+- Unknown-field / unknown-`t` tolerance applies in both directions (see conventions above) —
+  this proposal relies on the existing rule for the client side too: clients MUST ignore
+  unknown `t` values received on the input channel.
+
 ## Clock sync + latency (T7)
 Ping/pong over the same channel establishes the client<->host clock offset so glass-to-glass and interactive latency can be estimated. `tc` = client monotonic ms; `ts` = host monotonic ms.
 ```json
