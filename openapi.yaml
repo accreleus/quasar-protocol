@@ -4583,6 +4583,17 @@ components:
             external_height differ from the launch width/height — mirrors external_width's
             presence rule, since the agent reports external_owner only in that same window.
             Absent on every pre-amendment session and while the external size sits at launch.
+        console_mode:
+          allOf: [ { $ref: "#/components/schemas/ConsoleModeSelection" } ]
+          description: >-
+            console-mode-switch (approved 2026-10-03, #445). The physical display mode a local
+            console session runs at, as the agent last reported it (agent-api.md
+            session_metrics.console_mode; refresh_millihz is the exact DRM timing). Present once a
+            console sample has been seen; absent on every streamed session and before the first
+            sample — absence means "not a known local console", never "at the launch mode". Moves
+            when the app in the session picks another mode in its own display settings;
+            width/height/fps stay the launch mode. In-memory cache, dropped on a control-plane
+            restart like external_width. Read-only.
         rungs:
           type: array
           description: >-

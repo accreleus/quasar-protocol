@@ -3620,6 +3620,16 @@ The session `stream` block gains:
   §`PATCH /v1/sessions/{id}/display`. **Not to be confused with the admin-configured stream-profile
   "rungs"** (§Stream profiles, AS10-01) — this is a fixed, aspect-ratio-derived table for live
   external-resize, unrelated to the admin encode-rung catalog and not itself admin-editable.
+- **`console_mode`** *(optional object `{width, height, refresh_millihz}`, console-mode-switch
+  amendment, approved by the owner 2026-10-03, #445)* — the **physical display mode a local
+  console session runs at**, readback of `agent-api.md` `session_metrics.console_mode`
+  (`refresh_millihz` is the exact DRM timing). **Present once the control plane has seen a
+  console sample for the session**; absent on every streamed session and before the first
+  sample, so absence means "not a known local console", never "at the launch mode". Moves when
+  the app in the session picks another mode in its own display settings (the agent moves the
+  monitor and the compositor, the app keeps running); `width`/`height`/`fps` above stay the
+  launch mode. Same in-memory, restart-dropped cache and lifecycle as `external_width`. Not
+  settable through this API: the choice is the player's, made inside the session.
 
 ### `GET /v1/sessions/{id}/events` — session lifecycle push (SSE, 2026-08-02)
 > *Additive amendment — one new read-only endpoint, no existing shape changes. Signed off

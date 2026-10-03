@@ -1183,6 +1183,20 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   frame rate when the fps rung has stepped below the session's launch fps. **Present only
   when below the launch fps.** Emitted since the fps rung shipped (2026-08-17); absent on
   hosts where the rung is disabled or inert.
+- **`console_mode`** *(object, optional, console-mode-switch amendment, approved by the
+  owner 2026-10-03, #445)* — `{"width", "height", "refresh_millihz"}`, the **physical
+  display mode a local console session's display runs at**, as the DRM mode names it
+  (`refresh_millihz` is the exact timing, `143981`, not the whole-hertz pipeline rate).
+  **Present in every window once the agent knows it** — a `local_only` console with a
+  connected display knows it from launch — and **absent on a streamed session**, which has
+  no local display; absence therefore means "not a local console", never "unknown".
+  Moves when the app running in the session picks another mode in its own display
+  settings: the agent moves the monitor and the compositor to it without restarting the
+  app, and the next sample reports the new mode. Readback surfaces as
+  `Session.stream.console_mode` (`control-api.md`); `session_assign.stream` keeps the launch
+  mode and never changes. The host side needs no new downstream message: the request
+  reaches the agent from inside the session (the compositor's `wlr-output-management`), so
+  this is the whole wire delta.
 - **(approved 2026-08-17) `abr_floor_kbps`** *(number, optional)* — the ABR governor's
   **current** lower bound in kbit/s, when the adaptation ladder has moved it off the floor
   the session launched with. **Present only when ≠ the launch floor**; absent therefore
