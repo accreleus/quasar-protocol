@@ -929,8 +929,9 @@ and renaming one later needs no amendment. Each uses only the existing statuses,
 
 **Console checks (amendment 19, informative).** A console session's container is given the
 console GPU's card node, the allowed input devices (the whole input directory, with a
-device-cgroup rule for the input major so a device plugged in later opens), the sound device and
-the host's udev data and control socket; the agent itself holds the console's virtual terminal.
+device-cgroup rule for the input major so a device plugged in later opens, on an engine that can
+apply one), the sound device and the host's udev data; the agent itself holds the console's
+virtual terminal.
 What the agent cannot grant is a readiness check that names the missing grant, so a
 half-configured host explains itself instead of failing a launch. Like every check id these are
 the agent's to choose; they are recorded so tickets and consoles agree on vocabulary.
@@ -938,10 +939,10 @@ the agent's to choose; they are recorded so tickets and consoles agree on vocabu
 | id | what it reports |
 |---|---|
 | `console_card` | the agent can pass the console GPU's card node to the console container, and no other process holds DRM master on it (a holder is `fail`, naming it). |
-| `console_input` | the allowed input devices, and the input directory with its device-cgroup rule, can be passed in. |
+| `console_input` | the allowed input devices, and the input directory, can be passed in, and the agent's user can open them. A rootless engine applies no device-cgroup rule, so there a device plugged in later opens through the host's own access grant alone. |
 | `console_sound` | the host's sound device can be passed in. |
 | `console_terminal` | the agent can hold the console's virtual terminal in graphics mode for the session's life. |
-| `console_udev` | the host's udev data and control socket can be passed in, so hotplugged monitors and input devices reach the desktop. |
+| `console_udev` | the host's udev data can be passed in, so hotplugged monitors and input devices reach the desktop. The host's udev control socket is deliberately not passed (root in the container could steer the host's udevd through it); the image makes the placeholder libudev looks for. |
 | `console_ddc` | monitor power control over DDC, which tells a powered-off monitor from an unplugged one. Optional: `skip` when the host was not prepared to grant the i2c nodes (amendment 17's clarification of `skip`). |
 
 All of them report `skip` while console mode is off for the host, and none carries `blocks`: they
