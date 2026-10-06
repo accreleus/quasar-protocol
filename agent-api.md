@@ -289,9 +289,14 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > direct display (§`readiness`, "Console checks"). **(5)** The `app` object gains one optional
 > key, `direct_display` (§`session_assign`). **Compatibility:** the control plane moves first
 > (ADR 0002). It never sends `dual_output` or a retired key, and it ignores an `audio_sinks`
-> array from an older agent. An older agent reads the trimmed `console_config` with its own
-> defaults for the missing keys. An agent with this amendment may refuse a `dual_output`
-> assignment with `ack{ok:false}`.
+> array from an older agent. An agent older than this amendment still accepts the trimmed
+> `console_config`, but its own defaults for the missing keys are not the old control plane's:
+> its local-display path would run with `grab` false (no physical input grabbed) and no local
+> audio. From this amendment the control plane launches a console session only for an app
+> whose `runtime_spec` declares `direct_display: true`, so an older agent's console path is not
+> reached through a default app that predates direct display; an app declared direct is meant
+> for agents with this amendment. An agent with this amendment may refuse a `dual_output`
+> assignment, or a `local_only` one whose `app` lacks `direct_display`, with `ack{ok:false}`.
 
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
