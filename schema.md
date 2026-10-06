@@ -822,7 +822,7 @@ defaults the scheduler and pipeline need.
 | `external_source` | `TEXT` NOT NULL DEFAULT `''` | *(Steam library discovery Phase 1, migration 0042)* `CHECK (external_source IN ('', 'steam'))`. Read with `external_id` below as one fact: **"this app IS provider X's title Y"**, today only `('steam', <appid>)`. `''` = **not a provider title**, which is every pre-0042 row, so the default makes them all valid with no backfill. Surfaced as `control-api.md` `AppListItem.external_source`, so it is on the public read shape, not admin-only: it is **identity**, not operator configuration. Optional on the write shape, where **absent means "default on create, unchanged on patch" — never a zero value**, but where an explicit `''` **is** valid (unlike `kind`, whose `''` is a `400`) because `''` is the real domain value here; the `CHECK` is the backstop, not the primary gate. Widening the enum is a later migration (the `TEXT` + `CHECK` convention above). **Nothing in scheduling, admission, profile/codec resolution, or the agent wire reads it** — the sole Phase 1 reader is artwork resolution. |
 | `external_id` | `TEXT` NOT NULL DEFAULT `''` | *(Steam library discovery Phase 1, migration 0042)* `CHECK (external_id = '' OR external_id ~ '^[1-9][0-9]{0,9}$')` — a bare positive integer, no leading zero, no sign, no whitespace, no separators, so `'0'`, `'007'`, `'1 2'`, `'1;rm -rf /'` and `'-applaunch 480 -foo'` are all rejected **at the storage layer**. **THAT `CHECK` IS ARGUMENT-INJECTION CONTAINMENT, NOT TIDINESS** (spec §10): the value is eventually rendered into `STEAM_STARTUP_FLAGS`, which the `quasar-steam` entrypoint **word-splits** with `read -r -a`, so anything stored here reaches a shell-adjacent consumer as **arguments**. The appid is validated at four independent points (agent parse, control-plane ingest, here, launch-time render) and this is the one that survives **an admin editing the column later**, which is precisely why it is a database constraint and not only a handler guard. `''` = no provider id. Same write-shape semantics as `external_source`; the handler carries the identical regex as the primary gate. |
 | *(index)* | — | *(Steam library discovery Phase 1, migration 0042)* **`apps_external_ref_idx ON apps (external_source, external_id) WHERE external_id <> ''`** — the artwork resolver's *"which app is `steam:<appid>`"* lookup, and the index the later discovery reconciler reuses. **Partial**, because every app in a pre-discovery catalogue has `''` and a full index would be almost entirely one dead key. |
-| `runtime_spec` | `JSONB` NOT NULL DEFAULT `'{}'` | container launch spec the **node agent** consumes: `{ "image", "args":[], "env":{}, "mounts":[], "gpu":true }`. JSONB (not frozen columns) because this is agent-internal launch detail that will grow; the scheduler does **not** read it. |
+| `runtime_spec` | `JSONB` NOT NULL DEFAULT `'{}'` | container launch spec the **node agent** consumes: `{ "image", "args":[], "env":{}, "mounts":[], "gpu":true }`. JSONB (not frozen columns) because this is agent-internal launch detail that will grow; the scheduler does **not** read it. *(Amendment 19, #455, additive key)* `direct_display` (bool, absent ⇒ `false`): the app's image can run as a console session, driving the display itself (`agent-api.md` `session_assign` `app.direct_display`). The control plane reads it from the effective spec (a derived tile's parent's) for the console's default-app list and the `console_default_app` readiness check, never for scheduling. |
 | `default_vram_mb` | `INT` NOT NULL DEFAULT `1024` | **DEPRECATED (#383)** — no longer read by the scheduler. Retained so existing rows and API clients are undisturbed; still accepted on write and returned on read, but placement ignores it. Admission now gates on `default_encode_slots` plus the live free-VRAM veto (`control-api.md` §Admission control). It was never enforceable — no VRAM cap is applied to a session — so it only ever encoded a guess. Slated for removal once a release has passed with no readers. |
 | `default_encode_slots` | `INT` NOT NULL DEFAULT `1` | encode sessions this app needs (normally 1). |
 | `default_width` | `INT` NOT NULL DEFAULT `1920` | launch defaults for the P1-5 pipeline; per-launch overrides live on `sessions`. |
@@ -1483,9 +1483,10 @@ spike's `QUASAR_LOCAL_DISPLAY` env hardcode.
 Migration: `0022_console_config.up.sql` — `CREATE TABLE console_config (...)`. Down drops it.
 
 Console capability is host-scoped, but output topology is session-scoped through
-`session_assign.video_topology` (`stream_only` | `local_only` | `dual_output`). This prevents an
+`session_assign.video_topology` (`stream_only` | `local_only`). This prevents an
 enabled console host from mirroring unrelated browser sessions. A local-only console launch has
-zero reserved encode slots and no signaling-token row; dual-output retains both reservations.
+zero reserved encode slots and no signaling-token row. *(Amendment 19)* `dual_output` is
+retired: a console session's desktop drives the display directly and is never streamed.
 
 Wave 3.2 adds `console_capabilities.outputs`, a typed per-card DRM connector/mode inventory. It
 preserves card/render association and exact millihertz timing identity rather than flattening
@@ -1502,33 +1503,34 @@ stored `enabled`, the control plane writes `enabled` back to the opposite value 
 §Console mode), once per `request_id`, so `console_config.config.enabled` never claims console
 access the host does not have.
 
-**The `config` object (resolved shape + defaults).** Console-mode is **local-only by
-default** (`stream:false`) and **off by default** (`enabled:false`):
+**The `config` object (resolved shape + defaults)** *(trimmed by amendment 19, #453/#455)*.
+Console mode is **off by default** (`enabled:false`):
 ```json
 {
-  "enabled": false,                 // master switch; false = no local leg (today's behavior)
-  "connector": "auto",              // "auto" | "DP-4" | "HDMI-A-1" | ...  (display output; validated vs reported connectors)
-  "output_id": null,                 // card-scoped id from console_capabilities.outputs
-  "mode": null,                      // {width,height,refresh_millihz}; exact reported mode for output_id
-  "compositor": "weston",           // "weston" | "cage"  (CM-04 may flip the default to cage)
-  "audio_output": null,             // LOCAL host sink; no default — null ⇒ quiet until an admin picks one. "auto"(GPU HDA of the active connector) | "<alsa hw id>" | "hdmi" | "motherboard" | "usb:<...>". Independent of `stream`.
-  "stream": false,                  // LOCAL-ONLY DEFAULT: also stream this session over WebRTC when true (dual-output)
-  "stream_audio": false,            // SEPARATE from audio_output: also run the WebRTC Opus leg (only meaningful when stream=true)
-  "input_devices": "auto",          // "auto"(enumerate connected) | ["/dev/input/eventN", ...] (validated vs reported input devices)
-  "grab": true,                     // EVIOCGRAB exclusive-grab the physical devices to the session
-  "auto_start_on_display": false,   // CM-06: auto-launch default_app when a display connects on `connector`
-  "auto_connect_controller": false, // CM-07: auto-attach+grab a hotplugged controller
-  "default_app": null,              // UUID of the app to auto-launch on the console, or null (FK-checked vs apps.id)
-  "default_user": null,             // CM-06: UUID → users.id — OWNER of auto-started console sessions (admin-set; FK-checked). Required when auto_start_on_display=true (else auto-start is skipped + logged). Future: a console user-selection screen supersedes this.
-  "fullscreen": true                // CM-04: fullscreen the console client
+  "enabled": false,                 // master switch
+  "output_id": null,                // the output pick: card-scoped id from console_capabilities.outputs ("card0:DP-4") = this card, launch when this connector has a monitor; null = automatic (any connected output)
+  "input_devices": "auto",          // "auto"(every input device) | ["/dev/input/eventN", ...]: the allowlist passed into the console container (validated vs reported input devices)
+  "auto_start_on_display": false,   // CM-06: auto-launch default_app when a monitor is connected on the picked output
+  "default_app": null,              // UUID of the app the console session runs, or null (FK-checked vs apps.id). Offered only when its runtime_spec declares direct_display:true
+  "default_user": null              // CM-06: UUID → users.id — OWNER of auto-started console sessions (admin-set; FK-checked). Required when auto_start_on_display=true (else auto-start is skipped + logged)
 }
 ```
-Validation: `compositor` ∈ `{weston, cage}`; `connector`/`audio_output`/`input_devices`
-checked against the host's reported `console_capabilities` (`agent-api.md` `capacity`)
-unless `auto`/`null`; `default_app` FK-checked against `apps(id)`; `default_user`
-FK-checked against `users(id)`. `enabled:true` with
-`audio_output:null` is **valid** — the console runs with no local audio until a sink is
-picked (fail-safe/quiet). No volume/mute (out of scope — app/host mixer's concern).
+Validation: `output_id` must name an output in the host's reported
+`console_capabilities.outputs` (`agent-api.md` `capacity`) unless `null`; it need not be
+connected at write time, since it means "launch when this connector has a monitor".
+`input_devices` entries are checked against the reported input devices unless `auto`;
+`default_app` FK-checked against `apps(id)`; `default_user` FK-checked against `users(id)`.
+
+*Amendment 19 (migration 0099).* `connector`, `mode`, `compositor`, `audio_output`, `stream`,
+`stream_audio`, `grab`, `auto_connect_controller` and `fullscreen` are retired: the desktop owns
+its mode, audio output and input, and a console session is never streamed. Migration
+`0099_console_config_trim` removes them from every stored `config`. **Unknown keys in a stored
+`config` are ignored on read**, so a row the migration has not seen, or a key a later release
+retires, never blocks a read, a push to the agent or an upgrade. A PATCH still rejects a key it
+does not know. A default app whose effective `runtime_spec` (a derived tile's parent's) lacks
+`direct_display: true` is not a validation error: it is reported as the failed console readiness
+check `console_default_app` and the console session is not launched (`control-api.md` §Console
+mode).
 
 ---
 
@@ -2405,6 +2407,7 @@ control-plane/migrations/
   0084_platform_apply_cordons_restored.up.sql -- (#176, amendment 10, PURELY ADDITIVE -- two nullable columns on platform_apply_runs, no existing column touched, no wire change.) ALTER TABLE platform_apply_runs ADD COLUMN cordons_restored_at TIMESTAMPTZ, ADD COLUMN cordon_restore_attempted_at TIMESTAMPTZ, plus a backfill stamping every ALREADY-terminal run. The backfill is deliberate: those rows' cordoned_hosts may carry the pre-#170 mis-recording that read an already-offline host as one the run had cordoned, and sweeping them would lift an operator's own cordon. NUMBERING: authored as 0083, renumbered to 0084 because #185's migration landed first with that number. The down migration drops both columns; the loss is which runs still owe the fleet its scheduling back, so an unfinished cleanup is forgotten rather than retried -- uncordon by hand after rolling back.
   0085_evidence_gated_readiness.up.sql -- (evidence-gated readiness, amendment 11, #260, ADDITIVE in shape -- hosts gains readiness_block_host / readiness_block_homes, gpus gains readiness_blocked (all BOOLEAN NOT NULL DEFAULT false, so every existing row starts unblocked and no backfill is needed: the next readiness report computes the verdict), plus the new table host_readiness_overrides. NOT additive in MEANING: hosts.readiness stops being "never load-bearing" -- see the hosts table. No existing column, type or constraint changes. NUMBERING: pull/rebase before authoring; if another migration takes 0085 first, renumber and correct this line.)
   0086_gpu_codecs.up.sql -- (per-GPU codec sets, amendment 12, #296, PURELY ADDITIVE in shape -- one nullable column, no default, no backfill, no key change.) ALTER TABLE gpus ADD COLUMN codecs JSONB. What the agent reports for that GPU (agent-api.md `capacity.gpus[].codecs`), written wholesale with the GPU row. NULL MEANS "INHERIT hosts.codecs", never "encodes nothing": every row that exists when this runs is NULL, and every older agent keeps writing NULL, so the migration changes no placement or rung decision on its own -- a GPU's set narrows only once an amendment-aware agent reports one. NOT additive in MEANING elsewhere: hosts.codecs is reworded to the union over usable GPUs (the agent computes it; the column is unchanged), and control-api.md "Rung resolution" / "Admission control" read the placed GPU's set. The down migration drops the column; the loss is per-GPU codec knowledge, i.e. the host-level behaviour before this migration. NUMBERING: 0086 is the next free number on develop at authoring time; pull/rebase before authoring the migration, and if another migration takes 0086 first, renumber and correct this line. ROLLBACK, standing repo rule: once applied, never deploy a control-plane binary embedding only <= 0085.
+  0099_console_config_trim.up.sql -- (direct-display console, amendment 19, #453/#455, NOT ADDITIVE -- a data migration on an existing JSONB column, no DDL.) UPDATE console_config SET config = config - '{connector,mode,compositor,audio_output,stream,stream_audio,grab,auto_connect_controller,fullscreen}'::text[]. The nine retired console-config keys leave every stored row; the six remaining keys are untouched. The down migration is a no-op: the dropped values configured a display path that no longer exists, and every one of them had a default the old reader applied when absent.
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`

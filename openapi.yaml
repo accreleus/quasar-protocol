@@ -4717,6 +4717,7 @@ components:
         env: { type: object, additionalProperties: { type: string } }
         mounts: { type: array, items: { type: string } }
         gpu: { type: boolean }
+        direct_display: { type: boolean, description: "Amendment 19, optional (absent = false): the app's image can run as a console session, driving the host's display itself. Gates the console's default-app list and its console_default_app readiness check." }
     AppWrite:
       type: object
       required: [name]
@@ -8289,31 +8290,23 @@ components:
     # ─── console mode (CM-01) ────────────────────────────────────────────────────
     ConsoleConfig:
       type: object
-      description: "Per-host console-mode config. On PATCH the body is partial (any subset); on GET it is the resolved object. Off + local-only by default; audio_output has no default (null = quiet)."
+      description: >-
+        Per-host console-mode config. On PATCH the body is partial (any subset); on GET it is the
+        resolved object. Off by default. AMENDMENT 19 (#453/#455): trimmed to these six fields for
+        direct display; connector, mode, compositor, audio_output, stream, stream_audio, grab,
+        auto_connect_controller and fullscreen are retired. A PATCH naming any other key is
+        400 validation_failed; a stored key the server does not know is ignored on read.
       properties:
         enabled: { type: boolean }
-        connector: { type: string, description: "'auto' or a DRM connector name (DP-4, HDMI-A-1, …)." }
-        output_id: { type: [string, "null"], description: "Card-scoped DRM output id from capabilities.outputs; null selects automatic output." }
-        mode:
-          description: "Exact static physical mode for output_id; null selects the compositor preferred mode."
-          oneOf:
-            - { type: "null" }
-            - { $ref: "#/components/schemas/ConsoleModeSelection" }
-        compositor: { type: string, enum: [weston, cage] }
-        audio_output: { type: [string, "null"], description: "Local host sink id ('auto' | alsa hw id | hdmi | motherboard | usb:*), or null = no local audio." }
-        stream: { type: boolean, description: "Also stream over WebRTC (dual-output). Default false = local-only." }
-        stream_audio: { type: boolean }
+        output_id: { type: [string, "null"], description: "The output pick: a card-scoped DRM output id from capabilities.outputs (card0:DP-4), meaning this card, launch when this connector has a monitor. null = automatic (any connected output). Need not be connected at write time." }
         input_devices:
-          description: "'auto' or an explicit list of /dev/input/event* paths."
+          description: "'auto' (every input device) or an explicit list of /dev/input/event* paths: the allowlist passed into the console container."
           oneOf:
             - { type: string, enum: [auto] }
             - { type: array, items: { type: string } }
-        grab: { type: boolean }
         auto_start_on_display: { type: boolean }
-        auto_connect_controller: { type: boolean }
-        default_app: { type: [string, "null"], format: uuid }
+        default_app: { type: [string, "null"], format: uuid, description: "The app the console session runs. Offered from ConsoleConfigEnvelope.default_apps (runtime_spec.direct_display true); one without the key is accepted and reported by the console_default_app readiness check." }
         default_user: { type: [string, "null"], format: uuid, description: "CM-06: owner of auto-started console sessions (users.id). Required when auto_start_on_display=true." }
-        fullscreen: { type: boolean }
     ConsoleModeSelection:
       type: object
       required: [width, height, refresh_millihz]
@@ -8323,8 +8316,8 @@ components:
         refresh_millihz: { type: integer }
     ConsoleCapabilities:
       type: object
-      description: "What the host can do in console mode (from agent-api capacity.console_capabilities). Empty arrays if unreported."
-      required: [connectors, audio_sinks, input_devices]
+      description: "What the host can do in console mode (from agent-api capacity.console_capabilities). Empty arrays if unreported. Amendment 19: audio_sinks is no longer served."
+      required: [connectors, input_devices]
       properties:
         connectors:
           type: array
@@ -8333,14 +8326,6 @@ components:
           type: array
           description: "Typed per-card DRM connector and mode inventory. Additive; absent from older agents."
           items: { $ref: "#/components/schemas/DrmOutputCapability" }
-        audio_sinks:
-          type: array
-          items:
-            type: object
-            required: [id, label]
-            properties:
-              id: { type: string }
-              label: { type: string }
         input_devices:
           type: array
           items:
@@ -8392,10 +8377,24 @@ components:
         vtotal: { type: integer }
     ConsoleConfigEnvelope:
       type: object
-      required: [config, capabilities]
+      required: [config, capabilities, default_apps, readiness]
       properties:
         config: { $ref: "#/components/schemas/ConsoleConfig" }
         capabilities: { $ref: "#/components/schemas/ConsoleCapabilities" }
+        default_apps:
+          type: array
+          description: "Amendment 19: the enabled apps whose effective runtime_spec (a derived tile's parent's) declares direct_display true, ordered by name. The only apps the console page offers as default_app."
+          items: { $ref: "#/components/schemas/ConsoleDefaultApp" }
+        readiness:
+          type: array
+          description: "Amendment 19: console readiness checks the control plane evaluates (source operator, never blocks). Today exactly one, console_default_app: skip with no default app, pass when it declares direct_display, fail when it is gone, disabled or does not declare it. While not pass, no console session is auto-started."
+          items: { $ref: "#/components/schemas/ReadinessCheck" }
+    ConsoleDefaultApp:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
 
     # ─── session trace / diagnostic bundle (ST-06/ST-07) ─────────────────────────
     TraceSeriesPoint:

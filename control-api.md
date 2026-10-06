@@ -3626,9 +3626,9 @@ The session `stream` block gains:
   (`refresh_millihz` is the exact DRM timing). **Present once the control plane has seen a
   console sample for the session**; absent on every streamed session and before the first
   sample, so absence means "not a known local console", never "at the launch mode". Moves when
-  the app in the session picks another mode in its own display settings (the agent moves the
-  monitor and the compositor, the app keeps running); `width`/`height`/`fps` above stay the
-  launch mode. Same in-memory, restart-dropped cache and lifecycle as `external_width`. Not
+  the app in the session picks another mode in its own display settings (*amendment 19:* the
+  desktop drives the display itself and the agent reports the connector's current mode);
+  `width`/`height`/`fps` above stay the launch mode. Same in-memory, restart-dropped cache and lifecycle as `external_width`. Not
   settable through this API: the choice is the player's, made inside the session.
 
 ### `GET /v1/sessions/{id}/events` — session lifecycle push (SSE, 2026-08-02)
@@ -5920,6 +5920,18 @@ any override — the standalone lever for applying an already-persisted restart-
 > `enabled:true` on an owned host did nothing before this amendment; the first agent with it
 > finds `enabled` differing from its access and turns console mode on, which ends the host's
 > sessions once, with no separate confirmation.
+>
+> **Amendment 19 — console sessions drive the display directly (#453; ticket #455), signed off
+> by the operator on #453. It removes shapes.** `config` is trimmed to six fields (`enabled`,
+> `output_id`, `input_devices`, `auto_start_on_display`, `default_app`, `default_user`);
+> `connector`, `mode`, `compositor`, `audio_output`, `stream`, `stream_audio`, `grab`,
+> `auto_connect_controller` and `fullscreen` are retired, and a PATCH naming one is
+> `400 validation_failed`. `capabilities.audio_sinks` is dropped. The envelope gains two
+> fields: `default_apps`, the apps the default-app pick may name (those whose `runtime_spec`
+> declares `direct_display: true`), and `readiness`, the console readiness checks the control
+> plane evaluates (today `console_default_app`). A stored config's unknown keys are ignored on
+> read, so an upgrade never blocks on a console setting (`schema.md` `console_config`, migration
+> 0099). The agent-side console checks are in `agent-api.md` §`readiness`, "Console checks".
 
 ### `GET /v1/admin/hosts/{id}/console-config` — read a host's console config + capabilities (admin)
 `RequireAuth → RequireAdmin`. Returns the resolved config (defaults applied) plus the host's
@@ -5928,27 +5940,43 @@ latest reported capabilities so the UI can populate selectors.
 // 200
 {
   "config": {
-    "enabled": false, "connector": "auto", "compositor": "weston",
-    "output_id": null, "mode": null,
-    "audio_output": null, "stream": false, "stream_audio": false,
-    "input_devices": "auto", "grab": true,
-    "auto_start_on_display": false, "auto_connect_controller": false,
-    "default_app": null, "default_user": null, "fullscreen": true
+    "enabled": true, "output_id": "card0:DP-4", "input_devices": "auto",
+    "auto_start_on_display": true,
+    "default_app": "6f1c…", "default_user": "0b2e…"
   },
   "capabilities": {
     "connectors": ["DP-4", "HDMI-A-1"],
-    "audio_sinks": [ { "id": "hw:1,3", "label": "GPU HDA (DP-4)" }, { "id": "hw:0,0", "label": "Motherboard" } ],
+    "outputs": [ { "id": "card0:DP-4", "card": "card0", "render_node": "/dev/dri/renderD128",
+                   "connector": "DP-4", "connected": true, "active_mode": null, "modes": [] } ],
     "input_devices": [ { "path": "/dev/input/event4", "label": "Keyboard" }, { "path": "/dev/input/event5", "label": "Mouse" } ]
-  }
+  },
+  "default_apps": [ { "id": "6f1c…", "name": "KDE Plasma" }, { "id": "9a07…", "name": "Steam" } ],
+  "readiness": [
+    { "id": "console_default_app", "status": "pass", "source": "operator",
+      "summary": "KDE Plasma can run direct on this host's display.", "remediation": "" }
+  ]
 }
 ```
 - **`config`** — the resolved console-config object (`schema.md`): every field with its
-  override-or-default value. Console-mode is **off** (`enabled:false`) and **local-only**
-  (`stream:false`) by default; **`audio_output` has no default** (`null` ⇒ no local audio
-  until an admin picks a sink — fail-safe/quiet).
+  override-or-default value. Console mode is **off** (`enabled:false`) by default, `output_id`
+  `null` is automatic, and `input_devices` `"auto"` passes every input device. A stored key the
+  control plane does not know (a retired one, amendment 19) is ignored, never an error.
 - **`capabilities`** — the host's latest `console_capabilities` report (`agent-api.md`
   `capacity`); empty arrays if the agent hasn't reported (older/offline agent) — the UI then
-  offers only `auto`.
+  offers only automatic. *(Amendment 19)* `audio_sinks` is no longer served; the desktop picks
+  its own audio output.
+- **`default_apps`** *(amendment 19)* — `[{id, name}]`, ordered by name: the enabled apps whose
+  effective `runtime_spec` (a derived tile's parent's) declares `direct_display: true`. These
+  are the only apps the console page offers as the default app. Empty when there are none.
+- **`readiness`** *(amendment 19)* — the console readiness checks the control plane evaluates,
+  in the `ReadinessCheck` shape of a host's readiness report, with `source: "operator"` and
+  never `blocks`. Today it holds exactly one, **`console_default_app`**: `skip` when no default
+  app is set; `pass` when the default app declares `direct_display`; `fail` when the app is gone,
+  disabled, or does not declare it, with a `summary` that names the app and says it cannot run
+  direct, and a `remediation` that says to pick an app from `default_apps`. While it is not
+  `pass`, the control plane does **not** auto-start a console session: the check is the
+  explanation, and no launch is attempted. The agent's own console checks (the grants direct
+  display needs) stay in the host's readiness report (`agent-api.md` §`readiness`).
 - **`capabilities.access`** *(amendment 18, optional)* — the agent's latest console access
   report, passed through as sent (`agent-api.md` `capacity.console_capabilities.access`).
   Absent when the agent reports none. When present, `config.enabled` is the admin's wish and
@@ -5960,20 +5988,22 @@ latest reported capabilities so the UI can populate selectors.
 
 ### `PATCH /v1/admin/hosts/{id}/console-config` — update a host's console config (admin)
 `RequireAuth → RequireAdmin`. Partial/sparse update; only present keys change; `null` clears a
-key to its default (except `audio_output`/`default_app`, where `null` is the meaningful
-"unset/quiet/no-app" value).
+key to its default (for `output_id`, `default_app` and `default_user` the default is `null`:
+automatic, no app, no owner).
 ```json
 // request — partial
-{ "enabled": true, "connector": "DP-4", "compositor": "cage",
-  "audio_output": "hw:1,3", "default_app": "<uuid>" }
-// 200 — same shape as GET (resolved config + capabilities)
+{ "enabled": true, "output_id": "card0:DP-4", "default_app": "<uuid>" }
+// 200 — same shape as GET (resolved config + capabilities + default_apps + readiness)
 ```
-- **Validation.** `compositor` ∈ `{weston, cage}`; `connector`/`audio_output`/`input_devices`
-  validated against the host's reported `console_capabilities` (unless `auto`/`null`);
-  `default_app` FK-checked against `apps(id)`; `default_user` FK-checked against
-  `users(id)` (CM-06 — the owner of auto-started console sessions; required when
-  `auto_start_on_display` is true). Bad value → `400 validation_failed`.
-  `enabled:true` with `audio_output:null` is valid (console runs quiet).
+- **Validation.** `enabled` and `auto_start_on_display` are booleans; `output_id` must name an
+  output in the host's reported `capabilities.outputs` (it need not be connected: it means
+  "launch when this connector has a monitor"); `input_devices` is `"auto"` or a list validated
+  against the reported input devices (when any are reported); `default_app` FK-checked against
+  `apps(id)`; `default_user` FK-checked against `users(id)` (CM-06 — the owner of auto-started
+  console sessions; required when `auto_start_on_display` is true). Any other key, a retired one
+  included, and any bad value → `400 validation_failed`. A `default_app` that exists but does
+  not declare `direct_display` is accepted and reported by the `console_default_app` check
+  rather than refused, so the reason is visible in one place.
 - **Persist + push.** Upserts `console_config.config`, stamps `updated_by`, and **pushes the
   resolved `console_config` to the agent immediately** via `config_update` (`agent-api.md`).
   Takes effect on the next session build; the agent re-arms its hotplug watcher live. **No
@@ -5999,8 +6029,8 @@ key to its default (except `audio_output`/`default_app`, where `null` is the mea
   usual. It records the handled `request_id` with the stored report and **acts at most once
   per `request_id`**, so a report the agent repeats (every `capacity` carries the current
   `access`) never undoes an admin's later "try again", which is an ordinary PATCH.
-- **Errors:** `404 not_found` — no such host; `400 validation_failed` — bad enum / unknown
-  device / unknown `default_app`; `409 conflict` — the two console access refusals above; `403`
+- **Errors:** `404 not_found` — no such host; `400 validation_failed` — unknown or retired key /
+  bad type / unreported output or device / unknown `default_app` or `default_user`; `409 conflict` — the two console access refusals above; `403`
   for non-admin.
 
 ---

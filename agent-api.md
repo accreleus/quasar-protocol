@@ -271,6 +271,28 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > or source install, or an agent that predates the amendment) omits `access`, and everything
 > reads as before. See `control-api.md` §Console mode for what the control plane does with it.
 
+> **Amendment 19 — console sessions drive the display directly (#453; ticket #455), signed off
+> by the operator on #453 (2026-10-05). It removes shapes, so it is not additive.** A console
+> session's desktop owns the host's screen itself: the agent hands its container the card
+> node, the input devices, the sound device and the udev event stream, and puts no compositor,
+> pipeline or display server of its own in the path (`CONTEXT.md` "Console session", "Direct
+> display", "Displaying"; ADR 0009 in the quasar repository). The wire changes in five places.
+> **(1)** `session_assign.video_topology` loses `dual_output`. `stream_only` and `local_only`
+> remain, and a `local_only` session is its app container alone (§`session_assign`).
+> **(2)** `config_update.console_config` is trimmed to six fields: `enabled`, `output_id`,
+> `input_devices`, `auto_start_on_display`, `default_app` and `default_user`. `connector`,
+> `mode`, `compositor`, `audio_output`, `stream`, `stream_audio`, `grab`,
+> `auto_connect_controller` and `fullscreen` are retired, and a receiver ignores any key it
+> does not know (§`config_update`). **(3)** `capacity.console_capabilities` keeps `connectors`,
+> the typed DRM `outputs` and `input_devices`, and drops `audio_sinks`: the desktop picks its
+> own audio output (§`capacity`). **(4)** The console readiness checks are redefined for
+> direct display (§`readiness`, "Console checks"). **(5)** The `app` object gains one optional
+> key, `direct_display` (§`session_assign`). **Compatibility:** the control plane moves first
+> (ADR 0002). It never sends `dual_output` or a retired key, and it ignores an `audio_sinks`
+> array from an older agent. An older agent reads the trimmed `console_config` with its own
+> defaults for the missing keys. An agent with this amendment may refuse a `dual_output`
+> assignment with `ack{ok:false}`.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -563,10 +585,6 @@ the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
   ],
   "console_capabilities": {
     "connectors": ["DP-4", "HDMI-A-1"],
-    "audio_sinks": [
-      { "id": "hw:1,3", "label": "GPU HDA (DP-4)" },
-      { "id": "hw:0,0", "label": "Motherboard" }
-    ],
     "input_devices": [
       { "path": "/dev/input/event4", "label": "Keyboard" },
       { "path": "/dev/input/event5", "label": "Mouse" }
@@ -575,9 +593,11 @@ the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
 }
 ```
 `console_capabilities` *(NEW, CM-01, optional, additive)* enumerates what the host can do in
-console mode — DRM display connectors, host audio sinks (ALSA/pipewire), and physical input
-devices — so the admin console-config UI can populate its selectors instead of guessing device
-paths. It rides `capacity` because these are **hardware/topology** facts: the agent re-sends
+console mode — DRM display connectors (with the typed `outputs` inventory, §`config_update`) and
+physical input devices — so the admin console-config UI can populate its selectors instead of
+guessing device paths. *(Amendment 19)* `audio_sinks` is retired: a console desktop picks its
+own audio output from the sound device it is given. An agent with the amendment omits it, and the
+control plane ignores it from an older agent. It rides `capacity` because these are **hardware/topology** facts: the agent re-sends
 `capacity` when topology changes (e.g. a display hotplug), keeping the UI's lists fresh. Absent
 ⇒ the control plane reports empty capability arrays and the UI offers only `auto`. The control
 plane stores the latest report and returns it in `GET /v1/admin/hosts/{id}/console-config`.
@@ -900,7 +920,30 @@ and renaming one later needs no amendment. Each uses only the existing statuses,
 | `engine_healthchecks` | new | on Podman, the engine can run container health checks (rootless: a systemd user session for the Quasar user; rootful: systemd as init). `fail` names the fix. `skip` on Docker. |
 | `media_reachability` | existing id, **new method** | evidence from **real media-path traffic** replaces the reading of host firewall rules, in every engine mode, and needs no new message. The traffic must **originate off the host** and arrive at one of the host's own ICE candidates: a remote WebRTC peer's connectivity checks, observed during a real session over the existing signaling relay. Traffic the host sends to itself (loopback, its own address, a container on the same host) never crosses the host firewall and proves nothing. `source` is `runtime`. `pass` means a remote peer reached this host; behind a stateful firewall its checks may have been let in as replies to the host's own, so the `summary` must not claim the media port range is open. `fail` only when the remote peer's candidates were received over signaling, ICE ran to failure, and no connectivity check from that peer arrived at any host candidate; it carries the firewall fix for the media port range. A session that ended before ICE finished, or one that connected through any candidate, is inconclusive for `fail`. Before any such session, or when a result is inconclusive, the last definitive result or `unknown`, per the amendment 11 rule above — **never `warn`**. Never `blocks`, as before. |
 | `xid_visibility` | existing | an **optional diagnostic**: `skip` under the clarification above when the host keeps the kernel log restricted and the agent was not given access to it. |
-| `console_display`, `console_audio`, `console_ddc` | new | console mode's local display, local audio (the host's PipeWire when one runs, otherwise ALSA) and monitor control, reported always; `skip` while console mode is off for the host. A display another process holds is `fail`, naming it. Never `blocks` a streamed session. |
+| `console_card`, `console_input`, `console_sound`, `console_terminal`, `console_udev`, `console_ddc` | redefined by amendment 19 | console mode's grants for direct display; see "Console checks" below. (Before amendment 19 the console row was `console_display`, `console_audio` and `console_ddc`, for the retired local-display path.) |
+
+**Console checks (amendment 19, informative).** A console session's container is given the
+console GPU's card node, the allowed input devices (the whole input directory, with a
+device-cgroup rule for the input major so a device plugged in later opens), the sound device and
+the host's udev data and control socket; the agent itself holds the console's virtual terminal.
+What the agent cannot grant is a readiness check that names the missing grant, so a
+half-configured host explains itself instead of failing a launch. Like every check id these are
+the agent's to choose; they are recorded so tickets and consoles agree on vocabulary.
+
+| id | what it reports |
+|---|---|
+| `console_card` | the agent can pass the console GPU's card node to the console container, and no other process holds DRM master on it (a holder is `fail`, naming it). |
+| `console_input` | the allowed input devices, and the input directory with its device-cgroup rule, can be passed in. |
+| `console_sound` | the host's sound device can be passed in. |
+| `console_terminal` | the agent can hold the console's virtual terminal in graphics mode for the session's life. |
+| `console_udev` | the host's udev data and control socket can be passed in, so hotplugged monitors and input devices reach the desktop. |
+| `console_ddc` | monitor power control over DDC, which tells a powered-off monitor from an unplugged one. Optional: `skip` when the host was not prepared to grant the i2c nodes (amendment 17's clarification of `skip`). |
+
+All of them report `skip` while console mode is off for the host, and none carries `blocks`: they
+never affect a streamed session, and the agent refuses a console launch itself when a grant is
+missing. The default app's ability to run direct is a seventh console check, but the **control
+plane** evaluates it, because only the control plane knows the app's `runtime_spec`; it is served
+with the console config (`control-api.md` §Console mode), not reported here.
 
 ### `heartbeat` — liveness + live utilization
 ```json
@@ -1196,7 +1239,9 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   `Session.stream.console_mode` (`control-api.md`); `session_assign.stream` keeps the launch
   mode and never changes. The host side needs no new downstream message: the request
   reaches the agent from inside the session (the compositor's `wlr-output-management`), so
-  this is the whole wire delta.
+  this is the whole wire delta. *(Amendment 19)* Under direct display the desktop sets the mode
+  itself and the agent moves nothing: `console_mode` is the console connector's current mode,
+  read by the agent and reported as a read-only fact, with the same presence rule.
 - **(approved 2026-08-17) `abr_floor_kbps`** *(number, optional)* — the ABR governor's
   **current** lower bound in kbit/s, when the adaptation ladder has moved it off the floor
   the session launched with. **Present only when ≠ the launch floor**; absent therefore
@@ -1622,13 +1667,27 @@ budget the control plane reserved). `gpu_index` maps to the agent's local GPU en
 `video_topology` is an additive per-session output plan:
 
 - `stream_only` (default when omitted): encode plus WebRTC; no local display output.
-- `local_only`: local display/audio/input only; the control plane reserves zero encode slots
-  and creates no signaling token, and the agent must not construct an encoder, RTP, WebRTC, or
-  streamed-audio pipeline.
-- `dual_output`: local display plus the normal WebRTC stream from the same source.
+- `local_only`: a **console session** *(amendment 19)*. The app container is the whole session:
+  its desktop drives the host's display directly, with the card node, input devices, sound
+  device and udev event stream the agent grants it. The control plane reserves zero encode slots
+  and creates no signaling token, and the agent builds no compositor, encoder, RTP, WebRTC or
+  audio pipeline for it. The app must declare `direct_display` (below); the agent refuses a
+  `local_only` assignment whose `app` does not, with `ack{ok:false}`.
+
+`dual_output` (local display plus a WebRTC stream from the same source) is **retired by
+amendment 19**: a console session is never streamed. A control plane never sends it; an agent
+may refuse it with `ack{ok:false}`.
 
 The field is assignment-scoped. `console_config.enabled` advertises/configures host console
-capability but does not by itself mirror ordinary browser sessions to a physical display.
+capability but does not by itself put ordinary browser sessions on a physical display.
+
+> *(amendment 19, additive)* The `app` object may carry an optional **`direct_display`: bool**
+> (omitted ⇒ `false`), copied from `apps.runtime_spec.direct_display`: the app's image can run
+> as a console session, driving the display itself. The agent sets one variable on a console
+> container that puts the image's launcher into direct mode; an image without the key only
+> knows the nested, streamed entry. The control plane offers only apps with the key as a
+> console's default app, and reports a default app without it as a failed console readiness
+> check rather than launching it (`control-api.md` §Console mode).
 
 > *(AS10-04, additive)* The `stream` block may carry an optional **`abr_floor_kbps`: int**
 > (kbit/s, omitted ⇒ `0`). When the session was launched from a stream profile (AS10-01) the
@@ -1710,8 +1769,10 @@ capability but does not by itself mirror ordinary browser sessions to a physical
 ```
 The agent realizes the assigned `video_topology`, then reports
 `session_state: starting` → `running`. Once `running`, the agent's `webrtcbin` is the offerer and
-the signaling relay (below) can carry the offer to the client for `stream_only`/`dual_output`.
-For `local_only`, `running` means the local display pipeline reached PLAYING; no offer is emitted.
+the signaling relay (below) can carry the offer to the client for `stream_only`.
+For `local_only`, `running` means the console session is **displaying** *(amendment 19)*: its
+container is alive, its desktop holds the display on the console card, and a frame is on screen.
+A still desktop is displaying. No offer is emitted.
 
 ### `session_stop` — teardown + release
 ```json
@@ -1987,28 +2048,39 @@ The control plane sends `config_update`:
     "gop": 120
   },
   "console_config": {
-    "enabled": true, "connector": "DP-4", "compositor": "weston",
+    "enabled": true,
     "output_id": "card0:DP-4",
-    "mode": {"width": 3840, "height": 2160, "refresh_millihz": 119879},
-    "audio_output": "hw:1,3", "stream": false, "stream_audio": false,
-    "input_devices": "auto", "grab": true,
-    "auto_start_on_display": false, "auto_connect_controller": false,
-    "default_app": "<uuid|null>", "fullscreen": true
+    "input_devices": "auto",
+    "auto_start_on_display": true,
+    "default_app": "<uuid|null>",
+    "default_user": "<uuid|null>"
   }
 }
 ```
-- **`console_config`** *(NEW, CM-01, optional, additive)* is the host's resolved console-mode
-  configuration (`schema.md` `console_config`; `control-api.md`
+- **`console_config`** *(NEW, CM-01, optional, additive; trimmed by amendment 19)* is the host's
+  resolved console-mode configuration (`schema.md` `console_config`; `control-api.md`
   `PATCH /v1/admin/hosts/{id}/console-config`). **Absent ⇒ console mode disabled** — an agent
   that never receives it behaves exactly as today. The node-agent reads this block **instead of**
   the spike's `QUASAR_LOCAL_DISPLAY` env hardcode (env retained as a dev/bootstrap fallback only).
   Unlike `settings`, `console_config` is the **full resolved object** (not sparse) — the control
   plane applies defaults before sending. It is **not restart-class**: it applies on the next
-  session build, and live changes to `auto_start_on_display`/`auto_connect_controller` re-arm the
-  agent's hotplug watcher on receipt — no agent restart. `stream:false` (local-only) means the
-  session's encode/`webrtcbin` leg is simply not built.
-  `output_id` and `mode` are configured together and must exactly match the latest typed DRM
-  inventory. The agent writes a session-owned Weston config selecting that connector and timing.
+  session build, and a live change to `auto_start_on_display` re-arms the agent's hotplug
+  watcher on receipt — no agent restart. The six fields:
+  - `enabled` — console mode on for this host.
+  - `output_id` — the output pick: a card-scoped id from `capacity.console_capabilities.outputs`
+    (`card0:DP-4`), meaning "this card, and launch when this connector has a monitor"; `null`
+    is automatic (any connected output). The desktop picks the mode itself.
+  - `input_devices` — `"auto"` (every input device) or an explicit list of `/dev/input/event*`
+    paths: the allowlist of devices passed into the console container.
+  - `auto_start_on_display` — launch the console session when the output has a monitor.
+  - `default_app` — the app the console session runs (`apps.id`, or `null`).
+  - `default_user` — the owner of auto-started console sessions (`users.id`, or `null`); the
+    agent does not act on it.
+
+  *(Amendment 19)* `connector`, `mode`, `compositor`, `audio_output`, `stream`, `stream_audio`,
+  `grab`, `auto_connect_controller` and `fullscreen` are retired: the desktop owns its mode,
+  audio output and input, and a console session is never streamed. **The agent ignores any key
+  it does not know**, so a retired key from an older control plane is harmless.
 - **`capacity.console_capabilities.outputs`** *(Wave 3.2, optional, additive)* is the typed DRM
   inventory. Each output is card-scoped (`id`, `card`, associated `render_node`, connector and
   connection state) and contains exact DRM mode timing identity (`width`, `height`, integer
