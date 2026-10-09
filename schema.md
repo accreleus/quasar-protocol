@@ -1847,7 +1847,8 @@ happens.** The backfill makes the day-one behaviour change exactly zero.
 An entitlement mode an admin asked for (`control-api.md` §Provider entitlement mode, `202`)
 before the provider app existed. `EnsureProviderApp` reads and deletes the row in the
 transaction that creates the app, and writes the mode's grants in place of the `all` grant.
-No row means `all`, as before this amendment.
+`POST`/`PATCH /v1/apps` making the provider app by hand consume it the same way, under the same
+per-provider lock. No row means `all`, as before this amendment.
 
 | column | type | notes |
 |---|---|---|

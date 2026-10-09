@@ -4887,7 +4887,10 @@ components:
           enum: [all, none]
           default: all
           description: >-
-            Steam library discovery Phase 2, OPTIONAL and CREATE-ONLY. "all" (the default, and
+            Steam library discovery Phase 2, OPTIONAL and CREATE-ONLY. Amendment 21: with
+            library_provider set and entitle absent, a mode stored for that provider before its
+            app existed replaces the default; an explicit entitle wins and drops it.
+            "all" (the default, and
             what an absent field means) creates the app with an ('all', granted_by='admin')
             entitlement, so it is immediately visible to everyone - i.e. EXACTLY the
             pre-entitlements behaviour of creating an app. "none" creates it entitled to nobody,

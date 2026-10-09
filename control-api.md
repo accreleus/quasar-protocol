@@ -2332,6 +2332,9 @@ fuzzy title matcher on the next sweep.
   entitlement-filtered, a newly created app is invisible until something entitles it — so without
   a default grant, *"I made an app and nobody can see it"* becomes the **default** experience. It
   is the same failure as an un-backfilled migration (`schema.md`), one app at a time.
+- *(Amendment 21)* With `library_provider` set and `entitle` absent, a mode stored for that
+  provider before its app existed replaces the default `all` (§Provider entitlement mode). An
+  explicit `entitle` wins and drops the stored mode.
 - **CREATE-ONLY.** `entitle` is not accepted on `PATCH /v1/apps/{id}`; sending it there is
   `400 validation_failed` (`crud.decodeJSON` sets `DisallowUnknownFields()`). It describes how an
   app is *born*, not a property it carries — after creation, access is edited through the
@@ -6582,7 +6585,8 @@ is `409` with no transition. Other jobs and older agents retain this shape.
 > provider app exists yet but the image catalog names the provider, this route stores the
 > requested mode and answers `202` with `pending_entitlement_mode` instead of `404`.
 > `EnsureProviderApp` grants a stored mode in place of `all` when it creates the app, then
-> deletes it. With nothing stored the create still grants `all`, so a client that never calls
+> deletes it; so does `POST`/`PATCH /v1/apps` when an admin makes the provider app by hand,
+> unless `POST` carries an explicit `entitle`. With nothing stored the create still grants `all`, so a client that never calls
 > this route sees what it saw before. `404` now means only that neither an app nor a catalog
 > image claims the provider. Backed by `openapi.yaml` (the `202`) and `schema.md`
 > `pending_provider_entitlement_modes` (migration 0100).
@@ -6641,6 +6645,11 @@ the **provider name**, and applies the whole desired state atomically, server-si
   the app applies at once (`200`) and drops any stored mode. The route and the create take the
   same per-provider lock, so a create cannot land between the existence check and the store.
   The caller does not retry a `202`.
+- *(Amendment 21)* **A provider app made by hand consumes a stored mode too**, under the same
+  lock. `POST /v1/apps` with `library_provider` and no `entitle` grants the stored mode in place
+  of the default `all`; an explicit `entitle` wins and drops the stored mode. `PATCH
+  /v1/apps/{id}` that sets `library_provider` replaces the app's entitlements with a stored
+  mode, as this route would on an existing app; with none stored it leaves them alone.
 - `404 not_found` only when neither an app nor an `image_catalog` entry claims the provider.
 - **This is a MODE, not an incremental grant — it REPLACES the app's entire entitlement set.**
   `"all"` writes exactly one `('all', NULL)` row; `"user"` writes exactly one `('user', <the
