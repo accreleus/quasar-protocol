@@ -4961,7 +4961,11 @@ presentation only** and borrows **everything executable** from its parent at lau
 > own `granted_by='provider'` rows are not touched, and discovery keeps scanning the homes of
 > users not entitled to the parent, so their tiles are current when access returns. The refusals
 > are the existing ones: absent from the list, `404` on read, `403 forbidden` on favourite,
-> launch and swap. It also adds `409 provider_enabled` to `DELETE /v1/apps/{id}` (§Library).
+> launch and swap. An entitlement change, including this parent rule, gates new launches, swaps
+> and visibility only: a session already running, and reconnects to it through
+> `POST /v1/sessions/{id}/signaling-token`, are not ended by it; an admin stops such a session
+> from the session console (`DELETE /v1/sessions/{id}`).
+> It also adds `409 provider_enabled` to `DELETE /v1/apps/{id}` (§Library).
 > Turning library discovery on after the provider app's `library_provider` was cleared still
 > creates a fresh provider app open to `all`; the restriction stays on the cleared app. Backed by
 > `openapi.yaml` (the `DELETE` `409`); no `schema.md` shape change, no migration.
