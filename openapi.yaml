@@ -990,15 +990,21 @@ paths:
         name but not the app id - EnsureProviderApp creates the app off the request thread, as a
         side effect of PATCH /v1/admin/settings library_discovery_enabled false->true, so there
         is no response carrying an app_id to key the generic entitlements routes against.
-        404 not_found when no app exists yet with this library_provider (not enabled yet, or the
-        async create has not landed) - the wizard's answer is "try again shortly", not a retry
-        loop hidden here. Written to the admin activity log as app.entitlement.set_mode.
+        Amendment 21 (#490): when no app exists yet but an image_catalog entry claims the
+        provider (not enabled yet, or the async create has not landed), the mode is stored and
+        the answer is 202 with pending_entitlement_mode. EnsureProviderApp applies a stored mode
+        in place of its 'all' grant when it creates the app, then deletes it; a later call
+        replaces a stored mode, and a call that finds the app applies at once and drops any
+        stored one. 404 not_found only when neither an app nor a catalog entry claims the
+        provider. Written to the admin activity log as app.entitlement.set_mode (a stored mode
+        has target_type library_provider and details.pending true).
       x-required-role: admin
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/ProviderEntitlementModeSet" } } }
       responses:
         "200": { description: Mode applied., content: { application/json: { schema: { $ref: "#/components/schemas/ProviderEntitlementModeEnvelope" } } } }
+        "202": { description: "Amendment 21. No provider app yet; the mode is stored and applied when the app is created.", content: { application/json: { schema: { $ref: "#/components/schemas/ProviderEntitlementModePendingEnvelope" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -5019,6 +5025,20 @@ components:
             items:
               type: array
               items: { $ref: "#/components/schemas/Entitlement" }
+    ProviderEntitlementModePendingEnvelope:
+      type: object
+      description: >-
+        Amendment 21 (#490). The 202 body of POST .../library-providers/{provider}/entitlement-mode:
+        the mode is stored and EnsureProviderApp grants it when it creates the provider app.
+        There is no app_id or items yet.
+      required: [pending_entitlement_mode]
+      properties:
+        pending_entitlement_mode:
+          type: object
+          required: [provider, mode]
+          properties:
+            provider: { type: string, description: "Echoes the path parameter, normalized." }
+            mode: { $ref: "#/components/schemas/ProviderEntitlementMode" }
 
     HomeSeedOutcome:
       type: object

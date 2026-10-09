@@ -6576,6 +6576,16 @@ is `409` with no transition. Other jobs and older agents retain this shape.
 > `POST /v1/admin/library-providers/{provider}/entitlement-mode`. No existing shape, status
 > code, endpoint or behaviour changes; a client that has never heard of this route sees `all`
 > forever, exactly like today.
+>
+> **Amendment 21 — a mode requested before the provider app exists is kept (#490, part of
+> #484), signed off by the operator on #484 (2026-10-09). It changes a status code.** When no
+> provider app exists yet but the image catalog names the provider, this route stores the
+> requested mode and answers `202` with `pending_entitlement_mode` instead of `404`.
+> `EnsureProviderApp` grants a stored mode in place of `all` when it creates the app, then
+> deletes it. With nothing stored the create still grants `all`, so a client that never calls
+> this route sees what it saw before. `404` now means only that neither an app nor a catalog
+> image claims the provider. Backed by `openapi.yaml` (the `202`) and `schema.md`
+> `pending_provider_entitlement_modes` (migration 0100).
 
 **The gap.** `EnsureProviderApp` (`control-plane/internal/images/provider_app.go`) grants
 `subject_type='all'` unconditionally on create — the setup wizard's Libraries step
@@ -6612,16 +6622,26 @@ the **provider name**, and applies the whole desired state atomically, server-si
 { "entitlement_mode": {
     "provider": "steam", "app_id": "<uuid>", "mode": "user",
     "items": [ { "subject_type": "user", "subject_id": "<uuid>", ... } ] } }
+// 202 (amendment 21): no provider app yet, mode stored
+{ "pending_entitlement_mode": { "provider": "steam", "mode": "user" } }
 ```
 - `mode` is `"all" | "user" | "none"` (`ProviderEntitlementMode`, `openapi.yaml`), the same
   vocabulary the server already carries internally (`images.EntitlementMode`). Any other value
   is `400 validation_failed`.
 - **`{provider}` is a `library_provider` name (e.g. `"steam"`), not an app id** — matched
-  case-insensitively, mirroring `EnsureProviderApp`'s own lower-casing. `404 not_found` when no
-  app exists yet with that `library_provider`: not enabled yet, or `EnsureLibraryProviders`'s
-  async pass has not landed. The caller's answer to a `404` here is "try again shortly" (or
-  point the operator at **Admin → Apps**, where the generic surface already reaches every
-  provider app once it exists) — this route does not retry internally.
+  case-insensitively, mirroring `EnsureProviderApp`'s own lower-casing.
+- *(Amendment 21)* **No app yet: `202`, and the mode is kept.** When no app exists with that
+  `library_provider` (not enabled yet, or `EnsureLibraryProviders`'s async pass has not landed)
+  but an `image_catalog` entry claims it, the mode is stored with the acting admin and the time
+  (`schema.md` `pending_provider_entitlement_modes`) and the answer is `202`
+  `pending_entitlement_mode`. When `EnsureProviderApp` creates the app it writes the stored
+  mode's grants instead of `all`, as that admin (`"user"` entitles them; if their account was
+  deleted meanwhile, nobody — never everyone), and deletes the stored row in the same
+  transaction. A later call before the app exists replaces the stored mode; a call that finds
+  the app applies at once (`200`) and drops any stored mode. The route and the create take the
+  same per-provider lock, so a create cannot land between the existence check and the store.
+  The caller does not retry a `202`.
+- `404 not_found` only when neither an app nor an `image_catalog` entry claims the provider.
 - **This is a MODE, not an incremental grant — it REPLACES the app's entire entitlement set.**
   `"all"` writes exactly one `('all', NULL)` row; `"user"` writes exactly one `('user', <the
   acting admin>)` row — **there is no `subject_id` field; "user" always means the caller**,
@@ -6634,13 +6654,17 @@ the **provider name**, and applies the whole desired state atomically, server-si
 - Grants are written `granted_by: 'admin'`, `granted_by_user: <acting admin>` — same provenance
   rule as the generic grant route. Written to `GET /v1/admin/activity` as
   `app.entitlement.set_mode` (`provider`, `mode`, `item_count` — no subject values, same
-  4096-byte-`details` discipline as every other admin mutation).
+  4096-byte-`details` discipline as every other admin mutation). *(Amendment 21)* A stored mode
+  is recorded under the same action with `target_type` `library_provider`, `target_id` the
+  provider, and `details` `provider`, `mode`, `pending: true`. The later apply at create is
+  not a separate activity entry; its grants carry `granted_by_user`.
 - `app_id` in the response is deliberately included so a caller that wants finer-grained control
   afterward (add one more specific user) can immediately use the generic entitlements routes
   without a second lookup.
 
 No `schema.md` change (writes the existing `entitlements` table, same shape as every other
-writer of it), no `agent-api.md` change, no new column.
+writer of it), no `agent-api.md` change, no new column. *(Amendment 21 adds one table,
+`pending_provider_entitlement_modes`, migration 0100; `agent-api.md` is still untouched.)*
 
 ---
 

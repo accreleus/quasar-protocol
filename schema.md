@@ -1841,6 +1841,21 @@ block at the top of this document; the one-line version is that **filtering an e
 every user's library on every deployment at once, and every automated gate passes while it
 happens.** The backfill makes the day-one behaviour change exactly zero.
 
+## `pending_provider_entitlement_modes` (amendment 21, #490, migration 0100)
+> *Signed off by the operator on #484 (2026-10-09). A new table; no existing table changes.*
+
+An entitlement mode an admin asked for (`control-api.md` §Provider entitlement mode, `202`)
+before the provider app existed. `EnsureProviderApp` reads and deletes the row in the
+transaction that creates the app, and writes the mode's grants in place of the `all` grant.
+No row means `all`, as before this amendment.
+
+| column | type | notes |
+|---|---|---|
+| `provider` | `TEXT` PRIMARY KEY | the `library_provider` name, lower-cased and trimmed as `EnsureProviderApp` keys it. One request per provider; a later one replaces it. No CHECK on the name: the route stores only a provider an `image_catalog` entry claims. |
+| `mode` | `TEXT` NOT NULL | `CHECK (mode IN ('all','user','none'))`, the route's `ProviderEntitlementMode`. |
+| `requested_by` | `UUID` NULL → `users(id)` **ON DELETE SET NULL** | the acting admin. Grants are written `granted_by: 'admin'`, `granted_by_user` this. **`SET NULL`, never `CASCADE`**: a cascade would delete the request and the app would be created open to everyone. A `'user'` row whose requester is gone grants nobody. |
+| `requested_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | when it was asked for; refreshed when replaced. |
+
 ## `library_scans` (Steam library discovery Phase 4)
 > *Migration 0045. New table; changes nothing existing. One row per (user, provider app, host)
 > scan job. **This is the table that lets the agent never learn a user:** the pull payload carries
@@ -2408,6 +2423,7 @@ control-plane/migrations/
   0085_evidence_gated_readiness.up.sql -- (evidence-gated readiness, amendment 11, #260, ADDITIVE in shape -- hosts gains readiness_block_host / readiness_block_homes, gpus gains readiness_blocked (all BOOLEAN NOT NULL DEFAULT false, so every existing row starts unblocked and no backfill is needed: the next readiness report computes the verdict), plus the new table host_readiness_overrides. NOT additive in MEANING: hosts.readiness stops being "never load-bearing" -- see the hosts table. No existing column, type or constraint changes. NUMBERING: pull/rebase before authoring; if another migration takes 0085 first, renumber and correct this line.)
   0086_gpu_codecs.up.sql -- (per-GPU codec sets, amendment 12, #296, PURELY ADDITIVE in shape -- one nullable column, no default, no backfill, no key change.) ALTER TABLE gpus ADD COLUMN codecs JSONB. What the agent reports for that GPU (agent-api.md `capacity.gpus[].codecs`), written wholesale with the GPU row. NULL MEANS "INHERIT hosts.codecs", never "encodes nothing": every row that exists when this runs is NULL, and every older agent keeps writing NULL, so the migration changes no placement or rung decision on its own -- a GPU's set narrows only once an amendment-aware agent reports one. NOT additive in MEANING elsewhere: hosts.codecs is reworded to the union over usable GPUs (the agent computes it; the column is unchanged), and control-api.md "Rung resolution" / "Admission control" read the placed GPU's set. The down migration drops the column; the loss is per-GPU codec knowledge, i.e. the host-level behaviour before this migration. NUMBERING: 0086 is the next free number on develop at authoring time; pull/rebase before authoring the migration, and if another migration takes 0086 first, renumber and correct this line. ROLLBACK, standing repo rule: once applied, never deploy a control-plane binary embedding only <= 0085.
   0099_console_config_trim.up.sql -- (direct-display console, amendment 19, #453/#455, NOT ADDITIVE -- a data migration on an existing JSONB column, no DDL.) UPDATE console_config SET config = config - '{connector,mode,compositor,audio_output,stream,stream_audio,grab,auto_connect_controller,fullscreen}'::text[]. The nine retired console-config keys leave every stored row; the six remaining keys are untouched. The down migration is a no-op: the dropped values configured a display path that no longer exists, and every one of them had a default the old reader applied when absent.
+  0100_pending_provider_entitlement_modes.up.sql -- (provider entitlement mode kept before the app exists, amendment 21, #490, ADDITIVE in shape -- one new table, no existing column touched, no backfill.) CREATE TABLE pending_provider_entitlement_modes (provider TEXT PK, mode TEXT CHECK all|user|none, requested_by UUID -> users ON DELETE SET NULL, requested_at). EnsureProviderApp consumes a row when it creates the app; no row keeps the all grant. The down migration drops the table, so an app created after a rollback is open to all again.
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`
