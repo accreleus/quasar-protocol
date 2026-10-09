@@ -2564,8 +2564,15 @@ Admin-only. Removes an app from the catalog entirely.
   migration `0014`). *(Phase 2: its **entitlements** cascade away too — `entitlements.app_id` is
   `ON DELETE CASCADE`. An entitlement to an app that no longer exists has no meaning, and leaving
   one behind would silently re-grant access if the id were ever reused.)*
+- *(Amendment 22)* **Refuse deleting a provider's only app while discovery is on.** `409
+  provider_enabled` when the app has a `library_provider`, no other app has that provider, and
+  library discovery is enabled: the next reconcile would create a new provider app open to
+  everyone and drop this app's restriction. Same rule as the `PATCH` clear (§Provider
+  entitlement mode), under the same per-provider lock. Disable library discovery in Settings
+  first; with discovery off, or another app holding the provider, the delete goes through.
 - **Errors:** `404 not_found` (no such app); `409 conflict` (in use by a non-terminal session
-  or a canonical managed-home hold awaiting cleanup proof or audited repair).
+  or a canonical managed-home hold awaiting cleanup proof or audited repair); `409
+  provider_enabled` (amendment 22, above).
 
 ### Runtime presets *(UI-P3, admin)*
 A **runtime preset** is a reusable container configuration many apps inherit instead of
@@ -4941,6 +4948,24 @@ presentation only** and borrows **everything executable** from its parent at lau
 | `enabled`, `default_profile_id`, `profile_policy` | `default_vram_mb`, `default_encode_slots` |
 | favourites, entitlements | `default_width` / `height` / `fps` / `bitrate_kbps`, and the mounts |
 
+> **Amendment 22 — a derived tile also needs its parent's entitlement (#497, part of #484),
+> signed off by the operator on #497 (2026-10-09). It changes who can see and launch a tile.**
+> A tile's entitlements still live on the tile, but a caller needs an entitlement to the tile
+> **and** to its parent provider app, the same way the tile's and the parent's `enabled` are
+> ANDed at launch (`parent_app_disabled` below). The rule holds wherever the entitlement
+> predicate (§6.3) is read: `GET /v1/apps`, `GET /v1/apps/{id}`, `GET /v1/me/highlights`,
+> `PUT /v1/me/favourites/{app_id}`, the launch-profile menu, `POST /v1/sessions` and
+> `POST /v1/sessions/{id}/swap`. So restricting the provider app (the entitlement-mode route) or
+> revoking a user from it (`DELETE /v1/admin/apps/{id}/entitlements/{entitlement_id}`)
+> withdraws every tile discovery granted, at once; restoring access brings them back. The tiles'
+> own `granted_by='provider'` rows are not touched, and discovery keeps scanning the homes of
+> users not entitled to the parent, so their tiles are current when access returns. The refusals
+> are the existing ones: absent from the list, `404` on read, `403 forbidden` on favourite,
+> launch and swap. It also adds `409 provider_enabled` to `DELETE /v1/apps/{id}` (§Library).
+> Turning library discovery on after the provider app's `library_provider` was cleared still
+> creates a fresh provider app open to `all`; the restriction stays on the cleared app. Backed by
+> `openapi.yaml` (the `DELETE` `409`); no `schema.md` shape change, no migration.
+
 The tile contributes exactly one thing to execution: an environment override,
 `STEAM_STARTUP_FLAGS = "-bigpicture -applaunch <external_id>"`, merged over the parent's
 `runtime_spec.env` at dispatch. **Merge order is parent first, tile second, tile wins** — the same
@@ -6710,7 +6735,8 @@ writer of it), no `agent-api.md` change, no new column. *(Amendment 21 adds one 
 > the app surface, and the pair is deliberate: each refuses the write whose effect the other
 > setting would immediately reverse. *(Amendment 21)* `PATCH /v1/apps/{id}` emits it too, for
 > a clear of `library_provider` on a provider's only app while discovery is enabled (§Provider
-> entitlement mode); same remedy.
+> entitlement mode); same remedy. *(Amendment 22)* So does `DELETE /v1/apps/{id}`, for a
+> provider's only app while discovery is enabled; same remedy.
 >
 > **(2) `context_unresolved` (409)** — `digest_unresolved`'s template analogue, on the
 > template build/install paths. The catalog holds no resolved commit sha for this template's

@@ -1784,6 +1784,8 @@ nothing for any app.
 
 One row per grant. **Presence of the row is the fact**: there is no `revoked` boolean and no soft
 delete, so the table can never hold a row a reader must interpret before trusting.
+*(Amendment 22, #497)* For a derived tile, readers also require a row on its parent app
+(`apps.parent_app_id`); see `control-api.md` §Derived tiles.
 
 | column | type | notes |
 |---|---|---|
