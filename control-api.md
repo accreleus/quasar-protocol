@@ -6654,8 +6654,8 @@ the **provider name**, and applies the whole desired state atomically, server-si
   of the default `all`; an explicit `entitle` wins and drops the stored mode. `PATCH
   /v1/apps/{id}` that sets `library_provider` replaces the app's entitlements with a stored
   mode, as this route would on an existing app; with none stored it leaves them alone. The
-  stored mode, the app row, its grants and (on `POST`) its `launchable_profile_ids` commit
-  together or not at all.
+  stored mode, the app row, its grants and its `launchable_profile_ids` commit together or not
+  at all, on `POST` and `PATCH` alike: a refused `PATCH` changes nothing.
 - *(Amendment 21)* **One app per provider.** Under the same lock, `POST /v1/apps` naming a
   `library_provider` that another app already has, or `PATCH` setting it on an app that does
   not already have it, is `409 conflict`; edit that app instead. Apps that share a provider
