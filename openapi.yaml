@@ -578,6 +578,8 @@ paths:
             by a silent reconciler suspension reads as data loss. Enable library discovery
             in Settings first. Mirrors the existing 409 `provider_enabled` refusal on
             DELETE /v1/admin/images/{id}/install.
+            Amendment 21: code `conflict` - another app already has this library_provider; one
+            app per provider (edit that app instead).
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/apps/{id}:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
@@ -652,6 +654,10 @@ paths:
             immediately reverted by the reconciler). The ways out are deliberate: clear
             library_provider, keep the app disabled, or enable library discovery in
             Settings. See the POST /v1/apps 409 for the rationale.
+            Amendment 21: code `conflict` - the edit sets a library_provider another app already
+            has (an app that already has it may keep it). Code `provider_enabled` - the edit
+            clears library_provider on that provider's only app while library discovery is
+            enabled; disable library discovery in Settings first.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
     delete:
       tags: [apps]

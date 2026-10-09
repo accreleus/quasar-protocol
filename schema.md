@@ -1848,7 +1848,10 @@ An entitlement mode an admin asked for (`control-api.md` §Provider entitlement 
 before the provider app existed. `EnsureProviderApp` reads and deletes the row in the
 transaction that creates the app, and writes the mode's grants in place of the `all` grant.
 `POST`/`PATCH /v1/apps` making the provider app by hand consume it the same way, under the same
-per-provider lock. No row means `all`, as before this amendment.
+per-provider lock. No row means `all`, as before this amendment. The same writes keep one app
+per provider (`control-api.md` §Provider entitlement mode); that is enforced under the lock,
+not by an index on `apps.library_provider`, so apps that already shared a provider are left
+alone.
 
 | column | type | notes |
 |---|---|---|

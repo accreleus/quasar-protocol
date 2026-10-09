@@ -6588,7 +6588,11 @@ is `409` with no transition. Other jobs and older agents retain this shape.
 > deletes it; so does `POST`/`PATCH /v1/apps` when an admin makes the provider app by hand,
 > unless `POST` carries an explicit `entitle`. With nothing stored the create still grants `all`, so a client that never calls
 > this route sees what it saw before. `404` now means only that neither an app nor a catalog
-> image claims the provider. Backed by `openapi.yaml` (the `202`) and `schema.md`
+> image claims the provider. It also adds two refusals to `POST`/`PATCH /v1/apps`, so the
+> provider app this route and `EnsureProviderApp` address is the only one: a second app for a
+> provider that already has one is `409 conflict`, and clearing `library_provider` on a
+> provider's only app while library discovery is enabled is `409 provider_enabled`. Backed by
+> `openapi.yaml` (the `202` and both `409`s) and `schema.md`
 > `pending_provider_entitlement_modes` (migration 0100).
 
 **The gap.** `EnsureProviderApp` (`control-plane/internal/images/provider_app.go`) grants
@@ -6649,7 +6653,17 @@ the **provider name**, and applies the whole desired state atomically, server-si
   lock. `POST /v1/apps` with `library_provider` and no `entitle` grants the stored mode in place
   of the default `all`; an explicit `entitle` wins and drops the stored mode. `PATCH
   /v1/apps/{id}` that sets `library_provider` replaces the app's entitlements with a stored
-  mode, as this route would on an existing app; with none stored it leaves them alone.
+  mode, as this route would on an existing app; with none stored it leaves them alone. The
+  stored mode, the app row, its grants and (on `POST`) its `launchable_profile_ids` commit
+  together or not at all.
+- *(Amendment 21)* **One app per provider.** Under the same lock, `POST /v1/apps` naming a
+  `library_provider` that another app already has, or `PATCH` setting it on an app that does
+  not already have it, is `409 conflict`; edit that app instead. Apps that share a provider
+  from before this rule are left as they are and stay editable. `PATCH` clearing
+  `library_provider` (`""`) on a provider's **only** app while library discovery is enabled is
+  `409 provider_enabled`: the next reconcile would create a new provider app open to everyone
+  and leave this app's restriction behind. Disable library discovery in Settings first; with
+  discovery off, or another app still holding the provider, the clear goes through.
 - `404 not_found` only when neither an app nor an `image_catalog` entry claims the provider.
 - **This is a MODE, not an incremental grant — it REPLACES the app's entire entitlement set.**
   `"all"` writes exactly one `('all', NULL)` row; `"user"` writes exactly one `('user', <the
@@ -6694,7 +6708,9 @@ writer of it), no `agent-api.md` change, no new column. *(Amendment 21 adds one 
 > retryable as-is; the remedy is named in the message — disable library discovery in
 > Settings first, then uninstall. It is the exact mirror of `library_discovery_disabled` on
 > the app surface, and the pair is deliberate: each refuses the write whose effect the other
-> setting would immediately reverse.
+> setting would immediately reverse. *(Amendment 21)* `PATCH /v1/apps/{id}` emits it too, for
+> a clear of `library_provider` on a provider's only app while discovery is enabled (§Provider
+> entitlement mode); same remedy.
 >
 > **(2) `context_unresolved` (409)** — `digest_unresolved`'s template analogue, on the
 > template build/install paths. The catalog holds no resolved commit sha for this template's
