@@ -351,6 +351,8 @@ A node must prove it's allowed to join before it can register.
   stores `node_secret_hash`. The agent persists the secret locally.
   **Enrollment onto a `node_name` whose agent is currently live is refused** (#96):
   enrollment rotates `node_secret`, so allowing it against a live host is identity takeover.
+  *(Amendment 20, #487:)* enrollment onto an **existing** `node_name` also needs a token bound
+  to that name; an unbound token only creates a new host (`control-api.md` §Redemption).
   The credential is checked FIRST — this surface is pre-auth, so a bad token gets a plain
   `auth_failed` that says nothing about whether the `node_name` exists or is live.
   *(Amendment 14, #353:)* On an `owned` machine a GPU host's recovery actor hands the

@@ -785,7 +785,7 @@ single-use invite). Index: `(created_by)` for the admin list view.
 | `id` | `UUID` PK | `gen_random_uuid()` |
 | `token_hash` | `TEXT` NOT NULL UNIQUE | SHA-256 (hex) of the opaque token (256-bit entropy). Lookup key. Plaintext shown to the admin exactly once at mint, never stored. |
 | `created_by` | `UUID` NULL → `users(id)` **ON DELETE SET NULL** | the admin who minted it; NULL once that account is gone, or *(amendment 14)* when no admin minted it at all — a machine's local enrollment token (above). *(0073 — it was NOT NULL / CASCADE in 0072.)* **The row must outlive its minter:** a token minted by an ephemeral DX admin identity (`users.ephemeral_expires_at`, #399) was cascaded away mid-enrollment when the reaper deleted that identity, destroying a credential a host was in the middle of using. The admin list already `LEFT JOIN`s `users` and `control-api.md` already models `created_by_user_id` as nullable, so nothing above the database changed. |
-| `node_name` | `TEXT` NULL | NULL = usable by any `node_name`; set = usable only by exactly this one — what stops a leaked token becoming a host it was not minted for. |
+| `node_name` | `TEXT` NULL | NULL = usable by any **new** `node_name` (amendment 20: re-enrolling an existing host needs a bound token); set = usable only by exactly this one — what stops a leaked token becoming a host it was not minted for. |
 | `max_uses` | `INT` NOT NULL DEFAULT `1` | `CHECK (max_uses >= 1)`. |
 | `used_count` | `INT` NOT NULL DEFAULT `0` | `CHECK (used_count >= 0 AND used_count <= max_uses)`. Bumped atomically on redemption. |
 | `expires_at` | `TIMESTAMPTZ` NULL | NULL = no expiry; the mint endpoint defaults it to one hour. |

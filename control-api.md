@@ -1870,6 +1870,12 @@ break a feature; `DELETE` is how you clear one.
 > matching — a minted token (hash lookup) is tried first, then the static `ENROLLMENT_TOKEN`
 > (constant-time compare), so an existing deployment upgrades untouched.
 
+> **Amendment 20 (#487, under #484), signed off 2026-10-09.** An unbound token (no
+> `node_name`) enrolls **new** node names only. Re-enrolling onto an existing host row takes a
+> token bound to that `node_name`; an unbound one is refused `auth_failed`, rolled back, and
+> not consumed. Before this, any holder of an unbound token, shared up to 100 uses and 30
+> days, could become any host whose agent was offline. No wire shape changes.
+
 > **RH06 contract step (amendment 14, #353; in force since RH06-15, #367):** the static
 > `ENROLLMENT_TOKEN` is **retired**. The control plane no longer reads it, and redemption matches
 > a minted token or a machine's single-use local enrollment token only (§"RH06 — Quasar-owned
@@ -1892,7 +1898,8 @@ bound to one `node_name`. Same custody model as invites (LP-SEC-01).
 ```
 - `token` is generated server-side (32 random bytes, base64url), returned plaintext **once**,
   stored **hashed** (`host_enrollments.token_hash`).
-- `node_name` binds the token: it redeems only for that `node_name`. Absent = any; **`""` is
+- `node_name` binds the token: it redeems only for that `node_name`. Absent = any **new**
+  `node_name`; re-enrolling an existing host needs its name here (amendment 20). **`""` is
   `400 validation_failed`**, because an empty string would silently mint an any-node token —
   the opposite of what a caller sending the field asked for.
 - `expires_at` defaults to one hour. An enrollment token is used within minutes of minting —
@@ -1933,6 +1940,14 @@ transaction back, so it never consumes the token's use. "Live" means the host ro
 receiving replica — the second alone would miss a host connected to a sibling replica. A
 control-plane crash can leave a row stuck `online` (nothing sweeps them); re-enroll under a
 different `node_name`, or delete the host row first.
+
+*(Amendment 20.)* **Re-enrollment onto an existing host row also needs a token bound to its
+`node_name`.** An unbound token that would land on an existing row (offline, or created by a
+concurrent first enrollment of the same name) is refused `auth_failed` with a message saying
+so, and the transaction rolls back: the host keeps its `node_secret` and the token keeps its
+use. The check follows the credential and the live-agent checks, so it adds no oracle for a
+caller without a good token. A forgotten host (`DELETE /v1/hosts/{id}`) has no row, so any
+valid token enrolls it as new.
 
 ### Device management — owner-self surface
 `RequireAuth`; owner is the **bearer identity**, never a body field. `403` (not `404`) if the

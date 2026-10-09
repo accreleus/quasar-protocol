@@ -2896,7 +2896,7 @@ paths:
               type: object
               additionalProperties: false
               properties:
-                node_name: { type: string, minLength: 1, description: "Bind the token to exactly this node_name. Absent = any node_name; empty string is 400 (it would silently mint an any-node token)." }
+                node_name: { type: string, minLength: 1, description: "Bind the token to exactly this node_name. Absent = any new node_name (re-enrolling an existing host needs a bound token, amendment 20); empty string is 400 (it would silently mint an any-node token)." }
                 max_uses: { type: integer, default: 1, minimum: 1, maximum: 100 }
                 expires_at: { type: string, format: date-time, description: "Absent = one hour from mint. Must be in the future and at most 30 days out." }
                 note: { type: string }
