@@ -5407,7 +5407,8 @@ scan that is not currently claimed, which is where a duplicate report after a su
 reconcile lands.
 
 Accepting a report runs reconciliation **in one transaction** with marking the scan reported:
-observations are upserted and the ones this scan did not list are pruned, the suppression ladder
+observations are upserted, the ones this scan did not list are marked missing and pruned only
+once a second scan agrees *(amendment 25, below)*, the suppression ladder
 is evaluated **once**, tiles are created for what publishes, tiles are disabled and their provider
 entitlements revoked for what suppresses, and the scanning user's provider entitlements are
 granted and revoked. Tile creation and the first entitlement commit **together**, because
@@ -5423,6 +5424,39 @@ and why revoking one was already a working path the day the first appeared. Phas
 human reading a row, not a key anything joins on. `granted_by='admin'` rows are **never** touched
 by the sync in either direction: an operator's grant survives an uninstall, because an admin said
 so and a filesystem did not.
+
+> **Amendment 25 — a game leaves the library only when a second scan agrees (#521), signed off
+> by the operator 2026-10-10. It changes behaviour; no shape changes.** A successful, non-empty,
+> uncapped report can still omit an installed game, typically one whose library sits on a mount
+> that was away for a moment, and one scan cannot tell that from an uninstall.
+> - **One miss changes nothing a user can see.** The observation is marked missing. The tile,
+>   the `granted_by='provider'` entitlement and a running session stay as they are.
+> - **A second miss removes it.** A later successful scan of the same user, provider app and
+>   host that also omits the game, and was queued at least one scan interval after the mark,
+>   prunes the observation and revokes the entitlement; amendment 23's sweep then ends a
+>   running session of it. The next scheduled scan always qualifies.
+> - **A "scan now" pressed sooner does not count.** `POST /v1/admin/library/scan` still
+>   bypasses the scheduler's pacing, but a scan it queues less than one interval after the mark
+>   neither confirms the mark nor moves it: two scans a second apart would both miss a mount
+>   that is away for that second. One queued an interval or more after the mark confirms it
+>   like a scheduled scan.
+> - **A scan that lists the game again clears the mark**, so a later miss starts over.
+> - **A scan that cannot speak for the game does neither.** An `ok:false` report, an empty
+>   report over a known library and a report at `max_entries` (for the games it does not list)
+>   neither confirm a mark nor clear it.
+> - **Cost:** an uninstalled game leaves on the second scheduled scan that misses it instead of
+>   the first. A "scan now" queued sooner than one interval after the first resets the schedule
+>   like any successful scan, so it delays the second.
+> - **Per host:** a user with the game on two hosts keeps it until each host's own scans have
+>   confirmed it gone, as before.
+> - **What it does not cover:** a library that stays out of the scan's reach across both scans
+>   (moved past the discovery depth or behind a symlink, or a mount away for longer than a scan
+>   interval) is still read as uninstalled, one scan later than before.
+>
+> No route, status code, field or error code changes: `LibraryStatus.recent_scans[].revoked` is
+> counted by the scan that confirms. **`agent-api.md` is untouched**; the agent's report is the
+> one it already sends. Backed by `schema.md` (`library_observations.missing_since`, migration
+> 0102); `openapi.yaml` is unchanged.
 
 ### The agent never learns a user
 
@@ -5629,7 +5663,8 @@ reported**: the `library_discovery_enabled` switch, `QUASAR_LIBRARY_SCAN_INTERVA
 storage provider, and the per-home `provider='local'` filter — the last enforced inside the enqueue
 itself, so a volume-backed home on an otherwise-local instance is never forced into a `pending` row
 nothing could claim. *Pacing is the operator's to override; the gates are the operator's own
-decisions and are not.*
+decisions and are not.* *(Amendment 25, §`POST /v1/agent/library/scan-report`: a scan it queues
+less than one scan interval after a game was first missed does not remove that game.)*
 
 **An inert instance is a `200` with `inert_reason`, deliberately not a `409` or a `400`.** It
 mirrors `GET /v1/admin/library/status`, whose `inert_reason` was added for exactly this question, so

@@ -1928,6 +1928,13 @@ rather than blocking on them.
 > *Migration 0045. New table; changes nothing existing. "Who was seen to have this installed, and
 > when" — **the sole input to provider entitlement grants and revokes**.*
 
+> **Amendment 25 — a game is pruned only when a second scan agrees (#521), additive, signed off
+> by the operator 2026-10-10 for exactly this column and rule. Migration 0102.** One nullable
+> column, `missing_since`, with no default and no backfill. No existing column, type,
+> constraint or default changes, and every pre-0102 row reads as seen. No API shape changes
+> (`control-api.md` §Library discovery, amendment 25, carries the behaviour), no new setting,
+> and **`agent-api.md` is byte-identical**: the agent's report is the one it already sends.
+
 | column | type | notes |
 |---|---|---|
 | `user_id` | `UUID` NOT NULL → `users(id)` **ON DELETE CASCADE** | whose install this is. The cascade is what makes the per-user inventory below disappear with the account. |
@@ -1937,6 +1944,7 @@ rather than blocking on them.
 | `name` | `TEXT` NOT NULL DEFAULT `''` | the manifest title. |
 | `host_id` | `UUID` NOT NULL → `hosts(id)` **ON DELETE CASCADE** | which host it was seen on. Part of the key: a user with homes on two hosts has **two independent observation sets**, and a scan of one must never speak for the other. |
 | `last_seen_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | refreshed by every successful scan that still lists it. |
+| `missing_since` | `TIMESTAMPTZ` NULL | *(amendment 25 #521, migration 0102, additive)* when a successful scan of this (user, parent, host) first did not list the row. NULL, with no default, while the last scan that could speak for the row listed it. **Written** only by the reconciler, in the transaction that marks the scan `reported`: set once, to that transaction's `now()`, by the first scan that misses the row, and cleared by any scan that lists it. **Read** only by the reconciler's prune, below. A row carrying a mark is still an observation to every other reader. |
 
 `PRIMARY KEY (user_id, parent_app_id, external_source, external_id, host_id)`, plus
 `CREATE INDEX library_observations_parent_idx ON library_observations (parent_app_id,
@@ -1951,16 +1959,31 @@ rather than only on the tile for exactly that reason (**a suppressed appid has n
 it**), and it is additionally **half of the denylist key**, which matches on appid *or* name
 prefix, so it is load-bearing for correctness and not only for presentation.
 
-**A row disappears only on a SUCCESSFUL scan.** The reconciler upserts one row per reported entry
-and then deletes the rows for that exact (user, parent, host) triple that the scan did **not**
-list; a failed scan writes nothing and deletes nothing. This is the only place a game
-"disappearing" is recognised, and keeping it on the success path is what stops one transient error
-from mass-revoking a fleet's libraries.
+**A row disappears only when two SUCCESSFUL scans agree** *(amendment 25)*. One scan cannot
+tell an uninstall from a library that was out of its reach for a moment (a mount briefly
+away). So the reconciler upserts one row per reported entry,
+clearing `missing_since`, and **marks** the rows of that exact (user, parent, host) triple that
+the scan did not list: `missing_since = now()` where it is NULL. It **deletes** a marked row only
+when a later scan of the same triple also does not list it and that scan was queued at least one
+scan interval after the mark: `missing_since <= library_scans.created_at - interval`, with the
+interval resolved at reconcile time (`QUASAR_LIBRARY_SCAN_INTERVAL`, else
+`instance_settings.library_discovery_interval_minutes`). That is the arithmetic of the scheduler's
+own enqueue, so the next scheduled scan always qualifies and a "scan now" queued sooner does not;
+with no positive interval a scan marks and deletes nothing. The scope is the triple a
+`library_scans` row names: `host_id` is in this table's key, so a scan of one host neither marks
+nor confirms another host's row. A failed scan writes nothing, marks nothing and deletes
+nothing. The same holds for an empty report over existing rows, and for the rows a report at
+the entry cap does not list. None of them clears a mark either; only a sighting does, and a
+capped report is a sighting for the rows it lists. Keeping all of this on the success path is what
+stops one transient error from mass-revoking a fleet's libraries. The cost is that a real
+uninstall takes two scans, at least one interval apart, to leave the library.
 
 **The revoke it drives is deliberately NOT host-scoped.** A provider entitlement is revoked when
 **no observation remains on any host** — a user who moved a game from host A to host B still has
 it, and scoping the revoke to the scanned host would revoke it on A's sweep and re-grant it on
-B's, flapping the tile in and out of their library.
+B's, flapping the tile in and out of their library. *(Amendment 25)* A row marked
+`missing_since` is still an observation here: the entitlement, the tile and a running session
+are untouched until the row is deleted.
 
 **The second-order PII, said out loud:** this table is a **per-user record of which games a person
 has installed**. It is inherent to the feature the operator asked for, admins can see it by
@@ -2432,6 +2455,7 @@ control-plane/migrations/
   0099_console_config_trim.up.sql -- (direct-display console, amendment 19, #453/#455, NOT ADDITIVE -- a data migration on an existing JSONB column, no DDL.) UPDATE console_config SET config = config - '{connector,mode,compositor,audio_output,stream,stream_audio,grab,auto_connect_controller,fullscreen}'::text[]. The nine retired console-config keys leave every stored row; the six remaining keys are untouched. The down migration is a no-op: the dropped values configured a display path that no longer exists, and every one of them had a default the old reader applied when absent.
   0100_pending_provider_entitlement_modes.up.sql -- (provider entitlement mode kept before the app exists, amendment 21, #490, ADDITIVE in shape -- one new table, no existing column touched, no backfill.) CREATE TABLE pending_provider_entitlement_modes (provider TEXT PK, mode TEXT CHECK all|user|none, requested_by UUID -> users ON DELETE SET NULL, requested_at). EnsureProviderApp consumes a row when it creates the app; no row keeps the all grant. The down migration drops the table, so an app created after a rollback is open to all again.
   0101_session_stop_reason.up.sql -- (session stop reason, amendment 24, #516, PURELY ADDITIVE in shape -- one nullable column, no default, no backfill.) ALTER TABLE sessions ADD COLUMN stop_reason TEXT. The session_stop reason recorded in the write that moves a session to `stopping`; served only through the closed set of control-api.md `stop_reason`. The down migration drops the column, so the recorded reasons are lost and every session reads `stop_reason: null` again.
+  0102_library_observation_missing_since.up.sql -- (two-scan prune, amendment 25, #521, PURELY ADDITIVE in shape -- one nullable column, no default, no backfill.) ALTER TABLE library_observations ADD COLUMN missing_since TIMESTAMPTZ. When a successful scan first did not list the observation; the reconciler deletes the row only when a scan queued at least one scan interval after that also does not list it. The down migration drops the column, so the marks are lost and a missing game needs two fresh scans again.
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`
