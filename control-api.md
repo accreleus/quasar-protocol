@@ -3593,6 +3593,35 @@ and no endpoint that sets either. **The UI renders `error_message` as prose and 
 preformatted** — the two fields have different rendering needs and must not be conflated in a
 client. Neither field is a session-state authority: `state` remains the only progress signal.
 
+#### `stop_reason` — why the control plane stopped the session (amendment 24, #516)
+> **Amendment 24 — the session read says when a revoke ended it (#516), additive, signed off by
+> the operator 2026-10-10 for exactly this field.** One read-only field on the session resource
+> (user and admin session GET/list alike). Changes no existing shape, field or status code; a
+> client that ignores it behaves exactly as before.
+
+Every session read shape gains **`stop_reason`**, always serialized, `null` unless the control
+plane stopped the session for a reason in this closed set:
+
+| value | meaning |
+|---|---|
+| `"entitlement_revoked"` | the owner lost access to the app the session runs (amendment 23) |
+
+- **When it is set:** in the same write that moves the session to `stopping`, by both stops of
+  amendment 23 (the admin routes and the entitlement sweep). It is kept through `stopped`, and
+  a later stop of the same session does not replace it.
+- **When it is `null`:** a live session, a `failed` one, and every other stop (the owner's own,
+  an admin's, a host drain). Those reasons are recorded (`schema.md` `sessions.stop_reason`)
+  and not served.
+- **What it does not say:** who removed the access, or which entitlement row. The value is the
+  same whether an admin revoked it or the library sync did.
+- **Clients:** treat an unrecognised value as `null`; extending the set needs an amendment. A
+  client whose signaling closed `4404`, or whose `POST /v1/sessions/{id}/signaling-token`
+  answered `409 session_not_reconnectable`, reads the session to tell the user why.
+- Read-only, and not a session-state authority: `state` remains the only progress signal.
+
+Backed by `openapi.yaml` (`Session.stop_reason`) and `schema.md` (`sessions.stop_reason`,
+migration 0101).
+
 #### `stream.external_width` / `external_height` / `external_resize_supported` / `external_owner` / `rungs` — live external (encoded) resolution (session-display-stream, approved 2026-08-16)
 > *Additive amendment, approved 2026-08-16 (PR #15). Extends the `stream` block already
 > returned by session GET/list and by `PATCH /v1/sessions/{id}/display`'s `202` body; no existing
@@ -5000,6 +5029,8 @@ presentation only** and borrows **everything executable** from its parent at lau
 >   `reason: "entitlement_revoked"` (`agent-api.md`); a route does not wait for the ack. A stop
 >   the agent did not take is re-sent on its next heartbeat (`agent-api.md` §Reconnection &
 >   reconciliation); that holds for every stop reason.
+>   *(Amendment 24: the session read carries the reason as `stop_reason`,
+>   §`GET /v1/sessions/{id}`.)*
 > - **No reconnect:** `POST /v1/sessions/{id}/signaling-token` answers
 >   `409 session_not_reconnectable` for the stopped session, as for any other. A token minted
 >   earlier can no longer be consumed either: `/v1/signal` refuses a `stopping` session like a

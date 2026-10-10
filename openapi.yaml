@@ -5072,7 +5072,7 @@ components:
       # health_state/health_reason are additive (present only when running/unsustainable);
       # app_launch_state is additive (present only when the app image reports one);
       # every other key is always serialized (nullable ones present-but-null).
-      required: [id, user_id, app_id, host_id, state, state_detail, error_message, failure_code, app_log_tail, home_seed, profile_id, stream_profile_id, stream, codec_decision, negotiated_codec, created_at, started_at, ended_at]
+      required: [id, user_id, app_id, host_id, state, state_detail, error_message, failure_code, app_log_tail, stop_reason, home_seed, profile_id, stream_profile_id, stream, codec_decision, negotiated_codec, created_at, started_at, ended_at]
       properties:
         id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
@@ -5095,6 +5095,14 @@ components:
             oldest first, ~100 lines bound) - the only surviving copy, since app containers run
             --rm. Always serialized; null unless a failure warranted capturing it. Rendered
             preformatted, distinct from error_message's prose rendering.
+        stop_reason:
+          type: [string, "null"]
+          enum: [entitlement_revoked, null]
+          description: >-
+            Amendment 24 (#516). Why the control plane stopped the session, from a closed set:
+            "entitlement_revoked" - the owner lost access to the app (amendment 23). Null for a
+            live or failed session and for every other stop. Names no actor and no entitlement
+            row. Always serialized; a client treats an unrecognised value as null.
         home_seed:
           description: >-
             RH05 #344. Actual initial managed-home seeding outcome. Null means no
