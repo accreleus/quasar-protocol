@@ -2476,10 +2476,13 @@ container or media pipeline restart is implied either way.
   agent runs but the control plane lost are stopped (`session_stop`) — the control plane is the
   scheduling authority.
 - *(Amendment 23, #503)* A stop the agent did not take is re-sent. When a heartbeat still lists
-  a session the control plane has held `stopping` for more than 10 s, the control plane sends
-  `session_stop` again with `reason: "error"`, and on each later heartbeat until the agent
-  stops listing it. An agent already tearing the session down treats the repeat as a no-op.
-  No message or field changes.
+  a session that went `stopping` more than 10 s ago, the control plane sends `session_stop`
+  again with `reason: "error"`, and on each later heartbeat until the agent stops listing it.
+  A control plane that restarted since does not wait out the 10 s. An agent already tearing
+  the session down treats the repeat as a no-op. The same re-send goes to a session that was
+  stopped before it started and that the agent does not list: an agent that advertises
+  `terminal_home_cleanup_v1` answers `stopped` for an id it never recorded (§`register`),
+  which releases the reservation. No message or field changes.
 - If the agent connection is lost for longer than the heartbeat-miss threshold, the host goes
   `offline` and all its non-terminal sessions become `failed`. This is the multi-host failure
   model at N=1.

@@ -4988,6 +4988,10 @@ presentation only** and borrows **everything executable** from its parent at lau
 > - **By the sweep:** every other loss of entitlement, whoever removed it. That covers the
 >   library sync revoking a provider row (a title uninstalled, an ignore rule), a swap that
 >   completes into an app revoked while it was in flight, and anything a route's stop missed.
+> - **A swap that never resolves:** while a swap is in flight the session row still names the
+>   old app, so the sweep cannot tell what the agent runs. A swap still unresolved after
+>   2 minutes, or in flight when the control plane restarted, ends the session with
+>   `session_stop` `reason: "error"`, whatever its owner is entitled to.
 > - **Who is stopped:** the entitlement predicate (§6.3), keyed on the **session owner** with
 >   no role arm, so an admin's own session ends too. A user still covered by another row keeps
 >   their session: revoking the `all` row does not stop a user who holds a personal grant. A
@@ -5005,7 +5009,9 @@ presentation only** and borrows **everything executable** from its parent at lau
 >   acting admin and writes no activity row.
 > - **If a route's stop fails:** the route still answers its normal `204` / `200`, because the
 >   access is removed and a retried request would not sweep again. The activity row carries
->   `sessions_stop_failed: true` and the sweep stops what is left.
+>   `sessions_stop_failed: true` and the sweep stops what is left. The flag is also set when a
+>   session went `stopping` but its `session_stop` could not be queued for the agent; that
+>   session is still counted and listed, and the heartbeat re-send delivers the stop.
 > - **What does not trigger it:** mode `all` stops nothing. Disabling an app (`enabled`,
 >   `parent_app_disabled`) is not an entitlement change and still gates launches only.
 >
@@ -6710,7 +6716,8 @@ the **provider name**, and applies the whole desired state atomically, server-si
   case-insensitively, mirroring `EnsureProviderApp`'s own lower-casing.
 - *(Amendment 23)* **`"user"` and `"none"` end the sessions they left unentitled**, on the
   provider app and on its derived tiles, before the `200` (§Derived tiles, amendment 23).
-  `"all"` and a `202` stop nothing.
+  `"all"` and a `202` stop nothing. Once the mode has committed the answer is `200` even if
+  reading the rows back fails; `items` is then empty.
 - *(Amendment 21)* **No app yet: `202`, and the mode is kept.** When no app exists with that
   `library_provider` (not enabled yet, or `EnsureLibraryProviders`'s async pass has not landed)
   but an `image_catalog` entry claims it, the mode is stored with the acting admin and the time
