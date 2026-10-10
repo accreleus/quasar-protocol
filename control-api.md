@@ -2528,7 +2528,7 @@ validation_failed` on a malformed UUID.
   independent facts about the same app and the schema deliberately allows both to exist.
 - *(Amendment 23)* **A revoke ends the sessions it left unentitled.** A session on this app, or
   on a tile derived from it, whose owner no longer holds an entitlement is `stopping` before
-  the `204`. The rule, and the `500` when a stop fails, are in §Derived tiles, amendment 23.
+  the `204`. The rule is in §Derived tiles, amendment 23.
 - **A `granted_by: "provider"` revoke is not permanent** and a client showing this surface should
   say so: the next library sync re-grants it if the title is still installed. Permanent fleet-wide
   suppression is the ignore-rule path (Phase 4), not per-user revocation — otherwise an admin
@@ -2991,7 +2991,8 @@ the session goes terminal and this endpoint answers `409` instead, which IS fata
 
 - `404 not_found`: the session does not exist or belongs to another user.
 - `409 session_not_reconnectable`: the session is terminal or stopping. *(Amendment 23: that
-  includes a session stopped because its owner lost access.)*
+  includes a session stopped because its owner lost access, and `/v1/signal` refuses a token
+  minted before the stop.)*
 - Each successful call inserts a new `session_tokens` row. Concurrent calls are allowed and
   produce independent tokens; consuming one does not invalidate another.
 - Normal authenticated API rate limits apply. Plaintext is returned once and never logged.
@@ -4969,36 +4970,44 @@ presentation only** and borrows **everything executable** from its parent at lau
 > and visibility only: a session already running, and reconnects to it through
 > `POST /v1/sessions/{id}/signaling-token`, are not ended by it; an admin stops such a session
 > from the session console (`DELETE /v1/sessions/{id}`). *(That sentence is superseded by
-> amendment 23, below, for access an admin removes.)*
+> amendment 23, below.)*
 > It also adds `409 provider_enabled` to `DELETE /v1/apps/{id}` (§Library).
 > Turning library discovery on after the provider app's `library_provider` was cleared still
 > creates a fresh provider app open to `all`; the restriction stays on the cleared app. Backed by
 > `openapi.yaml` (the `DELETE` `409`); no `schema.md` shape change, no migration.
 
-> **Amendment 23 — revoking access ends a running session (#503), signed off by the operator
-> 2026-10-10. It changes behaviour; no shape changes.** When an admin removes access, the
-> control plane stops every session whose owner is no longer entitled to the app it runs.
-> - **What triggers it:** `DELETE /v1/admin/apps/{id}/entitlements/{entitlement_id}`, and the
->   entitlement-mode route with `user` or `none`. Through amendment 22's parent rule, either
->   one on a provider app also ends sessions on its derived tiles.
+> **Amendment 23 — a session ends when its owner loses access to its app (#503), signed off by
+> the operator 2026-10-10. It changes behaviour; no shape changes.** A session whose owner is
+> no longer entitled to the app it runs is stopped: immediately by the admin routes that
+> removed the access, and otherwise by the control plane's periodic entitlement sweep, within
+> about the sweep interval (30 s).
+> - **Immediately:** `DELETE /v1/admin/apps/{id}/entitlements/{entitlement_id}`, and the
+>   entitlement-mode route with `user` or `none`, stop the sessions they left unentitled before
+>   they answer. Through amendment 22's parent rule, either one on a provider app also ends
+>   sessions on its derived tiles.
+> - **By the sweep:** every other loss of entitlement, whoever removed it. That covers the
+>   library sync revoking a provider row (a title uninstalled, an ignore rule), a swap that
+>   completes into an app revoked while it was in flight, and anything a route's stop missed.
 > - **Who is stopped:** the entitlement predicate (§6.3), keyed on the **session owner** with
 >   no role arm, so an admin's own session ends too. A user still covered by another row keeps
->   their session: revoking the `all` row does not stop a user who holds a personal grant.
->   Other users' sessions are untouched.
-> - **How:** each affected session is `stopping` before the route answers. The agent gets
->   `session_stop` with `reason: "entitlement_revoked"` (`agent-api.md`); the response does not
->   wait for its ack. A swap in flight toward the revoked app completes, then is stopped the
->   same way.
+>   their session: revoking the `all` row does not stop a user who holds a personal grant. A
+>   session whose owner is still entitled is left running.
+> - **How:** the session goes `stopping` and the agent gets `session_stop` with
+>   `reason: "entitlement_revoked"` (`agent-api.md`); a route does not wait for the ack. A stop
+>   the agent did not take is re-sent on its next heartbeat (`agent-api.md` §Reconnection &
+>   reconciliation); that holds for every stop reason.
 > - **No reconnect:** `POST /v1/sessions/{id}/signaling-token` answers
->   `409 session_not_reconnectable` for the stopped session, as for any other.
+>   `409 session_not_reconnectable` for the stopped session, as for any other. A token minted
+>   earlier can no longer be consumed either: `/v1/signal` refuses a `stopping` session like a
+>   terminal one (close `4404`, `signaling.md`).
 > - **Audit:** the `app.entitlement.revoke` and `app.entitlement.set_mode` activity rows gain
->   `sessions_stopped` and up to 50 `stopped_session_ids`.
-> - **If a stop fails:** the route answers `500` and the activity row carries
->   `sessions_stop_failed`. The access is already removed; stop what is left with
->   `DELETE /v1/sessions/{id}`.
-> - **What does not trigger it:** mode `all`, disabling an app (`enabled`,
->   `parent_app_disabled`), and the library sync's own provider-row revokes (a title
->   uninstalled, an ignore rule). Those still gate only new launches, swaps and visibility.
+>   `sessions_stopped` and up to 50 `stopped_session_ids`. A stop made by the sweep has no
+>   acting admin and writes no activity row.
+> - **If a route's stop fails:** the route still answers its normal `204` / `200`, because the
+>   access is removed and a retried request would not sweep again. The activity row carries
+>   `sessions_stop_failed: true` and the sweep stops what is left.
+> - **What does not trigger it:** mode `all` stops nothing. Disabling an app (`enabled`,
+>   `parent_app_disabled`) is not an entitlement change and still gates launches only.
 >
 > No `openapi.yaml` or `schema.md` change, no migration.
 

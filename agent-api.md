@@ -1791,7 +1791,8 @@ The agent tears down and reports `session_state: stopping` → `stopped`. The re
 released when `stopped` arrives. *(Amendment 23, #503, signed off by the operator 2026-10-10:
 `entitlement_revoked` is sent when the session's owner lost access to its app, `control-api.md`
 §Derived tiles. Additive: `reason` is informational, and an agent tears down the same way
-whatever its value.)*
+whatever its value. A stop the agent did not take is sent again, §Reconnection &
+reconciliation.)*
 
 ### `session_swap_app` — swap the source app, transport stays live (P2-02)
 Tells the agent to swap a `running` session's **source container** behind its interpipe boundary
@@ -2474,6 +2475,11 @@ container or media pipeline restart is implied either way.
   `running` but the agent doesn't list are marked `failed` (reservation released); sessions the
   agent runs but the control plane lost are stopped (`session_stop`) — the control plane is the
   scheduling authority.
+- *(Amendment 23, #503)* A stop the agent did not take is re-sent. When a heartbeat still lists
+  a session the control plane has held `stopping` for more than 10 s, the control plane sends
+  `session_stop` again with `reason: "error"`, and on each later heartbeat until the agent
+  stops listing it. An agent already tearing the session down treats the repeat as a no-op.
+  No message or field changes.
 - If the agent connection is lost for longer than the heartbeat-miss threshold, the host goes
   `offline` and all its non-terminal sessions become `failed`. This is the multi-host failure
   model at N=1.

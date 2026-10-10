@@ -234,7 +234,7 @@ Application close codes in the 4000–4999 range so the client can react precise
 | code | meaning |
 |---|---|
 | `4401` | token invalid / expired / already used |
-| `4404` | session not found or terminal (`stopped`/`failed`) |
+| `4404` | session not found or terminal (`stopped`/`failed`); *(amendment 23, #503)* also a session that is `stopping` |
 | `4409` | session not yet assigned to a host (retry shortly) |
 | `4410` | this attachment was taken over by a later attach (terminal for this client: render "session taken over elsewhere"; do NOT mint a replacement token or reconnect) |
 | `4500` | relay to node agent unavailable (host offline) |
