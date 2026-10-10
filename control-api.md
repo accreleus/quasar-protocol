@@ -1105,7 +1105,7 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `DELETE /v1/apps/{id}` | **admin** | *(admin-delete)* remove an app from the catalog — refuse-if-in-use |
 | `GET /v1/admin/apps/{id}/entitlements` | **admin** | *(Steam library discovery Phase 2)* who may see and launch this app — the `all` row first, then the personal grants |
 | `POST /v1/admin/apps/{id}/entitlements` | **admin** | *(Phase 2)* grant — `{subject_type, subject_id}`; `409 conflict` if that subject already holds one |
-| `DELETE /v1/admin/apps/{id}/entitlements/{entitlement_id}` | **admin** | *(Phase 2)* revoke — **scoped to the app in the path**, so an entitlement id belonging to another app is `404`, not a cross-app delete |
+| `DELETE /v1/admin/apps/{id}/entitlements/{entitlement_id}` | **admin** | *(Phase 2)* revoke — **scoped to the app in the path**, so an entitlement id belonging to another app is `404`, not a cross-app delete. *(Amendment 23: also ends the sessions it left unentitled.)* |
 | `GET /v1/admin/users/{id}/entitlements` | **admin** | *(Phase 2)* **this user's personal grants only** — deliberately *not* the `all` rows they also benefit from; see §Entitlements for why |
 | `GET /v1/admin/library/status` | **admin** | *(Steam library discovery Phase 4)* is discovery actually doing anything, **and if not, why** — the switch, the interval, the storage provider, the opt-in lookup, an `inert_reason` and the per-state scan census |
 | `POST /v1/admin/library/scan` | **admin** | *(Steam library discovery, force scan)* **"Scan now"** — enqueue `pending` scans immediately, **bypassing the janitor's recency pacing and nothing else**. Optional `app_id` / `user_id` scope; an **empty body is valid** and means everything. Reports `queued` / `skipped` / `eligible` / `inert_reason`; an inert instance is a `200` with the reason, not a 4xx, mirroring `GET /v1/admin/library/status`. A non-provider `app_id` is `400` and a non-existent one `404`, same rule as the four routes below; **inertness is answered before the scope**, so a bad `app_id` on a switched-off instance is that `200`. Idempotent. Audited as `library.scan.force` |
@@ -2526,6 +2526,9 @@ validation_failed` on a malformed UUID.
 - `400 validation_failed` if either id is malformed.
 - **Revoking an `all` row does not revoke anybody's personal grant, and vice versa.** They are
   independent facts about the same app and the schema deliberately allows both to exist.
+- *(Amendment 23)* **A revoke ends the sessions it left unentitled.** A session on this app, or
+  on a tile derived from it, whose owner no longer holds an entitlement is `stopping` before
+  the `204`. The rule, and the `500` when a stop fails, are in §Derived tiles, amendment 23.
 - **A `granted_by: "provider"` revoke is not permanent** and a client showing this surface should
   say so: the next library sync re-grants it if the title is still installed. Permanent fleet-wide
   suppression is the ignore-rule path (Phase 4), not per-user revocation — otherwise an admin
@@ -2987,7 +2990,8 @@ the session goes terminal and this endpoint answers `409` instead, which IS fata
 ```
 
 - `404 not_found`: the session does not exist or belongs to another user.
-- `409 session_not_reconnectable`: the session is terminal or stopping.
+- `409 session_not_reconnectable`: the session is terminal or stopping. *(Amendment 23: that
+  includes a session stopped because its owner lost access.)*
 - Each successful call inserts a new `session_tokens` row. Concurrent calls are allowed and
   produce independent tokens; consuming one does not invalidate another.
 - Normal authenticated API rate limits apply. Plaintext is returned once and never logged.
@@ -4964,11 +4968,39 @@ presentation only** and borrows **everything executable** from its parent at lau
 > launch and swap. An entitlement change, including this parent rule, gates new launches, swaps
 > and visibility only: a session already running, and reconnects to it through
 > `POST /v1/sessions/{id}/signaling-token`, are not ended by it; an admin stops such a session
-> from the session console (`DELETE /v1/sessions/{id}`).
+> from the session console (`DELETE /v1/sessions/{id}`). *(That sentence is superseded by
+> amendment 23, below, for access an admin removes.)*
 > It also adds `409 provider_enabled` to `DELETE /v1/apps/{id}` (§Library).
 > Turning library discovery on after the provider app's `library_provider` was cleared still
 > creates a fresh provider app open to `all`; the restriction stays on the cleared app. Backed by
 > `openapi.yaml` (the `DELETE` `409`); no `schema.md` shape change, no migration.
+
+> **Amendment 23 — revoking access ends a running session (#503), signed off by the operator
+> 2026-10-10. It changes behaviour; no shape changes.** When an admin removes access, the
+> control plane stops every session whose owner is no longer entitled to the app it runs.
+> - **What triggers it:** `DELETE /v1/admin/apps/{id}/entitlements/{entitlement_id}`, and the
+>   entitlement-mode route with `user` or `none`. Through amendment 22's parent rule, either
+>   one on a provider app also ends sessions on its derived tiles.
+> - **Who is stopped:** the entitlement predicate (§6.3), keyed on the **session owner** with
+>   no role arm, so an admin's own session ends too. A user still covered by another row keeps
+>   their session: revoking the `all` row does not stop a user who holds a personal grant.
+>   Other users' sessions are untouched.
+> - **How:** each affected session is `stopping` before the route answers. The agent gets
+>   `session_stop` with `reason: "entitlement_revoked"` (`agent-api.md`); the response does not
+>   wait for its ack. A swap in flight toward the revoked app completes, then is stopped the
+>   same way.
+> - **No reconnect:** `POST /v1/sessions/{id}/signaling-token` answers
+>   `409 session_not_reconnectable` for the stopped session, as for any other.
+> - **Audit:** the `app.entitlement.revoke` and `app.entitlement.set_mode` activity rows gain
+>   `sessions_stopped` and up to 50 `stopped_session_ids`.
+> - **If a stop fails:** the route answers `500` and the activity row carries
+>   `sessions_stop_failed`. The access is already removed; stop what is left with
+>   `DELETE /v1/sessions/{id}`.
+> - **What does not trigger it:** mode `all`, disabling an app (`enabled`,
+>   `parent_app_disabled`), and the library sync's own provider-row revokes (a title
+>   uninstalled, an ignore rule). Those still gate only new launches, swaps and visibility.
+>
+> No `openapi.yaml` or `schema.md` change, no migration.
 
 The tile contributes exactly one thing to execution: an environment override,
 `STEAM_STARTUP_FLAGS = "-bigpicture -applaunch <external_id>"`, merged over the parent's
@@ -6667,6 +6699,9 @@ the **provider name**, and applies the whole desired state atomically, server-si
   is `400 validation_failed`.
 - **`{provider}` is a `library_provider` name (e.g. `"steam"`), not an app id** — matched
   case-insensitively, mirroring `EnsureProviderApp`'s own lower-casing.
+- *(Amendment 23)* **`"user"` and `"none"` end the sessions they left unentitled**, on the
+  provider app and on its derived tiles, before the `200` (§Derived tiles, amendment 23).
+  `"all"` and a `202` stop nothing.
 - *(Amendment 21)* **No app yet: `202`, and the mode is kept.** When no app exists with that
   `library_provider` (not enabled yet, or `EnsureLibraryProviders`'s async pass has not landed)
   but an `image_catalog` entry claims it, the mode is stored with the acting admin and the time

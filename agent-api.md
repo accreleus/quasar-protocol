@@ -1786,9 +1786,12 @@ A still desktop is displaying. No offer is emitted.
 ```json
 { "type": "session_stop", "id": "<command-id>", "session_id": "<uuid>", "reason": "user_requested" }
 ```
-`reason` ∈ `user_requested | idle_timeout | host_draining | admin | error`. The agent tears down
-and reports `session_state: stopping` → `stopped`. The reservation is released when `stopped`
-arrives.
+`reason` ∈ `user_requested | idle_timeout | host_draining | admin | error | entitlement_revoked`.
+The agent tears down and reports `session_state: stopping` → `stopped`. The reservation is
+released when `stopped` arrives. *(Amendment 23, #503, signed off by the operator 2026-10-10:
+`entitlement_revoked` is sent when the session's owner lost access to its app, `control-api.md`
+§Derived tiles. Additive: `reason` is informational, and an agent tears down the same way
+whatever its value.)*
 
 ### `session_swap_app` — swap the source app, transport stays live (P2-02)
 Tells the agent to swap a `running` session's **source container** behind its interpipe boundary
