@@ -2286,7 +2286,8 @@ paths:
         POST /v1/admin/jobs/{job_id}/run. A release below the installed control plane's
         schema_version is never listed on either channel (ADR 0002), and a stable
         release whose manifest is missing or invalid is not listed either (ADR 0001 -
-        there is nothing to pin it by); the latter surfaces as a manifest_invalid fault.
+        there is nothing to pin it by); the latter is not a fault in this view - the
+        platform.release_detect job counts it in its run summary (amendment 26).
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/PlatformReleaseView" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -6335,17 +6336,17 @@ components:
         nothing anywhere - it is reported so a wrong state is visible instead of silent.
         Prefixed (rather than a bare FaultKind) because "fault" already names an unrelated
         thing in this system - an NVIDIA Xid is a GPU fault. Full semantics: control-api.md
-        §"Platform releases".
+        §"Platform releases". Amendment 26 (#157) removed a third value, manifest_invalid,
+        that no control plane ever emitted.
       enum:
         - agent_ahead_of_control_plane
         - identity_unknown
-        - manifest_invalid
     PlatformReleaseFault:
       type: object
       required: [kind, host_id, node_name, detail]
       properties:
         kind: { $ref: "#/components/schemas/PlatformReleaseFaultKind" }
-        host_id: { type: [string, "null"], format: uuid, description: "Null on an instance-scoped fault (manifest_invalid)." }
+        host_id: { type: [string, "null"], format: uuid, description: "Null on an instance-scoped fault. Neither kind in the vocabulary is one today (amendment 26), so both name a host." }
         node_name: { type: [string, "null"], description: "Null on an instance-scoped fault." }
         detail:
           type: string
@@ -6411,7 +6412,7 @@ components:
             orders below an installed prerelease at the same schema_version, which is what stops a
             switch back to stable offering a downgrade (amendment 3); a prerelease is never here
             on stable; a stable or beta release with a missing or invalid manifest is never here
-            either (it is a manifest_invalid fault instead).
+            either (and is not a fault - amendment 26).
           items: { $ref: "#/components/schemas/PlatformRelease" }
         targets:
           type: array
@@ -6912,7 +6913,7 @@ components:
         asset is named platform-release-manifest.json precisely so the two never collide.
       # UNKNOWN KEYS ARE INVALID at both levels: #108's producer validator rejects
       # them, so the consumer must too, or a manifest the workflow refuses to publish
-      # would still be accepted here. An unknown key is a manifest_invalid fault and
+      # would still be accepted here. An unknown key makes the manifest invalid and
       # the release is not listed.
       additionalProperties: false
       required: [format_version, version, prerelease, source_commit, built_at, schema_version, components]
@@ -6921,8 +6922,8 @@ components:
           type: integer
           description: >-
             The manifest format's own version; 1 today. A consumer that meets a format_version it
-            does not know treats the manifest as INVALID (a manifest_invalid fault, and the
-            release is not listed) rather than guessing.
+            does not know treats the manifest as INVALID (the release is not listed, and no
+            fault is raised) rather than guessing.
         version: { type: string, description: "Semver without a leading \"v\"." }
         prerelease: { type: boolean, description: "Mirrors the tag's prerelease status - what keeps a release candidate off the stable channel." }
         source_commit: { type: string, description: "40 lowercase hex." }
@@ -6974,7 +6975,7 @@ components:
       properties:
         format_version:
           type: integer
-          description: "2 for this shape. A consumer that meets a format_version it does not know treats the manifest as INVALID (manifest_invalid) rather than guessing."
+          description: "2 for this shape. A consumer that meets a format_version it does not know treats the manifest as INVALID (the release is not listed) rather than guessing."
         version: { type: string, description: "Semver without a leading \"v\"." }
         prerelease: { type: boolean, description: "Mirrors the tag's prerelease status." }
         source_commit: { type: string, description: "40 lowercase hex. One commit for every component." }

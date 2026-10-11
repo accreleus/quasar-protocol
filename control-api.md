@@ -7399,14 +7399,15 @@ precedence is inserted between those two keys — see §Platform-release beta ch
   therefore shows only stable releases at or above it, which is frequently **none**, and an empty
   `available` is the correct answer rather than an offer to move backwards.
 - **A stable release whose manifest is missing or invalid is not listed either** — it cannot be
-  applied by digest (ADR 0001), so offering it would be offering something unfollowable. It
-  surfaces as a `manifest_invalid` fault instead, which is how a broken publish stops being silent.
-  *(Amendment 14 note, #353: shipped control planes reserve the `manifest_invalid` fault kind but
-  do not emit it — a missing or invalid asset is counted in the `platform.release_detect` run
-  summary and the release is simply not listed. So a control plane that predates amendment 14 shows
-  **nothing** for a release that publishes no `platform-release-manifest.json` (#352 decision 19),
-  not a fault. Amendment 14 does not change what a control plane emits here; it relies only on
-  "not listed".)*
+  applied by digest (ADR 0001), so offering it would be offering something unfollowable. It is
+  **not a fault in this view** *(amendment 26, #157, below)*: the detection job counts it in its
+  own run summary (`platform.release_detect`, §Background jobs), which is how a broken publish
+  stops being silent.
+  *(Amendment 14 note, #353, as corrected by amendment 26: no shipped control plane ever emitted
+  a `manifest_invalid` fault, and amendment 26 removed the kind. So a control plane that predates
+  amendment 14 shows **nothing** for a release that publishes no `platform-release-manifest.json`
+  (#352 decision 19), not a fault. Amendment 14 does not change what a control plane emits here;
+  it relies only on "not listed".)*
 
 Per release:
 
@@ -7487,7 +7488,38 @@ branched on. The vocabulary is **closed** (`openapi.yaml` `PlatformReleaseFaultK
 |---|---|
 | `agent_ahead_of_control_plane` | a host's reported `source_commit` matches a **known release** that orders **above** the installed control plane's release (`schema_version` DESC, then `built_at` DESC — the ordering `available` uses). ADR 0002 says this surface can never *create* that state; this is how it **reports** one an operator produced by hand. An agent on a commit matching no known release cannot be ordered and raises nothing — unrecognized is not ahead. |
 | `identity_unknown` | a registered host whose `identity_known` is false, one fault per host. It is both an ineligibility (above) and a fault, deliberately: the target row explains why the button is absent, the fault is what a fleet-level "something needs attention" count reads. |
-| `manifest_invalid` | a discovered stable release whose `platform-release-manifest.json` asset is missing, unparseable, or fails validation (an unknown `format_version`, an unknown key at either level — the object or a component — a missing component, the two components out of order, an `image` carrying a tag or a digest, an absent or malformed `digest`, a non-positive `schema_version`). Instance-scoped; `detail` names the release. The release is **not** listed in `available` — ADR 0001 leaves nothing to pin it by. |
+
+> **Amendment 26 — the release view has no `manifest_invalid` fault (#157), signed off by the
+> operator 2026-10-11. It removes one value from a closed vocabulary; no control plane's
+> behaviour changes.** `PlatformReleaseFaultKind` listed a third kind, `manifest_invalid`: a
+> discovered release whose manifest asset is missing or fails validation was to be an
+> instance-scoped fault whose `detail` names the release. It was specified and never
+> implemented, and no shipped control plane has ever emitted it.
+> - **Why it is removed, not implemented.** A manifest that fails validation carries no
+>   trustworthy `source_commit`, `built_at` or `schema_version`, so the release is never stored
+>   and there is no release for a fault to name. The same reason keeps it out of `available`.
+> - **Where the condition is reported.** The detection job counts the releases it could not
+>   read in its own run summary (`platform.release_detect`, §Background jobs), which an
+>   operator reads in the Jobs tab. As shipped the count sits under the key `manifest_invalid`;
+>   that is a count in a job summary, not a fault kind. A run summary is the runner's opaque
+>   blob, and this amendment freezes nothing in it.
+> - **What a client relies on.** A release with a missing or invalid manifest is **not
+>   listed**, and that is all this view says about it. `faults` carries
+>   `agent_ahead_of_control_plane` and `identity_unknown` only, and both name a host.
+> - **Compatibility.** The value never appeared on the wire, so no response any control plane
+>   has sent or will send changes. A client that still knows the kind never meets it from a
+>   control plane on this amendment; a client on this amendment never meets it from an older
+>   control plane. A client needs no change beyond dropping a dead case or label. The native
+>   client does not read this admin view and needs none.
+> - **What does not change.** `PlatformReleaseFault` keeps its shape: `host_id` and `node_name`
+>   stay nullable and still mean an instance-scoped fault when null, though neither remaining
+>   kind is one. The vocabulary stays closed.
+>
+> Backed by `openapi.yaml` (the enum value, and the descriptions that named the fault). The
+> passages it corrects here: the not-listed rule and its amendment-14 note above, the fault
+> table, `format_version` in §"The release manifest asset", amendment 3's "every rule `stable`
+> applies", and two sentences in §"RH06 — Quasar-owned installation". **`agent-api.md`,
+> `schema.md` and `signaling.md` are untouched**; no route, field, status or error code changes.
 
 Errors: `401`, `403`. A fleet with no hosts, no releases, and a failing detector is still a `200` —
 this endpoint reports posture, and "nothing to report" is posture.
@@ -7561,9 +7593,10 @@ verbatim as `PlatformRelease.manifest`. Its shape is exactly:
 
 - **`format_version` and `schema_version` are different things, and the names are worth reading
   twice.** `format_version` is the version of *this document's format* (`1` today; a consumer that
-  meets a `format_version` it does not know treats the manifest as invalid and raises
-  `manifest_invalid` rather than guessing). `schema_version` is the **database migration version**
-  the release's control-plane image embeds — the ADR 0002 ordering key used everywhere above.
+  meets a `format_version` it does not know treats the manifest as invalid rather than guessing:
+  the release is not listed, and no fault is raised — amendment 26). `schema_version` is the
+  **database migration version** the release's control-plane image embeds — the ADR 0002
+  ordering key used everywhere above.
 - **`image` is a registry reference with no tag and no digest** — the repository name alone —
   and `digest` is the `sha256:…` form beside it. Consumers compose `image@digest`. **A tag is
   never an identity** (ADR 0001): the manifest names the only form that cannot be moved under a
@@ -8068,8 +8101,8 @@ same rows. Three consequences a client and an operator can rely on:
 
 Every rule `stable` applies still applies: a release below the installed control plane's
 `schema_version` is not listed (ADR 0002), and a release with a missing or invalid manifest is not
-listed but raises a `manifest_invalid` fault (ADR 0001). The **only** rule `beta` drops is the one
-that hides prereleases.
+listed either (ADR 0001; it raises no fault — amendment 26 removed the `manifest_invalid` kind
+this sentence named). The **only** rule `beta` drops is the one that hides prereleases.
 
 ### Ordering: SemVer precedence, between the two existing keys
 
@@ -9554,8 +9587,8 @@ produced by the same publish workflow from the same tag as the notes and the for
 - `PlatformRelease.manifest` serves whichever asset was read, **verbatim**; a client tells them apart
   by `format_version`. A v2 asset that fails validation — an unknown `format_version`, a component
   missing or out of order, a `floor` entry missing, out of order, malformed or above `version`, an
-  unknown key — is handled exactly as an invalid format-1 asset: the release is not listed (and see
-  the amendment-14 note in §"Platform releases" on `manifest_invalid`).
+  unknown key — is handled exactly as an invalid format-1 asset: the release is not listed, and
+  no fault is raised (amendment 26, §"Platform releases", removed the `manifest_invalid` kind).
 - **Edge publishes no manifest**, in either format, so nothing above applies to an edge build. Its
   `recovery-actor` image is resolved for the build's commit exactly as the edge channel resolves
   that commit's control-plane and node-agent images (the edge tag family is release tooling, not
@@ -10054,10 +10087,11 @@ the control plane runs on. No route is added. Both routes are admin-only.
    publish `platform-release-manifest.v2.json` (and, when signed, its `.sig`) and **no**
    `platform-release-manifest.json`, so a control plane that predates this amendment is never offered
    an in-place update onto an owned install: it finds no asset it can read and lists no such
-   release. It raises no fault either — shipped control planes never emit `manifest_invalid` (see
-   the amendment-14 note in §"Platform releases") — so it shows nothing, as #352 decision 19
-   intends. A control plane implementing this amendment stops falling back to format 1. The
-   `ReleaseManifest` (format 1) shape stays documented, because releases already published carry it.
+   release. It raises no fault either — no shipped control plane ever emitted `manifest_invalid`,
+   and amendment 26 removed the kind (§"Platform releases") — so it shows nothing, as #352
+   decision 19 intends. A control plane implementing this amendment stops falling back to
+   format 1. The `ReleaseManifest` (format 1) shape stays documented, because releases already
+   published carry it.
    **Ordering constraint.** The generator change that stops emitting the format-1 asset is RH06-13
    (#365), but no release may be published without the format-1 pair until the Go updater has
    retired (RH06-15, #367): until then a `registry` host's updater still verifies signatures against
