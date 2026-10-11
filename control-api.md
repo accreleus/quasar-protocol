@@ -5459,7 +5459,8 @@ so and a filesystem did not.
 > No route, status code, field or error code changes: `LibraryStatus.recent_scans[].revoked` is
 > counted by the scan that confirms. **`agent-api.md` is untouched**; the agent's report is the
 > one it already sends. Backed by `schema.md` (`library_observations.missing_since`, migration
-> 0102); `openapi.yaml` is unchanged.
+> 0102); `openapi.yaml` changes only the two descriptions that stated the one-scan prune; no
+> path, field, status or schema changes.
 
 ### The agent never learns a user
 
