@@ -5437,10 +5437,11 @@ so and a filesystem did not.
 >   prunes the observation and revokes the entitlement; amendment 23's sweep then ends a
 >   running session of it. The mark is stamped at report time. The following scheduled scan is
 >   queued one interval after the marking scan was queued, which is short of the mark by the
->   time the agent took to report, so that scan prunes nothing. The scheduled scan after that
->   one qualifies while the resolved interval has not been raised since the marking scan was
->   queued; if it has, that scan prunes nothing, the mark does not move, and the one after it
->   qualifies.
+>   time the agent took to report, so that scan prunes nothing. The scan queued two intervals
+>   after the marking scan qualifies when the interval is unchanged. A later raise postpones a
+>   scan that is not yet queued, and that later scan still qualifies. A scan already queued
+>   falls short only when the new interval exceeds the gap from the mark to its queue time, and
+>   then the mark stays where it is.
 > - **A "scan now" pressed sooner does not count.** `POST /v1/admin/library/scan` still
 >   bypasses the scheduler's pacing, but a scan it queues less than one interval after the mark
 >   neither confirms the mark nor moves it: two scans a second apart would both miss a mount
@@ -5451,13 +5452,15 @@ so and a filesystem did not.
 >   report over a known library and a report at `max_entries` (for the games it does not list)
 >   neither confirm a mark nor clear it.
 > - **Cost:** an uninstalled game is marked by the first scan that misses it and leaves on the
->   second scheduled scan after that mark. A "scan now" queued sooner than one interval after
->   the first resets the schedule like any successful scan, so it delays the second.
+>   second scheduled scan after that mark. A "scan now" counts as the last scan for the
+>   scheduler's pacing, so one pressed between two scheduled scans moves the next scheduled scan
+>   to one interval after it, which delays the confirming scan.
 > - **Per host:** a user with the game on two hosts keeps it until each host's own scans have
 >   confirmed it gone, as before.
 > - **What it does not cover:** a library that stays out of the scan's reach across both scans
->   (moved past the discovery depth or behind a symlink, or a mount away for longer than a scan
->   interval) is still read as uninstalled, one scan later than before.
+>   (moved past the discovery depth or behind a symlink) is still read as uninstalled, and so is
+>   a mount still away at the confirming scan, about two intervals after the marking scan was
+>   queued, on that scan rather than on the miss itself.
 >
 > No route, status code, field or error code changes: `LibraryStatus.recent_scans[].revoked` is
 > counted by the scan that confirms. **`agent-api.md` is untouched**; the agent's report is the
@@ -6474,7 +6477,9 @@ untrustworthy.
   as an *override, not a default* (`QUASAR_ARTWORK_SWEEP_INTERVAL`,
   `QUASAR_LIBRARY_SCAN_INTERVAL`), that does not change: the resolved schedule reports
   `locked: true` + `locked_by: "<VAR>"`, and a `PATCH` of the interval is refused with
-  `409 schedule_locked` rather than silently accepted and overruled. This is the same treatment
+  `409 schedule_locked` rather than silently accepted and overruled (for `library.discovery`,
+  a value equal to the reported `interval_secs` is accepted and not stored, and only a
+  different value is `409 schedule_locked`: amendment 28, below). This is the same treatment
   `GET /v1/admin/library/status` already gives with `interval_overridden_by_env`, and it exists
   to prevent the "which source is in force" confusion.
 

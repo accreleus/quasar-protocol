@@ -1970,8 +1970,10 @@ interval resolved at reconcile time (`QUASAR_LIBRARY_SCAN_INTERVAL`, else
 `instance_settings.library_discovery_interval_minutes`). The mark is that report transaction's
 `now()`, and a scheduled scan is queued one interval after the previous scan's queue time, so the
 next scheduled scan is short of the mark by the report lag and deletes nothing. The scheduled scan
-after that qualifies while the resolved interval has not been raised since the marking scan was
-queued. A scan that falls short deletes nothing and leaves the mark where it is. A scan now queued
+after that, queued two intervals after the marking scan, qualifies when the interval is unchanged.
+A later raise postpones a scan that is not yet queued, and that later scan still qualifies; a scan
+already queued falls short only when the new interval exceeds the gap from the mark to its queue
+time. A scan that falls short deletes nothing and leaves the mark where it is. A scan now queued
 sooner than one interval after the mark does not qualify.
 With no positive interval a scan marks and deletes nothing. The scope is the triple a
 `library_scans` row names: `host_id` is in this table's key, so a scan of one host neither marks

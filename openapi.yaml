@@ -3751,7 +3751,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: "job_unmanaged (not adopted) or schedule_locked (an env var is authoritative)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "409": { description: "job_unmanaged (not adopted) or schedule_locked (an env var is authoritative, or `library.discovery`'s `interval_secs` differs from the period it reports: amendment 28)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
         "422": { description: "validation_failed — a well-formed value the schedule model refuses." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
   /v1/admin/jobs/{job_id}/run:
     parameters: [ { $ref: "#/components/parameters/PathJobId" } ]
@@ -9493,7 +9493,9 @@ components:
             env override stays the winner (the pre-existing documented behaviour of knobs like
             QUASAR_LIBRARY_SCAN_INTERVAL); the API says so rather than silently accepting an
             edit the environment will overrule - a PATCH of interval_secs on a locked job is
-            409 schedule_locked.
+            409 schedule_locked (for `library.discovery`, a value equal to the reported
+            interval_secs is accepted and not stored, and only a different value is 409
+            schedule_locked: amendment 28).
         locked_by:
           type: [string, "null"]
           description: "The authority that is in force: the environment variable, e.g. \"QUASAR_LIBRARY_SCAN_INTERVAL\", or, for `library.discovery` when that override is not set, `instance_settings.library_discovery_interval_minutes` (amendment 28). Null when not locked."
