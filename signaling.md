@@ -75,7 +75,8 @@ PeerConnection the message belongs to:
   against on the video PC, reclaiming that floor.
 - The host creates **two** `webrtcbin` instances (one per PeerConnection). Each fires its own
   `on-negotiation-needed` → its own offer, and its own ICE candidates. The single-offer guard is
-  per-webrtcbin (each negotiates exactly once). *(Amendment 27, proposed: that is a rule about
+  per-webrtcbin (each negotiates exactly once). *(Amendment 27, #535, signed off by the operator
+  2026-10-11: that is a rule about
   one `webrtcbin`, not about what a client receives. A `webrtcbin` sends its offer again on
   `restart_ice`, and a `pc` can be served by a second `webrtcbin` after the first, so a client
   can receive more than one `offer` for a `pc`. §Mid-session reconnection.)*
@@ -98,7 +99,8 @@ Rules:
 
 - The mic m-line is present in **every** audio offer of the session or in none, always under
   the same mid. Microphone availability is decided at launch and never changes mid-session.
-  *(Amendment 27, proposed. This read "the **first** (and only) audio offer" and "the
+  *(Amendment 27, #535, signed off by the operator 2026-10-11. This read "the **first** (and
+  only) audio offer" and "the
   single-offer-per-PeerConnection rule is unchanged". A session can carry more than one audio
   offer, §Mid-session reconnection; the slot a client claimed on one is the slot the next one
   offers, so its `sendonly` answer stands and it claims nothing again.)*
@@ -208,7 +210,8 @@ Two bounded recovery paths are defined:
   PC; the normal answer/trickle flow follows. Audio may be requested independently with
   `pc:"audio"`. Duplicate requests are idempotent while negotiation is in progress.
 
-  *(Amendment 27, proposed: this said the host "performs an ICE restart". It does not.)* The
+  *(Amendment 27, #535, signed off by the operator 2026-10-11: this said the host "performs an
+  ICE restart". It does not.)* The
   offer comes from the transport that PC already has: the same SDP session one version on,
   with the **same** ICE credentials, and the host gathers no new candidates. The host's WebRTC
   library ignores the request to restart ICE, so a client must not count on `restart_ice` to
@@ -238,12 +241,15 @@ Two bounded recovery paths are defined:
   below describes. The session id, scheduler reservation, container, and application remain
   unchanged.
 
-  *(Amendment 27, proposed: the rule as it is. This said only that attachment "causes the
+  *(Amendment 27, #535, signed off by the operator 2026-10-11: the rule as it is. This said
+  only that attachment "causes the
   still-running host pipeline to emit fresh offers".)* Whether there is still a session to
   attach to depends on what the host saw of the loss:
   - A client that **closes** its peer connections ends the `"input"` DataChannel's
     association. That is `RTCPeerConnection.close()`, and it is also what a browser does when
-    the page unloads or reloads. The host sees it within milliseconds and ends the session:
+    the page unloads or reloads. The host sees the association end within milliseconds, then
+    ends the session, after a one-second grace that distinguishes this from a stop already in
+    flight:
     `stopped`, `state_detail` `peer disconnected: WebRTC data channel closed`. An attach after
     that gets `4404`, and the mint `409 session_not_reconnectable`. **A reload therefore ends
     the session.**
@@ -252,8 +258,9 @@ Two bounded recovery paths are defined:
     passes (120 s by default) or it sees the association end. An attach within that time is
     served.
 
-> **Amendment 27 — a peer the host has not negotiated with gets one more offer (#535).
-> PROPOSED, not signed off: nothing may be implemented against it until it is.** It says what
+> **Amendment 27 — a peer the host has not negotiated with gets one more offer (#535), signed
+> off by the operator 2026-10-11. It changes behaviour; no message, field or close code is
+> added.** It says what
 > a client receives when it attaches with new peer connections to a session another peer was
 > using (a second page or device, or its own rebuild after a loss). It adds no message, field
 > or close code. It also corrects the two paragraphs above and two sentences in §`pc` field and
@@ -300,11 +307,11 @@ Two bounded recovery paths are defined:
 >   four peers whose transport on that `pc` was replaced is ignored.
 > - **A client written before this amendment.** One that applies offers for a `pc` one at a
 >   time and answers only the latest, as the native client does, needs no change. One that
->   answers overlapping offers on independent chains can send no answer for the offer that
->   is current, and then not ask for another; the web client did this and is corrected with
->   this amendment. One that honours only the first offer on a `pc` answers the old
->   transport's offer and never connects. That is what every client got before this
->   amendment whenever another peer had negotiated first: it is no worse off, and not fixed.
+>   handles overlapping offers for a `pc` on independent chains does not follow the rule
+>   above; the web client did until this amendment and is corrected with it. One that honours
+>   only the first offer on a `pc` answers the old transport's offer and never connects. That
+>   is what every client got before this amendment whenever another peer had negotiated
+>   first: it is no worse off, and not fixed.
 > - **Unchanged:** the message shapes, the close codes (`4410` to the displaced client, which
 >   still MUST NOT reconnect), the token lifecycle, and `agent-api.md`'s envelope.
 

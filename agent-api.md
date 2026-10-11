@@ -2469,7 +2469,8 @@ node then offers unprompted. There is no such notification: an attach that sends
 at the node, which is what makes the signalling-only re-attach in `signaling.md` safe. No
 container or media pipeline restart is implied either way.
 
-*(Amendment 27, #535, PROPOSED, not signed off.)* The node's offer in answer to `restart_ice`
+*(Amendment 27, #535, signed off by the operator 2026-10-11.)* The node's offer in answer to
+`restart_ice`
 comes from the transport that peer connection already has. When the answer to it is from a
 peer other than the one that transport last negotiated with, the node does not apply it: it
 replaces that peer connection's transport and sends one further `offer` for the same `pc`,
