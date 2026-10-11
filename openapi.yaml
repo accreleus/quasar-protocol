@@ -3733,13 +3733,15 @@ paths:
         400 validation_failed = malformed body, unknown key, or a value of the wrong JSON
         type; 422 validation_failed = a well-formed value the schedule refuses (interval below
         60s, interval_secs on a non-interval job, window_start == window_end, a window_days
-        value outside 0..6, an unknown IANA zone, history_limit outside 1..500).
+        value outside 0..6, an unknown IANA zone, history_limit outside 1..500; except
+        `library.discovery`'s reported period resent unchanged: amendment 28).
         409 job_unmanaged = the job is not adopted and has no schedule to edit.
         409 schedule_locked = an environment variable is authoritative over this job's
         interval; the edit is refused rather than silently accepted and overruled. For
         `library.discovery` the period is the resolved Libraries interval, not admin-owned
         `interval_secs` (amendment 28): an `interval_secs` equal to the period the jobs read
-        reports is accepted and not stored, and a different value is 409 schedule_locked.
+        reports is accepted and not stored; a different value is 422 validation_failed below 60,
+        otherwise 409 schedule_locked.
         Every accepted PATCH writes an admin_activity row (`job.update`, `{"keys": [...]}`).
       x-required-role: admin
       requestBody:
@@ -3751,7 +3753,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: "job_unmanaged (not adopted) or schedule_locked (an env var is authoritative, or `library.discovery`'s `interval_secs` differs from the period it reports: amendment 28)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "409": { description: "job_unmanaged (not adopted) or schedule_locked (an env var is authoritative, or `library.discovery`'s `interval_secs` of 60 or more differs from the period it reports: amendment 28)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
         "422": { description: "validation_failed — a well-formed value the schedule model refuses." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
   /v1/admin/jobs/{job_id}/run:
     parameters: [ { $ref: "#/components/parameters/PathJobId" } ]
@@ -9494,8 +9496,8 @@ components:
             QUASAR_LIBRARY_SCAN_INTERVAL); the API says so rather than silently accepting an
             edit the environment will overrule - a PATCH of interval_secs on a locked job is
             409 schedule_locked (for `library.discovery`, a value equal to the reported
-            interval_secs is accepted and not stored, and only a different value is 409
-            schedule_locked: amendment 28).
+            interval_secs is accepted and not stored, and a different one is 422 below 60,
+            otherwise 409 schedule_locked: amendment 28).
         locked_by:
           type: [string, "null"]
           description: "The authority that is in force: the environment variable, e.g. \"QUASAR_LIBRARY_SCAN_INTERVAL\", or, for `library.discovery` when that override is not set, `instance_settings.library_discovery_interval_minutes` (amendment 28). Null when not locked."
@@ -9621,7 +9623,7 @@ components:
         interval_secs:
           type: integer
           minimum: 60
-          description: "Only for an interval job (422 otherwise), never below 60, and refused with 409 schedule_locked while an env override is in force. For `library.discovery` a value equal to the reported `interval_secs` is accepted and not stored, and a different value is 409 schedule_locked (amendment 28)."
+          description: "Only for an interval job (422 otherwise), never below 60, and refused with 409 schedule_locked while an env override is in force. For `library.discovery` a value equal to the reported `interval_secs` is accepted and not stored, and a different one is 422 below 60, otherwise 409 schedule_locked (amendment 28)."
         window_start: { type: [string, "null"], description: "\"HH:MM\" or \"HH:MM:SS\", or null to clear (with window_end). 24:00 is rejected rather than normalized - a bound that means two things is the seed of a missed run nobody can explain." }
         window_end: { type: [string, "null"], description: "As window_start. Equal start and end is 422: an empty window would never open (a wrapping 22:00 -> 04:00 window, by contrast, is legal)." }
         window_days:
