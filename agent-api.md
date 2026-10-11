@@ -2474,7 +2474,8 @@ comes from the transport that peer connection already has. When the answer to it
 peer other than the one that transport last negotiated with, the node does not apply it: it
 replaces that peer connection's transport and sends one further `offer` for the same `pc`,
 unasked (`signaling.md` §Mid-session reconnection, amendment 27, has the rule and its bounds).
-The encoder and the application are not restarted. Nothing in this envelope changes, and the
+The application is not restarted and the encoder is not rebuilt; its bitrate and adaptation
+return to their launch values. Nothing in this envelope changes, and the
 control plane relays that offer like any other. The control plane forwards no frame from a
 signaling socket once a later attach has displaced it.
 

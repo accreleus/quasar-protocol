@@ -264,9 +264,9 @@ Two bounded recovery paths are defined:
 >   change, and its DTLS and SCTP associations belong to the first peer that connected.
 > - **When.** The host answers `restart_ice` with an `offer` from the transport that `pc`
 >   already has. If the `answer` comes from a different peer than the one that transport last
->   negotiated with (another ICE `ufrag` or another DTLS fingerprint), the host does not apply
->   it. It replaces that `pc`'s transport and sends **one further `offer`** for the same `pc`,
->   which the client did not ask for.
+>   negotiated with (another DTLS fingerprint, or another ICE `ufrag` once DTLS has started on
+>   that transport), the host does not apply it. It replaces that `pc`'s transport and sends
+>   **one further `offer`** for the same `pc`, which the client did not ask for.
 > - **What that offer is** (measured against the host's `webrtcbin`). Another SDP session: a
 >   new `o=` session id at version 0, with new ICE credentials and new candidates. The same as
 >   the offer before it: the DTLS fingerprint and `a=setup:actpass`, the mids and the order of
@@ -284,10 +284,16 @@ Two bounded recovery paths are defined:
 > - **The same peer.** An answer from the peer a transport negotiated with is applied to it.
 >   `restart_ice` in media recovery, and an in-place signaling re-attach, never replace a
 >   transport, and are followed by no further offer.
-> - **Bounds.** One further offer per answer from a new peer. A `pc`'s transport is replaced at
->   most 6 times in any 60 s; past that the host ignores answers from further new peers until
->   the window clears, and goes on streaming to the peer it has. An answer from a peer whose
->   transport was replaced is ignored.
+> - **An answer that arrives late.** A client that answered more than one offer from the old
+>   transport can have the later of those answers applied to the new one. Its answer to the
+>   new transport's own offer then names the ICE credentials it now uses, under the
+>   fingerprint it had. No DTLS has started on that transport, so the host reads this as the
+>   same peer, not one more: it does not apply that answer, sends the same transport's `offer`
+>   again, and applies the answer to that. One more offer, no transport replaced.
+> - **Bounds.** One further offer per answer from a new peer. A `pc`'s transport is replaced,
+>   or made to offer again by a late answer, at most 6 times in any 60 s; past that the host
+>   ignores such answers until the window clears, and goes on streaming to the peer it has.
+>   An answer from a peer whose transport was replaced is ignored.
 > - **A client written before this amendment.** One that applies every offer, as the web
 >   client does, needs no change. One that honours only the first offer on a `pc` answers the
 >   old transport's offer and never connects. That is what every client got before this
