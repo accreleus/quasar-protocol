@@ -274,9 +274,12 @@ Two bounded recovery paths are defined:
 >   audio SSRC and the RTX SSRC differ. To the client it is an ICE restart on a peer connection
 >   whose DTLS has not completed.
 > - **What the client does.** It applies every `offer` it receives for a `pc` to the peer
->   connection it already has for that `pc`, and answers it. It does not make a new peer
->   connection for it, and an offer it did not ask for is not an error. The candidates it sent
->   before that answer are not used; it trickles the new ones after it.
+>   connection it already has for that `pc`, and answers it. Offers for one `pc` are applied
+>   one at a time. An offer that arrives while the answer to an earlier offer for that `pc` is
+>   still being produced supersedes that offer; the answer to the superseded offer is not
+>   sent. It does not make a new peer connection for it, and an offer it did not ask for is
+>   not an error. The candidates it sent before the answer to the offer it actually applied
+>   are not used; it trickles the new ones after that answer.
 > - **What follows.** DTLS, the `"input"` DataChannel (`pc:"video"`) and media come up on the
 >   new transport. The channel is announced once, on that transport; no track is added or
 >   removed. The host closes the transport the previous peer was using: that peer receives
@@ -291,13 +294,18 @@ Two bounded recovery paths are defined:
 >   same peer, not one more: it does not apply that answer, sends the same transport's `offer`
 >   again, and applies the answer to that. One more offer, no transport replaced.
 > - **Bounds.** One further offer per answer from a new peer. A `pc`'s transport is replaced,
->   or made to offer again by a late answer, at most 6 times in any 60 s; past that the host
+>   or made to offer again by a late answer, at most 6 times in any 60 s. Past that the host
 >   ignores such answers until the window clears, and goes on streaming to the peer it has.
->   An answer from a peer whose transport was replaced is ignored.
-> - **A client written before this amendment.** One that applies every offer, as the web
->   client does, needs no change. One that honours only the first offer on a `pc` answers the
->   old transport's offer and never connects. That is what every client got before this
->   amendment whenever another peer had negotiated first: it is no worse off, and not fixed.
+>   It sends that client no error and no close. An answer whose ICE ufrag is one of the last
+>   four peers whose transport on that `pc` was replaced is ignored.
+> - **A client written before this amendment.** One that applies offers for a `pc` one at a
+>   time and answers only the latest, as the native client does, needs no change. One that
+>   answers overlapping offers on independent chains leaves their order to its engine: one
+>   chain fails, and nothing in the client makes the answer it does send the one to the
+>   current offer. The web client answered that way and is corrected with this amendment.
+>   One that honours only the first offer on a `pc` answers the old transport's offer and
+>   never connects. That is what every client got before this amendment whenever another
+>   peer had negotiated first: it is no worse off, and not fixed.
 > - **Unchanged:** the message shapes, the close codes (`4410` to the displaced client, which
 >   still MUST NOT reconnect), the token lifecycle, and `agent-api.md`'s envelope.
 

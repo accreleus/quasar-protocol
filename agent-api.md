@@ -2474,10 +2474,13 @@ comes from the transport that peer connection already has. When the answer to it
 peer other than the one that transport last negotiated with, the node does not apply it: it
 replaces that peer connection's transport and sends one further `offer` for the same `pc`,
 unasked (`signaling.md` §Mid-session reconnection, amendment 27, has the rule and its bounds).
-The application is not restarted and the encoder is not rebuilt; its bitrate and adaptation
-return to their launch values. Nothing in this envelope changes, and the
-control plane relays that offer like any other. The control plane forwards no frame from a
-signaling socket once a later attach has displaced it.
+The application is not restarted and the encoder element is kept. When ABR is on and the
+encoder takes live writes, bitrate and CPB return to their launch values; the speed bias
+returns to 0 on encoders that have one; fps and size return to launch only where the ladder
+had moved them, and a size a person pinned is kept. On the Vulkan path a size restore restarts
+the encoder session. With ABR off, or an encoder that takes no live writes, nothing is written.
+Nothing in this envelope changes, and the control plane relays that offer like any other. The
+control plane forwards no frame from a signaling socket once a later attach has displaced it.
 
 ## Reconnection & reconciliation
 - On agent reconnect, the control plane trusts the agent's `heartbeat.running_sessions` /
