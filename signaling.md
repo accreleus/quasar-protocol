@@ -300,12 +300,11 @@ Two bounded recovery paths are defined:
 >   four peers whose transport on that `pc` was replaced is ignored.
 > - **A client written before this amendment.** One that applies offers for a `pc` one at a
 >   time and answers only the latest, as the native client does, needs no change. One that
->   answers overlapping offers on independent chains leaves their order to its engine: one
->   chain fails, and nothing in the client makes the answer it does send the one to the
->   current offer. The web client answered that way and is corrected with this amendment.
->   One that honours only the first offer on a `pc` answers the old transport's offer and
->   never connects. That is what every client got before this amendment whenever another
->   peer had negotiated first: it is no worse off, and not fixed.
+>   answers overlapping offers on independent chains can send no answer for the offer that
+>   is current, and then not ask for another; the web client did this and is corrected with
+>   this amendment. One that honours only the first offer on a `pc` answers the old
+>   transport's offer and never connects. That is what every client got before this
+>   amendment whenever another peer had negotiated first: it is no worse off, and not fixed.
 > - **Unchanged:** the message shapes, the close codes (`4410` to the displaced client, which
 >   still MUST NOT reconnect), the token lifecycle, and `agent-api.md`'s envelope.
 
