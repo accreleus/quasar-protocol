@@ -1193,7 +1193,7 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `GET /v1/admin/hosts/{id}/encoder-certification/runs/{run_id}` | **admin** | *(SPT-05)* poll a run's status/progress |
 | `GET /v1/admin/jobs` | **admin** | *(jobs framework)* every registered background job with its resolved schedule and run state — **including `managed: false` rows**, work that exists in code but is not adopted, so the page cannot hide what it exists to show |
 | `GET /v1/admin/jobs/{job_id}` | **admin** | *(jobs framework)* one job. `{job_id}` is the code-owned dotted id (`artwork.sweep`), **not a uuid** |
-| `PATCH /v1/admin/jobs/{job_id}` | **admin** | *(jobs framework)* edit the **admin-owned** half of the schedule (`enabled`, interval, window, timezone, history limit) — code-owned identity is never writable here. **`409 job_unmanaged`** for an unadopted job, **`409 schedule_locked`** when an env override is authoritative, `422 validation_failed` for a value the schedule model refuses, `400 validation_failed` for an **unknown key**. Audited as `job.update` |
+| `PATCH /v1/admin/jobs/{job_id}` | **admin** | *(jobs framework)* edit the **admin-owned** half of the schedule (`enabled`, interval, window, timezone, history limit) — code-owned identity is never writable here. **`409 job_unmanaged`** for an unadopted job, **`409 schedule_locked`** when an env override is authoritative, or, for `library.discovery`'s `interval_secs`, whenever it differs from the reported period *(amendment 28)*, `422 validation_failed` for a value the schedule model refuses, `400 validation_failed` for an **unknown key**. Audited as `job.update` |
 | `POST /v1/admin/jobs/{job_id}/run` | **admin** | *(jobs framework)* queue a manual run (`202`) — **bypasses the window, never the job's own gates**. `409 job_already_running` / `409 job_disabled` / `409 job_unmanaged`. `host_id` required for a host-scoped job, refused for an instance-scoped one. Audited as `job.run` |
 | `GET /v1/admin/jobs/{job_id}/runs` | **admin** | *(jobs framework)* that job's bounded run history, newest first; optional `host_id` narrows to one target |
 | `GET /v1/admin/platform/identity` | **admin** | *(platform-release amendment 1, #104/#106)* what **this** control plane is — stamped version, source commit, build time, and the highest migration version its own binary embeds (`schema_version`, the ADR 0002 ordering key). A read of the running binary; it touches no row |
@@ -5435,9 +5435,12 @@ so and a filesystem did not.
 > - **A second miss removes it.** A later successful scan of the same user, provider app and
 >   host that also omits the game, and was queued at least one scan interval after the mark,
 >   prunes the observation and revokes the entitlement; amendment 23's sweep then ends a
->   running session of it. The next scheduled scan qualifies while the resolved interval has
->   not been raised since that scan was queued; if it has, that scan prunes nothing, the mark
->   does not move, and the scan after it qualifies.
+>   running session of it. The mark is stamped at report time. The following scheduled scan is
+>   queued one interval after the marking scan was queued, which is short of the mark by the
+>   time the agent took to report, so that scan prunes nothing. The scheduled scan after that
+>   one qualifies while the resolved interval has not been raised since the marking scan was
+>   queued; if it has, that scan prunes nothing, the mark does not move, and the one after it
+>   qualifies.
 > - **A "scan now" pressed sooner does not count.** `POST /v1/admin/library/scan` still
 >   bypasses the scheduler's pacing, but a scan it queues less than one interval after the mark
 >   neither confirms the mark nor moves it: two scans a second apart would both miss a mount
@@ -5447,9 +5450,9 @@ so and a filesystem did not.
 > - **A scan that cannot speak for the game does neither.** An `ok:false` report, an empty
 >   report over a known library and a report at `max_entries` (for the games it does not list)
 >   neither confirm a mark nor clear it.
-> - **Cost:** an uninstalled game leaves on the second scheduled scan that misses it instead of
->   the first. A "scan now" queued sooner than one interval after the first resets the schedule
->   like any successful scan, so it delays the second.
+> - **Cost:** an uninstalled game is marked by the first scan that misses it and leaves on the
+>   second scheduled scan after that mark. A "scan now" queued sooner than one interval after
+>   the first resets the schedule like any successful scan, so it delays the second.
 > - **Per host:** a user with the game on two hosts keeps it until each host's own scans have
 >   confirmed it gone, as before.
 > - **What it does not cover:** a library that stays out of the scan's reach across both scans
@@ -6429,6 +6432,17 @@ drifts out of sync with the thing it describes.
 `02:00–06:00` window because a developer edited a literal would make the whole surface
 untrustworthy.
 
+> **Amendment 28 — `library.discovery` takes its period from the Libraries interval (#536).
+> Description-only: no property, status or error code is added.** `library.discovery` does not
+> take its period from admin-owned `interval_secs`. The period is the resolved Libraries
+> interval (`QUASAR_LIBRARY_SCAN_INTERVAL`, else
+> `instance_settings.library_discovery_interval_minutes`), read at every scheduling decision,
+> and the jobs read reports that period as `interval_secs`. `locked` is true whenever this
+> interval is not writable here. `locked_by` names the authority: the environment variable when
+> that override is set, otherwise `instance_settings.library_discovery_interval_minutes`. A
+> `PATCH` `interval_secs` equal to the reported value is accepted and not stored. A different
+> value is `409 schedule_locked`. A period saved on the job before this amendment is ignored.
+
 ### Schedule and window semantics
 
 - **`interval` is measured from the END of the previous run**, not from its start and not as a
@@ -6527,7 +6541,7 @@ the updated job. Every accepted `PATCH` writes an `admin_activity` row (`job.upd
 | malformed JSON, an **unknown key**, or a value of the wrong JSON type | `400` | `validation_failed` |
 | `interval_secs` < 60, `interval_secs` on a non-interval job, `window_start == window_end`, a `window_days` value outside 0–6, an unknown IANA zone, `history_limit` outside 1–500 | `422` | `validation_failed` |
 | the job is `managed: false` | `409` | `job_unmanaged` |
-| an env override is authoritative over the interval | `409` | `schedule_locked` |
+| an env override is authoritative over the interval; or `library.discovery`'s `interval_secs` differs from the period it reports *(amendment 28)* | `409` | `schedule_locked` |
 | no such job | `404` | `not_found` |
 
 **An unknown key is rejected rather than ignored**, deliberately: a typo'd field name accepted

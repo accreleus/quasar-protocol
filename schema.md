@@ -1967,18 +1967,21 @@ the scan did not list: `missing_since = now()` where it is NULL. It **deletes** 
 when a later scan of the same triple also does not list it and that scan was queued at least one
 scan interval after the mark: `missing_since <= library_scans.created_at - interval`, with the
 interval resolved at reconcile time (`QUASAR_LIBRARY_SCAN_INTERVAL`, else
-`instance_settings.library_discovery_interval_minutes`). That is the arithmetic of the scheduler's
-own enqueue, so the next scheduled scan qualifies while the resolved interval has not been raised
-since that scan was queued, and a "scan now" queued sooner does not. A scan that falls short of a
-raised interval deletes nothing and leaves the mark where it is, and the scan after it qualifies.
+`instance_settings.library_discovery_interval_minutes`). The mark is that report transaction's
+`now()`, and a scheduled scan is queued one interval after the previous scan's queue time, so the
+next scheduled scan is short of the mark by the report lag and deletes nothing. The scheduled scan
+after that qualifies while the resolved interval has not been raised since the marking scan was
+queued. A scan that falls short deletes nothing and leaves the mark where it is. A scan now queued
+sooner than one interval after the mark does not qualify.
 With no positive interval a scan marks and deletes nothing. The scope is the triple a
 `library_scans` row names: `host_id` is in this table's key, so a scan of one host neither marks
 nor confirms another host's row. A failed scan writes nothing, marks nothing and deletes
 nothing. The same holds for an empty report over existing rows, and for the rows a report at
 the entry cap does not list. None of them clears a mark either; only a sighting does, and a
 capped report is a sighting for the rows it lists. Keeping all of this on the success path is what
-stops one transient error from mass-revoking a fleet's libraries. The cost is that a real
-uninstall takes two scans, at least one interval apart, to leave the library.
+stops one transient error from mass-revoking a fleet's libraries. The cost is that a
+real uninstall is marked by the first scan that misses it and leaves on the second scheduled scan
+after that mark, about two intervals after the mark.
 
 **The revoke it drives is deliberately NOT host-scoped.** A provider entitlement is revoked when
 **no observation remains on any host** — a user who moved a game from host A to host B still has

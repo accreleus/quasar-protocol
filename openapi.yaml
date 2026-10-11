@@ -3736,7 +3736,10 @@ paths:
         value outside 0..6, an unknown IANA zone, history_limit outside 1..500).
         409 job_unmanaged = the job is not adopted and has no schedule to edit.
         409 schedule_locked = an environment variable is authoritative over this job's
-        interval; the edit is refused rather than silently accepted and overruled.
+        interval; the edit is refused rather than silently accepted and overruled. For
+        `library.discovery` the period is the resolved Libraries interval, not admin-owned
+        `interval_secs` (amendment 28): an `interval_secs` equal to the period the jobs read
+        reports is accepted and not stored, and a different value is 409 schedule_locked.
         Every accepted PATCH writes an admin_activity row (`job.update`, `{"keys": [...]}`).
       x-required-role: admin
       requestBody:
@@ -9454,7 +9457,10 @@ components:
             Null for a non-interval schedule. Floor of 60 (a CHECK in the migration and a guard
             in the handler): a job that wants to run more often than once a minute is not a
             background job. When `locked` is true this is the ENVIRONMENT's value, not the
-            stored one.
+            stored one. For `library.discovery` it is always the resolved Libraries interval
+            (`QUASAR_LIBRARY_SCAN_INTERVAL`, else
+            `instance_settings.library_discovery_interval_minutes`), read at every scheduling
+            decision; a period stored on the job is ignored (amendment 28).
         window_start:
           type: [string, "null"]
           description: "HH:MM:SS in `timezone`, or null for 'any time'. Paired with window_end by a CHECK - both set or both null."
@@ -9481,14 +9487,16 @@ components:
         locked:
           type: boolean
           description: >-
-            True when an environment variable is authoritative over this job's interval. The
+            True when an environment variable is authoritative over this job's interval, and,
+            for `library.discovery`, whenever its interval is not writable here, which is
+            always (amendment 28). The
             env override stays the winner (the pre-existing documented behaviour of knobs like
             QUASAR_LIBRARY_SCAN_INTERVAL); the API says so rather than silently accepting an
             edit the environment will overrule - a PATCH of interval_secs on a locked job is
             409 schedule_locked.
         locked_by:
           type: [string, "null"]
-          description: "The environment variable that is in force, e.g. \"QUASAR_LIBRARY_SCAN_INTERVAL\". Null when not locked."
+          description: "The authority that is in force: the environment variable, e.g. \"QUASAR_LIBRARY_SCAN_INTERVAL\", or, for `library.discovery` when that override is not set, `instance_settings.library_discovery_interval_minutes` (amendment 28). Null when not locked."
     JobRun:
       type: object
       description: "One record of one run - the shape that appears as `last_run` and as an item of the run-history page."
@@ -9611,7 +9619,7 @@ components:
         interval_secs:
           type: integer
           minimum: 60
-          description: "Only for an interval job (422 otherwise), never below 60, and refused with 409 schedule_locked while an env override is in force."
+          description: "Only for an interval job (422 otherwise), never below 60, and refused with 409 schedule_locked while an env override is in force. For `library.discovery` a value equal to the reported `interval_secs` is accepted and not stored, and a different value is 409 schedule_locked (amendment 28)."
         window_start: { type: [string, "null"], description: "\"HH:MM\" or \"HH:MM:SS\", or null to clear (with window_end). 24:00 is rejected rather than normalized - a bound that means two things is the seed of a missed run nobody can explain." }
         window_end: { type: [string, "null"], description: "As window_start. Equal start and end is 422: an empty window would never open (a wrapping 22:00 -> 04:00 window, by contrast, is legal)." }
         window_days:
