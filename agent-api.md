@@ -2469,6 +2469,15 @@ node then offers unprompted. There is no such notification: an attach that sends
 at the node, which is what makes the signalling-only re-attach in `signaling.md` safe. No
 container or media pipeline restart is implied either way.
 
+*(Amendment 27, #535, PROPOSED, not signed off.)* The node's offer in answer to `restart_ice`
+comes from the transport that peer connection already has. When the answer to it is from a
+peer other than the one that transport last negotiated with, the node does not apply it: it
+replaces that peer connection's transport and sends one further `offer` for the same `pc`,
+unasked (`signaling.md` §Mid-session reconnection, amendment 27, has the rule and its bounds).
+The encoder and the application are not restarted. Nothing in this envelope changes, and the
+control plane relays that offer like any other. The control plane forwards no frame from a
+signaling socket once a later attach has displaced it.
+
 ## Reconnection & reconciliation
 - On agent reconnect, the control plane trusts the agent's `heartbeat.running_sessions` /
   fresh `capacity` as ground truth for that host: sessions the control plane thinks are

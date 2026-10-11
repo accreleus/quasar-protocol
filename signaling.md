@@ -75,7 +75,10 @@ PeerConnection the message belongs to:
   against on the video PC, reclaiming that floor.
 - The host creates **two** `webrtcbin` instances (one per PeerConnection). Each fires its own
   `on-negotiation-needed` → its own offer, and its own ICE candidates. The single-offer guard is
-  per-webrtcbin (each negotiates exactly once).
+  per-webrtcbin (each negotiates exactly once). *(Amendment 27, proposed: that is a rule about
+  one `webrtcbin`, not about what a client receives. A `webrtcbin` sends its offer again on
+  `restart_ice`, and a `pc` can be served by a second `webrtcbin` after the first, so a client
+  can receive more than one `offer` for a `pc`. §Mid-session reconnection.)*
 - The `"input"` DataChannel is created on the **video** webrtcbin only. Input latency is unaffected
   by audio jitter buffer behaviour.
 - Both PeerConnections use the same STUN/TURN config. ICE gathering runs in parallel for both.
@@ -93,9 +96,12 @@ When a session is launched with microphone capture granted (see `control-api.md`
 
 Rules:
 
-- The mic m-line is present in the **first** (and only) audio offer or not at all. The
-  single-offer-per-PeerConnection rule is unchanged — microphone availability is decided at
-  launch and never renegotiated mid-session.
+- The mic m-line is present in **every** audio offer of the session or in none, always under
+  the same mid. Microphone availability is decided at launch and never changes mid-session.
+  *(Amendment 27, proposed. This read "the **first** (and only) audio offer" and "the
+  single-offer-per-PeerConnection rule is unchanged". A session can carry more than one audio
+  offer, §Mid-session reconnection; the slot a client claimed on one is the slot the next one
+  offers, so its `sendonly` answer stands and it claims nothing again.)*
 - The client answers the mic m-line with `sendonly` (its perspective). It MAY answer with no
   live track attached and attach/replace the microphone track later
   (`RTCRtpSender.replaceTrack`); enabling/disabling the mic mid-session is a client-local
@@ -198,10 +204,16 @@ the Phase 0 note above — unchanged.)
 Two bounded recovery paths are defined:
 
 - **Transient media-path loss, signaling still connected.** The answerer sends
-  `{ "type":"restart_ice", "pc":"video" }`. The host, as offerer, performs an ICE restart and
-  sends a new `offer` for that PC; the normal answer/trickle flow follows. Audio may be requested
-  independently with `pc:"audio"`. Duplicate requests are idempotent while negotiation is in
-  progress.
+  `{ "type":"restart_ice", "pc":"video" }`. The host, as offerer, sends a new `offer` for that
+  PC; the normal answer/trickle flow follows. Audio may be requested independently with
+  `pc:"audio"`. Duplicate requests are idempotent while negotiation is in progress.
+
+  *(Amendment 27, proposed: this said the host "performs an ICE restart". It does not.)* The
+  offer comes from the transport that PC already has: the same SDP session one version on,
+  with the **same** ICE credentials, and the host gathers no new candidates. The host's WebRTC
+  library ignores the request to restart ICE, so a client must not count on `restart_ice` to
+  change the host's side of the path; it is the way to ask for an offer. A request that arrives
+  before a transport has made its first offer is absorbed: that offer answers it.
 - **Signaling loss with the media path intact.** Added 2026-09-08 (#128). Signaling and media are
   independent: media and the input DataChannel are answerer↔host, so they keep flowing while the
   control plane is away. A client whose signaling socket closes while its peer connections are
@@ -221,9 +233,67 @@ Two bounded recovery paths are defined:
   recovery had not yet sent anything MUST NOT, or two ICE-restart offers race.
 
 - **PeerConnection loss.** The authenticated client mints a replacement token for
-  the same session, opens a new signaling WebSocket, and recreates its peer connections. Client
-  attachment causes the still-running host pipeline to emit fresh offers. The session id,
-  scheduler reservation, container, and application remain unchanged.
+  the same session, opens a new signaling WebSocket, recreates its peer connections and sends
+  `restart_ice` for each. It is then a new peer to the host and is served as amendment 27
+  below describes. The session id, scheduler reservation, container, and application remain
+  unchanged.
+
+  *(Amendment 27, proposed: the rule as it is. This said only that attachment "causes the
+  still-running host pipeline to emit fresh offers".)* Whether there is still a session to
+  attach to depends on what the host saw of the loss:
+  - A client that **closes** its peer connections ends the `"input"` DataChannel's
+    association. That is `RTCPeerConnection.close()`, and it is also what a browser does when
+    the page unloads or reloads. The host sees it within milliseconds and ends the session:
+    `stopped`, `state_detail` `peer disconnected: WebRTC data channel closed`. An attach after
+    that gets `4404`, and the mint `409 session_not_reconnectable`. **A reload therefore ends
+    the session.**
+  - A client whose peer connections were lost **without** being closed (its network path is
+    gone) leaves the host streaming to nobody. The session stays until the host's idle window
+    passes (120 s by default) or it sees the association end. An attach within that time is
+    served.
+
+> **Amendment 27 — a peer the host has not negotiated with gets one more offer (#535).
+> PROPOSED, not signed off: nothing may be implemented against it until it is.** It says what
+> a client receives when it attaches with new peer connections to a session another peer was
+> using (a second page or device, or its own rebuild after a loss). It adds no message, field
+> or close code. It also corrects the two paragraphs above and two sentences in §`pc` field and
+> §Microphone m-line, which promised more than the host does.
+> - **Why.** `restart_ice` is one request for two cases, and only the client knows which it
+>   is: it kept its peer connections (media recovery, an in-place re-attach), or it made new
+>   ones. The host's transport for a `pc` serves one peer for life: its ICE credentials do not
+>   change, and its DTLS and SCTP associations belong to the first peer that connected.
+> - **When.** The host answers `restart_ice` with an `offer` from the transport that `pc`
+>   already has. If the `answer` comes from a different peer than the one that transport last
+>   negotiated with (another ICE `ufrag` or another DTLS fingerprint), the host does not apply
+>   it. It replaces that `pc`'s transport and sends **one further `offer`** for the same `pc`,
+>   which the client did not ask for.
+> - **What that offer is** (measured against the host's `webrtcbin`). Another SDP session: a
+>   new `o=` session id at version 0, with new ICE credentials and new candidates. The same as
+>   the offer before it: the DTLS fingerprint and `a=setup:actpass`, the mids and the order of
+>   the m-lines, the payload types, the MediaStream id, the SCTP port and the video SSRC. The
+>   audio SSRC and the RTX SSRC differ. To the client it is an ICE restart on a peer connection
+>   whose DTLS has not completed.
+> - **What the client does.** It applies every `offer` it receives for a `pc` to the peer
+>   connection it already has for that `pc`, and answers it. It does not make a new peer
+>   connection for it, and an offer it did not ask for is not an error. The candidates it sent
+>   before that answer are not used; it trickles the new ones after it.
+> - **What follows.** DTLS, the `"input"` DataChannel (`pc:"video"`) and media come up on the
+>   new transport. The channel is announced once, on that transport; no track is added or
+>   removed. The host closes the transport the previous peer was using: that peer receives
+>   nothing more, and its leaving afterwards does not end the session.
+> - **The same peer.** An answer from the peer a transport negotiated with is applied to it.
+>   `restart_ice` in media recovery, and an in-place signaling re-attach, never replace a
+>   transport, and are followed by no further offer.
+> - **Bounds.** One further offer per answer from a new peer. A `pc`'s transport is replaced at
+>   most 6 times in any 60 s; past that the host ignores answers from further new peers until
+>   the window clears, and goes on streaming to the peer it has. An answer from a peer whose
+>   transport was replaced is ignored.
+> - **A client written before this amendment.** One that applies every offer, as the web
+>   client does, needs no change. One that honours only the first offer on a `pc` answers the
+>   old transport's offer and never connects. That is what every client got before this
+>   amendment whenever another peer had negotiated first: it is no worse off, and not fixed.
+> - **Unchanged:** the message shapes, the close codes (`4410` to the displaced client, which
+>   still MUST NOT reconnect), the token lifecycle, and `agent-api.md`'s envelope.
 
 Clients use bounded retry/backoff and expose cancellation. A terminal session returns `409
 session_not_reconnectable`; an unavailable host remains distinguishable through close code 4500.
