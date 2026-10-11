@@ -3853,7 +3853,8 @@ paths:
       summary: "Node-agent internal: report one scan's result. (Not operator-facing.)"
       description: >-
         Phase 4. Accepting an ok:true report runs the whole reconciliation IN ONE TRANSACTION with
-        marking the scan reported - observations upserted and pruned, the suppression ladder
+        marking the scan reported - observations upserted, the ones this scan did not list marked
+        missing and pruned only once a second scan agrees (amendment 25), the suppression ladder
         evaluated ONCE, tiles created for what publishes, tiles disabled and their provider
         entitlements revoked for what suppresses, and the scanning user's provider entitlements
         granted and revoked. Tile creation and the first entitlement commit TOGETHER, because
@@ -9109,8 +9110,8 @@ components:
           items: { $ref: "#/components/schemas/LibraryScanReportEntry" }
           description: >-
             Omitted when empty. An absent entries on an ok:true report is a legitimate "this user has
-            nothing installed" and is reconciled as such - which is how an uninstall of the last game
-            is recognised.
+            nothing installed" and is reconciled as such when the home has no known library; over a
+            known library it removes nothing (amendment 25).
     LibraryScanAccepted:
       type: object
       required: [accepted]

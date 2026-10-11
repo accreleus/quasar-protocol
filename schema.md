@@ -1968,8 +1968,10 @@ when a later scan of the same triple also does not list it and that scan was que
 scan interval after the mark: `missing_since <= library_scans.created_at - interval`, with the
 interval resolved at reconcile time (`QUASAR_LIBRARY_SCAN_INTERVAL`, else
 `instance_settings.library_discovery_interval_minutes`). That is the arithmetic of the scheduler's
-own enqueue, so the next scheduled scan always qualifies and a "scan now" queued sooner does not;
-with no positive interval a scan marks and deletes nothing. The scope is the triple a
+own enqueue, so the next scheduled scan qualifies while the resolved interval has not been raised
+since that scan was queued, and a "scan now" queued sooner does not. A scan that falls short of a
+raised interval deletes nothing and leaves the mark where it is, and the scan after it qualifies.
+With no positive interval a scan marks and deletes nothing. The scope is the triple a
 `library_scans` row names: `host_id` is in this table's key, so a scan of one host neither marks
 nor confirms another host's row. A failed scan writes nothing, marks nothing and deletes
 nothing. The same holds for an empty report over existing rows, and for the rows a report at

@@ -5398,7 +5398,8 @@ driven by *absence*, and absence is exactly what a transient error looks like, s
 whatever entries did arrive" would make a partial walk indistinguishable from a user uninstalling
 their library. `entries` and `error` are both optional on the wire (the agent omits whichever is
 empty); an absent `entries` on an `ok: true` report is a legitimate "this user has nothing
-installed" and is reconciled as such.
+installed" and is reconciled as such. *(Amendment 25, below: over a known library an empty
+report removes nothing.)*
 
 Response is `{ "accepted": true }`. `404 not_found` for a scan the calling host does not own —
 **indistinguishable from one that does not exist, deliberately**, since a `403` would confirm the
@@ -5434,7 +5435,9 @@ so and a filesystem did not.
 > - **A second miss removes it.** A later successful scan of the same user, provider app and
 >   host that also omits the game, and was queued at least one scan interval after the mark,
 >   prunes the observation and revokes the entitlement; amendment 23's sweep then ends a
->   running session of it. The next scheduled scan always qualifies.
+>   running session of it. The next scheduled scan qualifies while the resolved interval has
+>   not been raised since that scan was queued; if it has, that scan prunes nothing, the mark
+>   does not move, and the scan after it qualifies.
 > - **A "scan now" pressed sooner does not count.** `POST /v1/admin/library/scan` still
 >   bypasses the scheduler's pacing, but a scan it queues less than one interval after the mark
 >   neither confirms the mark nor moves it: two scans a second apart would both miss a mount
