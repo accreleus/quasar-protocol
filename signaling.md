@@ -114,6 +114,32 @@ Rules:
 - An audio-disabled session (`QUASAR_AUDIO_DISABLED=1`) has no audio PeerConnection and
   therefore no microphone path.
 
+### The answer's `a=fingerprint` (amendment 29, 2026-10-13)
+
+**The answer's `a=fingerprint`.** The host checks the certificate a client presents in the DTLS
+handshake against the `a=fingerprint` of that client's `answer`, separately for each `pc`. A
+client that fails is still sent media, and nothing it sends reaches the host: no `"input"`
+DataChannel, no microphone, no RTCP feedback. The host reports no error. To pass, the answer
+MUST:
+- carry an `a=fingerprint` for every m-section that is not `a=inactive`, in that section or at
+  session level. An answer without one is rejected, like any answer the host cannot apply.
+- state the digest of the DER encoding of the certificate that peer connection presents in
+  DTLS, in the first `a=fingerprint` line of the first m-section of its BUNDLE group, or, if
+  that section has none, in the first session-level line. Further `a=fingerprint` lines are
+  ignored.
+- write that line as `a=fingerprint:sha-256 <digest>`: the algorithm name in lower case
+  (`sha-1` and `sha-512` are also accepted, `sha-384` is not), one space, then each digest byte
+  as two upper-case hexadecimal digits, bytes separated by `:`, and nothing after the last
+  byte.
+
+This is the syntax RFC 8122 defines and what browsers send. The check is made once, when DTLS
+connects.
+
+*(Amendment 29, signed off by the operator 2026-10-13. Context, not part of the rule: browsers
+already answer this way, so the browser wire is unchanged. The check is made by a host built
+with GStreamer 1.28.8 (accreleus/quasar#569) or later; 0.4.1 and earlier do not make it. The
+host does not yet report a failed check: accreleus/quasar#577.)*
+
 ## Phase 0 simplifications (revisit later)
 - No authentication on the WebSocket. Phase 1 puts signaling behind the control plane with an authenticated, single-use session token in the connect URL.
 - One client per host process. Multi-session is the node agent's job (Phase 1+).
