@@ -122,7 +122,8 @@ client that fails is still sent media, and nothing it sends reaches the host: no
 DataChannel, no microphone, no RTCP feedback. The host reports no error. To pass, the answer
 MUST:
 - carry an `a=fingerprint` for every m-section that is not `a=inactive`, in that section or at
-  session level. An answer without one is rejected, like any answer the host cannot apply.
+  session level. An answer without one is rejected, like any answer the host cannot apply
+  *(amendment 30, below, says what the client sees)*.
 - state the digest of the DER encoding of the certificate that peer connection presents in
   DTLS, in the first `a=fingerprint` line of the first m-section of its BUNDLE group, or, if
   that section has none, in the first session-level line. Further `a=fingerprint` lines are
@@ -133,12 +134,51 @@ MUST:
   byte.
 
 This is the syntax RFC 8122 defines and what browsers send. The check is made once, when DTLS
-connects.
+connects. *(Amendment 30, below: once per transport, and how a client recovers.)*
 
 *(Amendment 29, signed off by the operator 2026-10-13. Context, not part of the rule: browsers
 already answer this way, so the browser wire is unchanged. The check is made by a host built
 with GStreamer 1.28.8 (accreleus/quasar#569) or later; 0.4.1 and earlier do not make it. The
 host does not yet report a failed check: accreleus/quasar#577.)*
+
+### An answer the host cannot apply, and a failed fingerprint check (amendment 30, 2026-10-13)
+
+This adds to amendment 29, above. No message, field or close code is added.
+
+**An answer the host cannot apply.** The host's WebRTC library refuses some answers when they
+are applied; one with no `a=fingerprint` is one of them. The host sends the client no `error`
+and no other message for it. What follows depends on the transport that `pc` is on:
+- **The transport the session launched with.** The session ends `failed`, the cause in its
+  `error_message`, and the signaling WebSocket closes with `4404`.
+- **A transport that replaced it** (amendment 27). The session keeps running and the
+  WebSocket stays open. The client gets no media on that `pc`. A peer whose transport was
+  replaced for that client stays cut off. With no peer connected on `pc:"video"`, the session
+  ends when the host's idle window passes (120 s by default).
+
+An answer with no `a=fingerprint` names no peer, so the host does not take it for a new
+peer's and replaces no transport for it: it goes to the transport that `pc` already has, and
+the rule above applies to that transport.
+
+**A failed check.** The check belongs to one transport. The host does nothing about a
+failure: it does not end the session or close the transport. An answer that states another
+fingerprint is another peer's to the host (amendment 27) and is not applied to that
+transport, so a client MUST NOT count on a later answer to make it pass. A client that
+corrects its answer is checked again only on a new transport, which it gets as any new peer
+does: with new peer connections and `restart_ice` for each `pc` (§Mid-session reconnection,
+"PeerConnection loss"), after which the host replaces the transport and sends one further
+`offer` (amendment 27).
+
+**Hash names.** The answer MUST name `sha-1`, `sha-256` or `sha-512`, and SHOULD name
+`sha-256`. `sha-384` fails the check on the current host. Any other name, `sha-224` included,
+is outside what this contract guarantees.
+
+The host logs a warning when a transport's peer fails the check. The client is still told
+nothing, and the log line is not part of this contract.
+
+*(Amendment 30, signed off by the operator 2026-10-13. Context, not part of the rule: RFC
+8122 also registers `sha-224` and `sha-384`. The warning is logged by a host built with
+accreleus/quasar#577 or later; amendment 29's note that the host does not yet report a failed
+check holds for earlier builds.)*
 
 ## Phase 0 simplifications (revisit later)
 - No authentication on the WebSocket. Phase 1 puts signaling behind the control plane with an authenticated, single-use session token in the connect URL.
