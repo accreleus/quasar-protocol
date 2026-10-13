@@ -1101,11 +1101,19 @@ The central unit: a scheduled, resource-reserved, lifecycle-tracked stream. Crea
 P1-B `/sessions` (launch), placed by the scheduler, run by the agent (P1-A), connected via
 signaling (P1-D).
 
+> **Amendment 31 — `sessions.device_id` is read at launch, not only shown (#203), doc-only,
+> signed off by the operator 2026-10-13.** One cell's description, below. No column, type,
+> constraint, default or migration changes, no API shape changes, and **`agent-api.md` is
+> byte-identical**. The cell called the column a read-only linkage for showing and ending a
+> device's live session. Since accreleus/quasar#203 the control plane also reads it: rung
+> resolution uses the launching device's probe and decode-failure history, and the session's
+> decode outcomes are recorded under that device.
+
 | column | type | notes |
 |---|---|---|
 | `id` | `UUID` PK | session id, used across all four contracts. |
 | `user_id` | `UUID` NOT NULL → `users(id)` | owner. |
-| `device_id` | `UUID` NULL → `user_devices(id)` ON DELETE SET NULL | *(LP-SEC-01, migration 0020, optional)* the device that launched the session, so the account UI can show/end a device's live session. NULL = unknown (legacy / no `device_key` declared). **Read-only linkage; does not change scheduling, the session state machine, or the agent wire.** Ending it is the existing `DELETE /v1/sessions/{id}` (owner-or-admin). |
+| `device_id` | `UUID` NULL → `user_devices(id)` ON DELETE SET NULL | *(LP-SEC-01, migration 0020, optional)* the device that launched the session, so the account UI can show/end a device's live session. *(Amendment 31, #203)* The control plane also reads it at launch, so that rung resolution uses that device's capability probe (`user_devices.capabilities`) and decode-failure history (`user_device_profile_history`), and it records the session's decode outcomes under that device. NULL = unknown (legacy / no `device_key` declared): rung resolution then reads the account's most recently seen device, and outcomes are recorded under the `device_key` the client reports in its health samples. **Not an authorization input; does not change scheduling, the session state machine, or the agent wire.** Ending it is the existing `DELETE /v1/sessions/{id}` (owner-or-admin). |
 | `app_id` | `UUID` NOT NULL → `apps(id)` **ON DELETE CASCADE** | what's launched. *(admin-delete erratum, migration 0014: was no-cascade.* Deleting an app — refused while any non-terminal session references it — cascades that app's **terminal** session history away.) |
 | `host_id` | `UUID` NULL → `hosts(id)` **ON DELETE CASCADE** | set on assign; NULL while `pending`. *(admin-delete erratum, migration 0014: was no-cascade.* Forgetting a host — refused while online or holding a non-terminal session — cascades that host's terminal session history away; NULL rows unaffected.)* |
 | `gpu_id` | `UUID` NULL → `gpus(id)` | set on assign; the reserved GPU. |
