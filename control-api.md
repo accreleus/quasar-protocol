@@ -1876,6 +1876,14 @@ break a feature; `DELETE` is how you clear one.
 > not consumed. Before this, any holder of an unbound token, shared up to 100 uses and 30
 > days, could become any host whose agent was offline. No wire shape changes.
 
+> **Amendment 32 (#596), signed off 2026-10-14.** For the re-enrollment refusal, a host row is
+> "live" when it is not `offline` and has no recorded disconnect. Before this only `online`
+> counted, so a drained host, and after a control-plane restart every host until its agent had
+> reconnected, was refused only by the replica holding its websocket: a token bound to that
+> name replaced the running agent's `node_secret`. The bound-token loser of a concurrent first
+> enrollment is refused too. A host whose agent never returns after a restart keeps its name
+> until it is forgotten (`DELETE /v1/hosts/{id}`). No wire shape changes.
+
 > **RH06 contract step (amendment 14, #353; in force since RH06-15, #367):** the static
 > `ENROLLMENT_TOKEN` is **retired**. The control plane no longer reads it, and redemption matches
 > a minted token or a machine's single-use local enrollment token only (§"RH06 — Quasar-owned
@@ -1935,17 +1943,27 @@ exists and whether or not it has a live agent — otherwise the refusal below wo
 existence oracle on a pre-auth surface. Only once the credential is good is **re-enrollment
 onto a `node_name` whose agent is live refused** (#96), with `auth_failed` and a message
 naming the live agent: the credential was fine, the request was not. That refusal rolls the
-transaction back, so it never consumes the token's use. "Live" means the host row reads
-`status = online` with no recorded disconnect, or the node holds an agent websocket on the
-receiving replica — the second alone would miss a host connected to a sibling replica. A
-control-plane crash can leave a row stuck `online` (nothing sweeps them); re-enroll under a
-different `node_name`, or delete the host row first.
+transaction back, so it never consumes the token's use.
+*(Amendment 32, #596.)* "Live" means the host row's `status` is not `offline` and it has no
+recorded disconnect, or the node holds an agent websocket on the receiving replica — the second
+alone would miss a host connected to a sibling replica, and every host between a control-plane
+restart and its agent's reconnect. A drained host is `draining` and still connected, so it is
+live on the same terms. A control-plane restart records no disconnect, so every host that was
+connected when it stopped stays live until its agent reconnects; that agent's own reconnect
+with its `node_secret` is never refused by this rule. A host whose agent never returns stays
+live: nothing sweeps it, and an uncordon is not a way out, because the hold the boot places on
+a host that negotiated typed settings is cleared only by that host's connected agent. Re-enroll
+it under a different `node_name`, or forget the host first (`DELETE /v1/hosts/{id}`, which
+tombstones its managed homes).
 
 *(Amendment 20.)* **Re-enrollment onto an existing host row also needs a token bound to its
 `node_name`.** An unbound token that would land on an existing row (offline, or created by a
 concurrent first enrollment of the same name) is refused `auth_failed` with a message saying
 so, and the transaction rolls back: the host keeps its `node_secret` and the token keeps its
-use. The check follows the credential and the live-agent checks, so it adds no oracle for a
+use. *(Amendment 32.)* A **bound** token that loses a concurrent first enrollment of its name
+lands on the winner's row, which is live, and is refused as above: the winner keeps its
+`node_secret` and the token keeps its use.
+The check follows the credential and the live-agent checks, so it adds no oracle for a
 caller without a good token. A forgotten host (`DELETE /v1/hosts/{id}`) has no row, so any
 valid token enrolls it as new.
 
