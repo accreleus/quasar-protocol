@@ -1451,6 +1451,16 @@ handed to tooling. Semantics:
 - **Auth** is the per-boot random secret (generated at startup, never persisted across
   boots, written to the container log and to `/run/quasar/dev-agent-key`). Wrong or missing
   key → `401` with no message or timing distinction (constant-time compare).
+- *(Amendment 33, #594.)* **Transport.** The request carries the dev key, so it is served only
+  (a) under the rule of `POST /v1/setup/claim` (the HTTPS listener, or a proxy named in
+  `QUASAR_TRUSTED_PROXIES` whose `X-Forwarded-Proto` values are all `https`), or (b) to a
+  loopback peer, that is a caller inside the control plane's own network namespace. A named
+  proxy's header outranks (b). Any other request gets `401 unauthorized` before the key is
+  compared or the body read, identical for a right, a wrong and a missing key, and is not
+  logged. `QUASAR_DEV_AGENT_INSECURE_HTTP=1` lifts this check and serves the route over plain
+  HTTP to every peer. It is for a development stack whose HTTP port is published on the
+  machine's loopback only, does nothing without `QUASAR_DEV_AGENT_AUTH=1`, and the boot log
+  reports it.
 - **The identity is real.** A real `users` row (random email `agent-<uuid>@dev.invalid`,
   random username, random password that is **never returned** — the token is the only
   credential) and a real bearer token minted through the normal issuance path.
@@ -1506,6 +1516,31 @@ checked in the insert transaction under the **same advisory lock** as `BOOTSTRAP
 the two paths can never both create an admin; (2) wrong/missing token → `401`, constant-time,
 no missing-vs-wrong distinction; (3) password obeys the `/v1/auth/register` strength rule; (4)
 every attempt logged at `WARN` with source address. The token is never returned by any endpoint, and (amended 2026-08-07) is **never written to the log** either — only its file path is, because log aggregators routinely expose logs to principals who have no host access and any of them could otherwise claim a fresh instance. A failed token-file write fails the boot rather than degrading to log-only.
+
+> **Amendment 33 — the first-run claim and the dev-only agent route are refused over plain
+> HTTP (#593, #594), signed off by the operator 2026-10-14. It changes behaviour; no shape, status
+> or error code changes.**
+
+**Transport.** The claim carries the setup token and a password, so it is served only when the
+client's hop was encrypted. The control plane decides in this order:
+
+1. The direct peer is named in `QUASAR_TRUSTED_PROXIES` and sent `X-Forwarded-Proto`: the claim
+   is served only if every value on every such header line is `https` (case-insensitive). What
+   a named proxy says outranks the control plane's own transport, so a named proxy that reports
+   `http` is refused even when it reached the control plane over TLS.
+2. Otherwise the request must have arrived on the control plane's HTTPS listener. From a peer
+   that is not named, `X-Forwarded-Proto` is ignored. RFC 7239 `Forwarded` is never read. There
+   is no loopback exception.
+
+Any other request gets `401 unauthorized` before gates (1) to (4): the token is not compared,
+the body is not read, and the answer is byte-identical for a right, a wrong and a missing
+token. Its `message` says how to reach the route, and that a token sent this way crossed the
+network in clear and stays valid until the control plane restarts. A refused claim is logged at
+`WARN` with its source address, bounded per source (about ten a minute); refusals past the
+bound are not logged, which is the one exception to gate (4). A proxy that forwards to the
+HTTPS listener needs no configuration, and `BOOTSTRAP_ADMIN_*` is unaffected. With
+`QUASAR_TLS=off` and no named proxy the claim cannot be served: the first admin then comes from
+`BOOTSTRAP_ADMIN_*`, and the boot log says so.
 
 `device_key` (optional, additive) binds the founding admin's token to a device exactly as `POST /v1/auth/login` does, so that token is revocable from Account > Devices like any other; omitted, the token carries no `device_id` and behaves exactly as before.
 
@@ -2033,10 +2068,13 @@ connection failed" with no cause. Nothing in the product explained either.
 |---|---|---|---|
 | **A** self-signed (default, LAN) | Quasar's own listener | download the cert, trust it, **verify the fingerprint** | — |
 | **B** own certificate | Quasar's own listener | mount cert + key at `QUASAR_TLS_CERT`/`QUASAR_TLS_KEY` | — |
-| **C** external reverse proxy (e.g. their own Caddy + Let's Encrypt) | the proxy | set allowed origins; Quasar keeps its self-signed cert internally and **that is correct** | must **not** report the cert as a problem — its SANs are irrelevant when the browser never sees it |
+| **C** external reverse proxy (e.g. their own Caddy + Let's Encrypt) | the proxy | set allowed origins; name the proxy in `QUASAR_TRUSTED_PROXIES` when it forwards to the plaintext listener *(amendment 33: first-run setup through it is refused until then; a proxy that forwards to the HTTPS listener needs nothing)*; Quasar keeps its self-signed cert internally and **that is correct** | must **not** report the cert as a problem — its SANs are irrelevant when the browser never sees it |
 
 **Normative:** A, B and C all complete setup, and a client MUST NOT present any of them as a
 required step.
+*(Amendment 33: in C, a proxy on the plaintext listener completes first-run setup once it is
+named. Until then the claim is made on the control plane's own HTTPS port where that port is
+published, or the first admin is provisioned with `BOOTSTRAP_ADMIN_*`.)*
 
 **Topology detection.** When a request arrives carrying `X-Forwarded-Proto` or RFC 7239
 `Forwarded`, a proxy is in front of the control plane, so its certificate is an internal
@@ -2044,6 +2082,10 @@ detail: `certificate.in_use` is `false` with a reason saying the setup is suppor
 complete. **Forwarded headers may only SOFTEN advice — they authorise nothing.** They are
 trivially spoofable; the worst a hostile client achieves is making an admin-gated diagnostics
 page tell *them* that their own certificate is not in use.
+*(Amendment 33: one named exception. On `POST /v1/setup/claim` and the dev-only
+`POST /v1/dev/agent-session`, `X-Forwarded-Proto` is believed from a peer named in
+`QUASAR_TRUSTED_PROXIES`, and from no other peer; see §First-run setup. It still authorises
+nothing alone: the setup token or the dev key does.)*
 
 ### `GET /v1/tls/certificate.pem` — public
 
