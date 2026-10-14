@@ -4349,6 +4349,12 @@ device row yet.
 > user-self pattern as `POST /v1/me/devices` / `GET /v1/me/storage`. Wants Opus +
 > human sign-off per the frozen-contract rule.*
 
+> **Amendment 34 (#632), signed off by the operator 2026-10-14.** A probe whose `browser.name`
+> is `Safari` and whose `display.refresh_hz` is omitted is not marked `display_refresh_unknown`:
+> the control plane treats its display as able to present high-refresh profiles. A Safari probe
+> that reports a rate keeps today's rules. A Safari screen that is really 60 Hz is therefore
+> offered, and by default recommended, high-refresh profiles.
+
 Returns the stream profile catalog (AS10-01, user-facing profiles only) annotated
 with an **eligibility verdict** and **reason codes** for the caller's device, plus a
 **recommended** profile. Owner is the **bearer identity**. **Advisory only** — this does
@@ -4360,6 +4366,9 @@ low-confidence recommendation).
 Each profile is classified `eligible` (passes every hard check and has bandwidth
 headroom), `risky` (launchable but with a soft concern — thin headroom, browser-client
 risk, or an unconfirmable high-refresh display), or `ineligible` (fails a hard check).
+
+The one exception is a probe whose `browser.name` is `Safari` and whose `display.refresh_hz` is omitted. Safari holds `requestAnimationFrame` near 60 Hz on every display, so the page cannot confirm the rate, and the control plane treats such a display as able to present high-refresh profiles: `display_refresh_unknown` is not raised for it. A Safari probe that reports a rate keeps today's rules. (Owner decision 2026-10-14, #632.) A Safari screen that is really 60 Hz is therefore offered, and by default recommended, high-refresh profiles.
+
 `recommended_id` is the highest fully-eligible profile (catalog order); with no usable
 probe it is the conservative default (`1080p60`) and `confidence` is `low`.
 
