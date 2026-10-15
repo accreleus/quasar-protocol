@@ -1257,9 +1257,26 @@ paths:
         hotlinked from the provider: a self-hosted deployment must not depend on a third party
         at browse time, and hotlinking would report the whole library to that third party on
         every page view.
+      parameters:
+        - name: w
+          in: query
+          required: false
+          schema: { type: string, enum: ["96", "320", "480", "560"] }
+          description: >-
+            Amendment 37 (#707): a copy for a tile this many pixels wide. Aspect ratio kept;
+            the smallest copy that still covers a w x 1.5w (2:3) box, so a wider image stays
+            wider than w. Any other value (empty, repeated, or non-canonical such as 0320) is
+            404, as is a query that names w but does not parse (w=320;x, w=%zz). A query that
+            names no w is ignored, as before. The original bytes are served when the image is no
+            wider than w or no taller than 1.5w, and when the copy would not be smaller in bytes:
+            a response is never larger than the original.
+            Content-Type names the bytes served: a scaled copy is image/jpeg when opaque and
+            image/png when it has transparency, whatever the stored type. Unauthenticated and
+            nosniff as the original, and immutable except for the original served after a failed
+            resize, which has a short max-age.
       responses:
         "200":
-          description: The image.
+          description: The image, or its sized variant when w is given.
           content:
             image/jpeg: { schema: { type: string, format: binary } }
             image/png: { schema: { type: string, format: binary } }

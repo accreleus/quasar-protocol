@@ -6319,6 +6319,40 @@ anything not matching `^[0-9a-f]{64}\.(jpg|png|webp)$` is `404`, never `500`. Re
 `X-Content-Type-Options: nosniff` — this is the one route that returns bytes a third party
 supplied, and the bytes were already verified to sniff as JPEG/PNG/WebP before being stored.
 
+**Sized variants: `?w=<width>`.** *(Amendment 37, #707, signed off 2026-10-16.)* An optional
+query parameter asks for a copy for a tile `w` pixels wide. The copy keeps the image's aspect
+ratio and is the smallest that still covers a `w` × `1.5w` box, the 2:3 tile frame: a 2:3 cover
+comes back exactly `w` wide, and a wider image (a hero standing in for a tile, a 16:10 cover)
+keeps enough width to fill the frame, so a 3840×1240 hero at `w=560` comes back about 2600×840.
+It is the same crop made smaller, not a third crop, though for now without the original's EXIF
+orientation or ICC colour profile (#713). A request whose query names no `w` is unchanged, however
+the rest of the query is formed.
+- `w` is exactly one of `96`, `320`, `480`, `560`. Any other value, including an empty, repeated or
+  non-canonical one (`w=0320`), is `404`, the route's answer for anything it does not serve. So is
+  a query that names `w` (a pair, split on `&` or `;`, whose decoded key is `w`) but does not
+  parse: `w=320;x` (`;` is not a separator) or `w=%zz`. The fixed set keeps the server's derived
+  copies bounded however a client probes it.
+- The original bytes are served when no smaller copy would still cover the box (the image is no
+  wider than `w` or no taller than `1.5w`), and when the copy would not be smaller in bytes. A
+  response is never larger than the original: the saving is in bytes, and the image is not always
+  `w` wide.
+- `Content-Type` names the bytes actually served. A scaled copy is `image/jpeg` when the image is
+  fully opaque and `image/png` when it has transparency, whatever the stored type: a `.png` or
+  `.webp` asset can come back as JPEG. A client must not infer the type from the asset's
+  extension.
+- Everything else is as for the original: unauthenticated (the asset name is still the
+  capability; `w` grants nothing), `404` for an asset that is not stored, `nosniff`, and
+  `immutable` caching: a scaled copy, and an original served by the rule above, never change at
+  one `(asset, w)` URL. If the server fails to make a copy, it serves the original with a short
+  `max-age` and without `immutable`, so the original is not kept as the copy.
+- Only a `/v1/artwork/{asset}` URL takes `w`. A `cover_url` written directly (see `AppListItem`)
+  can point anywhere and is used as is.
+
+The set fits the clients' surfaces at 1× to 3× device pixel ratio: `96` for row thumbnails (26 CSS
+px), `320` for library tiles (about 170 CSS px) and rail cards at 1×, `480` for tiles at 2×, `560`
+for rail cards (up to 280 CSS px) at 2× and tiles at 3×. Each is below the 600 px width of the
+provider's grid covers. Hero and detail images keep the original.
+
 ### `GET /v1/admin/apps/{id}/artwork` *(admin)*
 
 Returns `{ artwork, provider_configured, provider_name, provider_origin, provider_problem? }`.
