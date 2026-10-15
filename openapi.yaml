@@ -1962,11 +1962,12 @@ paths:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
       tags: [images]
-      summary: Install a catalog image (adopt + ensure-everywhere unless lazy).
+      summary: Install a catalog image (adopt; unless lazy, prepared on the hosts its enabled apps are placed on).
       description: >-
-        P3. Seeds installed_images with the catalog's current (version, registry_digest)
-        and, unless lazy:true, dispatches ensure-everywhere immediately. A lazy install
-        seeds the adoption row only; hosts pull on first launch placement.
+        P3. Seeds installed_images with the catalog's current (version,
+        registry_digest) and, unless lazy:true, prepares the image on each host an
+        enabled app using it is placed on (nothing until such an app exists). A lazy
+        install seeds the adoption row only; hosts pull on first launch placement.
       x-required-role: admin
       requestBody:
         required: false
@@ -1979,7 +1980,7 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
     delete:
       tags: [images]
-      summary: Uninstall (best-effort image_remove to every host that has it, then drop the adoption row).
+      summary: Uninstall (drop the adoption row; each host keeps the image until RH05 host image cleanup removes it).
       x-required-role: admin
       responses:
         "204": { description: Uninstalled. }
