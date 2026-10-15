@@ -3260,10 +3260,10 @@ before the rung:
 |---|---|---|
 | 0 | explicit `stream.codec` *(amendment 12: sent by the launch panel for a hand-picked codec, and by admin/diagnostic callers)* | selects the first rung with that codec. No such rung ⇒ `400 validation_failed` (unchanged). Because the codec is a placement gate, the placed GPU can always encode it; the refusals move to placement: a capable GPU exists but none is free (slots, VRAM veto) ⇒ **`503 capacity_exhausted`**; no online usable GPU can encode it ⇒ **`503 no_host_available`**; both messages name the codec. *(amendment 12: the former "host cannot encode it ⇒ `409 conflict`" arm is removed from the launch path; `409` for that condition survives only on the certification bench)* |
 | 1 | GPU encoder set *(amendment 12; was "host encoder set")* | reject a rung whose codec is not in the **placed GPU's** codec set (`agent-api.md` `capacity.gpus[].codecs`; a GPU reporting none inherits the host's `capacity.codecs`; a host reporting nothing is h264-only). The reason string stays `host_encoder` (§Codec decision) |
-| 2/3 | client decode probe | reject a rung whose codec is hard-gated and unproven (`h265`/`av1` need an explicit `true`; a stale or absent probe means no). **Additionally** reject a rung whose `min_decode_height` exceeds the probe's measured decode height — new, because a rung now carries its own resolution |
+| 2/3 | client decode probe | reject a rung whose codec is hard-gated and unproven *(Amendment 35, #605, signed off 2026-10-15.)* (`h265`/`av1` need an explicit `true`, and a stale or absent probe means no; `h264` is rejected only on an explicit `false` in a fresh probe). **Additionally** reject a rung whose `min_decode_height` exceeds the probe's measured decode height — new, because a rung now carries its own resolution |
 | 4 | decode-failure history | reject a rung this (user, device) previously failed to decode. **Keyed by rung id** for rows written from UI-P4 onward; a pre-UI-P4 row keyed `(launch profile, codec)` bans every rung of that launch profile using that codec, which is exactly its old meaning |
 | 5 | hardware encoder | reject a rung with `hardware_encoder_required` when the placed host has no hardware encoder. Explicit as a clamp for the first time: it was previously only an eligibility input, where host capability is usually unknown |
-| — | **floor** | if **no** rung survives, dispatch the **last h264 rung**, bypassing clamps 0 through 5 **including its own `hardware_encoder_required`**. The user picked the launch profile, eligibility already approved it, and a session that cannot resolve anything is a failed launch rather than a degraded one. Same silent-downgrade-to-H.264 posture as Sunshine/Moonlight |
+| — | **floor** | if **no** rung survives, dispatch the **last h264 rung**, bypassing clamps 0 through 5 *(Amendment 35.)* (so an `h264: false` probe never prevents the floor) **including its own `hardware_encoder_required`**. The user picked the launch profile, eligibility already approved it, and a session that cannot resolve anything is a failed launch rather than a degraded one. Same silent-downgrade-to-H.264 posture as Sunshine/Moonlight |
 
 **Why clamp 4 had to change grain.** Two rungs may share a codec at different resolutions, which is
 legal under the floor rule and is the normal shape of a real launch profile, and a
@@ -3332,13 +3332,13 @@ codec: it answers the single video codec the host offers. Resolution is, in orde
 - **clamp 2/3, client decode** = the launching device's capability probe
   (`user_devices.capabilities.codecs`, `POST /v1/me/devices`): h265 and av1 are **hard-gated** on a
   proven `true` (a stale/absent probe resolves to the h264 floor, because sending an undecodable
-  codec is a black stream, not a quality drop);
+  codec is a black stream, not a quality drop); *(Amendment 35, #605, signed off 2026-10-15.)*
+  h264 is rejected only on an explicit `false` in a fresh probe (`codecs.h264: false`); an absent, stale or non-boolean value accepts it, because absent is not false (`native-client.md` rule 2);
 - **clamp 4, decode-failure history** = a non-h264 codec this (user, device, profile) previously
   failed to decode is skipped (`schema.md` `user_device_profile_history.codec`, migration 0032), so
   the session degrades to the next candidate rather than the profile vanishing from the picker;
-- **result** = the first candidate surviving all clamps, with a **guaranteed h264 floor** (h264 is
-  launchable in every profile and decodable by every browser, so a session can never fail to resolve
-  a codec, the same silent-downgrade-to-H.264 posture as Sunshine/Moonlight).
+- **result** = the first candidate surviving all clamps, with a **guaranteed h264 floor**
+  *(Amendment 35.)* (h264 is launchable in every profile, so a session can never fail to resolve a codec. A probe's `h264: false` moves the session onto another codec the device decodes, but never removes the floor: if nothing else survives, h264 is dispatched as before, the same silent-downgrade-to-H.264 posture as Sunshine/Moonlight).
 
 **Admin/diagnostic override** *(amendment 12, #296: the explicit codec — the launch panel also
 sends it for a hand-picked codec)*. `POST /v1/sessions` accepts an optional `stream.codec` (validated
@@ -4407,6 +4407,7 @@ probe it is the conservative default (`1080p60`) and `confidence` is `low`.
   `display_refresh_too_low` is advisory: a measured display below 98% of a profile's
   nominal frame rate makes that profile risky and prevents recommendation, but does not
   make an otherwise eligible profile unlaunchable.
+- *(Amendment 35, #605, signed off 2026-10-15.)* An `h264` rung is `codec_not_supported` only when the fresh probe says `codecs.h264: false`.
 - *(amendment 12, #296)* **`host_encoder_not_supported` is computed over GPU codec sets.** A codec
   is host-encodable for this caller when some GPU that could take the caller's launch has it in its
   codec set (`agent-api.md` `capacity.gpus[].codecs`, inheriting the host's `capacity.codecs` when
