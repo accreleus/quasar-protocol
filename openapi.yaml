@@ -505,6 +505,32 @@ paths:
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /v1/me/play-history:
+    get:
+      tags: [me]
+      summary: The calling user's own play history, one item per app played (amendment 38).
+      description: |
+        Per-caller, from the bearer identity only: no user_id parameter, no query parameters,
+        no admin variant. See control-api.md §GET /v1/me/play-history.
+
+        COUNTED SESSIONS: the caller's sessions that reached running (started_at set) and did
+        not end failed, a live one included. One session's duration is started_at to ended_at,
+        or to the request time while it has not ended, bounded to 0-24 h (the highlights
+        clamp).
+
+        ENTITLEMENT-FILTERED like /v1/me/highlights: the same enabled + entitled predicate as
+        GET /v1/apps, so a revoked title's history is hidden, not shown.
+
+        Ordered by last_played_at descending, then app_id. Unpaginated; empty for a user who
+        has never played, which is a normal 200.
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlayHistoryList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   # ─── apps ────────────────────────────────────────────────────────────────
   /v1/apps:
     get:
@@ -4745,6 +4771,49 @@ components:
             resolves. Advertised, not resolved - a launch may fall through to a lower rung and
             stream at a different resolution; the session's own `stream` block is the truth.
         enabled: { type: boolean }
+        # Amendment 38 (#720): read-only per-title facts. Always serialized by a control plane
+        # carrying the amendment; not required, so a client also reads an older one.
+        added_at:
+          type: string
+          format: date-time
+          description: >-
+            Amendment 38: apps.created_at - when an admin created the app or, for a discovered
+            tile, when the first library scan to find the title created it. The value GET
+            /v1/apps is ordered by and highlights' recently_added uses. Not when the caller was
+            entitled.
+        genres:
+          type: array
+          items: { type: string }
+          description: >-
+            Amendment 38: the Steam store's genre names (appdetails), in English and store
+            order, without duplicates. [] when unknown: the opt-in appdetails lookup is off, no
+            scan has observed the tile yet, or the app is not a discovered Steam title.
+        developer:
+          type: [string, "null"]
+          description: "Amendment 38: the store's developers joined with \", \"; null when unknown (see genres)."
+        publisher:
+          type: [string, "null"]
+          description: "Amendment 38: the store's publishers joined with \", \"; null when unknown (see genres)."
+        release_date:
+          type: [string, "null"]
+          description: >-
+            Amendment 38: the store's release-date text as given (e.g. "9 Jul, 2013"), for
+            display. Valve's format; not a parseable date. Null when unknown (see genres).
+        controller_support:
+          type: [string, "null"]
+          enum: [full, partial, null]
+          description: "Amendment 38: the store's controller support; null when unknown or any other value."
+        logo_url:
+          type: [string, "null"]
+          description: >-
+            Amendment 38: the LOGO crop - the title's logo on a transparent background, drawn
+            over the hero in place of the text title. A local /v1/artwork/ path (takes ?w=),
+            written only by the artwork service, never hotlinked. Null when there is none.
+        icon_url:
+          type: [string, "null"]
+          description: >-
+            Amendment 38: the ICON crop - a small square title icon for lists. Same rules as
+            logo_url.
     AppList:
       type: object
       required: [items, next_cursor]
@@ -8140,6 +8209,37 @@ components:
             MAX(ended_at) over the user's non-failed sessions for this app. Null when the app
             has never been played to completion - which is the state of every app for a user
             whose only session is the currently-live one.
+
+    PlayHistoryList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/PlayHistoryItem" }
+
+    PlayHistoryItem:
+      type: object
+      required: [app_id, last_played_at, total_seconds, sessions]
+      properties:
+        app_id:
+          type: string
+          format: uuid
+          description: The app; the client joins it to the AppListItem it already holds.
+        last_played_at:
+          type: string
+          format: date-time
+          description: >-
+            The latest end of a counted session, a session ending at started_at plus its
+            bounded duration. The request time while a session is live. Never null.
+        total_seconds:
+          type: integer
+          minimum: 0
+          description: Sum of the counted sessions' bounded durations, whole seconds rounded down, all time.
+        sessions:
+          type: integer
+          minimum: 1
+          description: How many sessions counted.
 
     # ─── admin: users ─────────────────────────────────────────────────────────
     AdminUser:

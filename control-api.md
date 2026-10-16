@@ -1148,6 +1148,7 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `PATCH /v1/me/profile-preferences` | user (self) | *(AS10-03; prose added UI-P4)* the caller's preferred **launch profile**; honoured only while the global policy allows user overrides |
 | `GET` / `PATCH /v1/me/ui-preferences` | user (self only) | client UI presentation preferences, synced across the caller's devices. No admin variant exists: these are keyed on the authenticated caller and there is no `{id}` form, so one user's preferences are unreadable by anyone else. |
 | `GET /v1/me/highlights` | user (self only) | *(home-rail amendment, 2026-08-05)* the caller's server-ranked home rail, derived from their own session history. No `user_id` parameter and no admin variant. **Entitlement-filtered**, and that filter is load-bearing rather than cosmetic — see below. |
+| `GET /v1/me/play-history` | user (self only) | *(Amendment 38, #720)* the caller's own play time, session count and last played per app, derived from their own sessions. No `user_id` parameter and no admin variant. **Entitlement-filtered** like `GET /v1/me/highlights`. |
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `POST /v1/admin/storage/home-claims/release` | **admin** | *(amendment 15, #379/#347)* release a conflicting managed-home claim whose owner host is gone and which records no location on a host that still exists. Bookkeeping only: no file is moved or deleted. `204`; `400 validation_failed`; `404 not_found`; `409 conflict` (the claim changed since it was read); `409 home_in_use`; `409 claim_not_releasable`. Audited as `storage.home_claim.release` |
@@ -2288,6 +2289,41 @@ serialize a placeholder. There is deliberately **no server-side `?kind=` filter*
 holds; a filter parameter would be a second way to express the same view for no gain. That is
 a decision, not an oversight.
 
+**Per-title facts and two more art URLs.** *(Amendment 38, #720, signed off 2026-10-16.)*
+Eight read-only fields on `AppListItem`, so `App` and `AdminApp` carry them too. They are facts
+about the title and the same for every caller. A control plane with this amendment always
+serializes them; `openapi.yaml` lists them as optional so a client also reads an older control
+plane, which sends none.
+```json
+{ "added_at": "2026-08-01T12:00:00Z",
+  "genres": ["Action", "Free To Play"], "developer": "Valve", "publisher": "Valve",
+  "release_date": "9 Jul, 2013", "controller_support": "full",
+  "logo_url": "/v1/artwork/<sha256>.png", "icon_url": "/v1/artwork/<sha256>.png" }
+```
+- `added_at` is `apps.created_at`: when an admin created the app or, for a discovered tile, when
+  the first library scan to find the title on any user's host created it. It is the value this
+  list is ordered by and the one `GET /v1/me/highlights` ranks `recently_added` by. It is not
+  when the caller was entitled.
+- `genres` (strings, `[]` when unknown), `developer`, `publisher`, `release_date` and
+  `controller_support` (each a string or `null`) come from the Steam store's appdetails answer,
+  the same response the opt-in appdetails lookup already reads (§Library discovery,
+  `library_discovery_appdetails_enabled` / `QUASAR_STEAM_APPDETAILS_LOOKUP`, default off). With
+  the lookup off they stay empty and nothing is sent to Valve. A Steam title's tile gets them on
+  the scan that creates it; an existing tile gets them on a later scan that observes it, through
+  the same bounded backfill that fills `description`. They are written once and not refreshed.
+  An app no scan observes, which is every manual app, keeps them empty.
+  - `genres`: the store's genre names, in English and store order, without duplicates.
+  - `developer` / `publisher`: the store's developers / publishers joined with `", "`, in store
+    order.
+  - `release_date`: the store's release-date text as given (`"9 Jul, 2013"`), for display. Its
+    format is Valve's; a client must not parse it as a date.
+  - `controller_support`: `"full"` or `"partial"` as the store reports it, `null` otherwise.
+- `logo_url` (the title's logo on a transparent background) and `icon_url` (a small square icon)
+  are two more crops beside `cover_url` and `hero_url` (§Cover artwork, "Logo and icon"): local
+  `/v1/artwork/` paths, written only by the artwork service, `null` when there is none.
+- None of the eight is accepted on `AppWrite`. Like `hero_url`, a create or patch naming one is
+  `400 validation_failed` (`DisallowUnknownFields`).
+
 ### `GET /v1/apps/{id}`
 Single app, same fields as a list item — including `kind`, `external_source`/`external_id`, and
 the caller-resolved `favourite`. `404` if absent or disabled.
@@ -2939,6 +2975,44 @@ favourite flag (the client already holds the full `AppListItem` and joins on
 `app_id` — a second copy would drift the moment artwork is re-resolved), and any
 host name (a user-facing `Session` carries `host_id` only, and `GET /v1/hosts`
 is admin-gated).
+
+### `GET /v1/me/play-history` *(Amendment 38, #720, signed off 2026-10-16)*
+
+The caller's own play history, one item per app they have played. **`RequireAuth`**; the subject
+is always the bearer. No `user_id` parameter, no query parameters, no admin variant.
+```json
+// 200
+{ "items": [
+    { "app_id": "<uuid>", "last_played_at": "2026-10-15T21:04:10Z", "total_seconds": 151200,
+      "sessions": 42 }
+  ] }
+```
+- **Which sessions count:** the caller's sessions that reached `running` (`started_at` is set)
+  and did not end `failed`, a live one included. A launch that never reached `running` is not
+  play. A `failed` session is left out even if it ran: that is the rule `play_seconds` on
+  `GET /v1/me/highlights` already applies, so the two reads never disagree about a session.
+- **One session's duration:** `started_at` to `ended_at`, or to the time of the request while
+  it has not ended, bounded to 0 – 24 hours. That is the highlights clamp: a session whose host
+  vanished before it was reconciled has no `ended_at` and cannot grow without bound, and a skewed
+  clock cannot make it negative. A session that ended as it started counts, with 0 seconds.
+- `total_seconds`: the sum of the app's counted sessions, in whole seconds rounded down, over all
+  time.
+- `sessions`: how many sessions counted.
+- `last_played_at`: the latest end of a counted session, where a session ends at `started_at`
+  plus its duration above. A live session makes it the time of the request. Never null.
+- **Entitlement-filtered, like highlights.** Only apps the caller can see appear: the enabled and
+  entitled predicate of `GET /v1/apps`, amendment 22's parent rule included. A session row
+  outlives the entitlement that authorised it, so without this a revoked title would come back
+  with its history attached. Revoking access hides the history; it deletes nothing.
+- Ordered by `last_played_at`, newest first, then `app_id`. Unpaginated: at most one item per app
+  the caller can see. `items` is empty for a user who has never played; that is a normal `200`.
+- Nothing here names another user, a host, or how a session streamed. The last session's
+  requested-versus-delivered figures are not served: the session row holds what was requested,
+  what was delivered exists only as raw telemetry samples, and a host's name is admin-only.
+
+**Why a read of its own.** Not fields on `AppListItem`, for the reasons highlights gives: they
+would land on `AdminApp` too, and a per-user aggregate over `sessions` does not belong in the
+paginated list. Not highlights itself: that is a ranked rail of at most five.
 
 ---
 
@@ -6307,6 +6381,29 @@ Every stored URL is a **local** path, `/v1/artwork/<sha256>.<ext>`. Art is fetch
 deployment's own storage and served from there forever. Two reasons, both load-bearing: a
 self-hosted box must not depend on a third party being reachable at browse time, and a hotlinked
 `<img>` would report the deployment's entire library to that third party on every page view.
+
+### Logo and icon *(Amendment 38, #720, signed off 2026-10-16)*
+
+Two more crops of the same provider title: `logo_url`, the title's logo on a transparent
+background, which a client draws over the hero in place of the text title, and `icon_url`, a small
+square icon for lists. Everything above holds for them unchanged: no key means no request and
+both `null`; they are cached locally, served by `GET /v1/artwork/{asset}` (sized variants
+included) and never hotlinked; a `desktop` or `launcher` app is never queried. A provider error
+on the logo or icon does not hold back the tile and hero: the record is written without them,
+and a later sweep asks again.
+- They are fetched with the tile and hero, wherever those are: the sweep, a scan's new tiles,
+  `rematch`, bulk re-resolve, and a picked `provider_ref`. Only for a title that has a tile or a
+  hero: a `none` record stays `none`, whatever logo the provider has.
+- **A record without them yet** (made before this amendment, or whose logo or icon request
+  failed) gets them on a later sweep, at most the sweep's batch per pass. The record's own provider reference is used, so nothing is matched
+  again, and its source, tile, hero and attribution are kept. Only an unlocked `provider` record
+  is filled this way: a `locked` record is skipped, as the sweep skips it for everything, and a
+  `none` record stays `none`. When the provider has no logo or icon for the title the record
+  says it looked, and the sweep does not ask again. Unlike a change to the tile query (#385), this needs
+  no re-resolve: it fills what was never fetched and replaces nothing an operator sees.
+- No admin route sets or clears a logo or icon on its own. A picked `provider_ref`, `rematch` and
+  re-resolve replace all four crops; `tile_url` / `hero_url` and an upload keep the record's logo
+  and icon; `DELETE` clears all four. `GET /v1/admin/apps/{id}/artwork` is unchanged.
 
 ### `GET /v1/artwork/{asset}` — serve a cached image
 
