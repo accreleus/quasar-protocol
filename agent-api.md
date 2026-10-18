@@ -563,6 +563,16 @@ three more optional flat fields describing the container engine its agent drives
   see which engine profile a host runs.
 - How the agent determines them is agent-side detail; this wire fixes only the answer it reports.
 
+**Warm Steam capability.** *(Amendment 39, #759, approved in principle by the operator
+2026-10-18; text reviewed before landing.)* An agent that implements parked sessions, adoption,
+held runtimes, shader progress and the in-place swap (§`session_assign`, §`session_state`,
+§`session_swap_app`) includes `"parked_sessions_v1": true` in this `register` message. Absent or
+false means unsupported. Like `terminal_home_cleanup_v1`, the assertion is bound to the
+authenticated connection epoch and every reconnect replaces it. The control plane sends `kind`,
+`adopt_session_id` and `in_place` only on a connection that advertised it, and places a parked
+session only on a host whose current connection did. An older agent therefore never receives
+them, and an older control plane never sends them.
+
 ### `capacity` — full capacity report
 Sent immediately after `registered`, and again whenever hardware/topology changes. Replaces
 the previous report wholesale (idempotent upsert of `hosts` + `gpus`).
@@ -1086,6 +1096,35 @@ row, stamps `started_at`/`ended_at`, and **releases the GPU reservation** when t
 > retain ordinary launch behavior; an older control plane ignores the optional
 > field. A report with no field does not imply a cold launch.
 
+> **Amendment 39 — `runtime_held` and `launch_progress` (#759).** *(Approved in principle by the
+> operator 2026-10-18; text reviewed before landing.)* Two optional fields, sent only by an agent
+> that advertised `parked_sessions_v1` (§`register`) and omitted on every other report. An older
+> control plane ignores both.
+> - **`runtime_held: true`** rides on the `stopped` report (`detail: "game exited"`) of a play
+>   session that ended because its Steam game exited while the launch helper was attached, when
+>   the agent keeps that session's runtime: the Steam container, compositor, encode and WebRTC
+>   tail. The runtime waits for a `session_assign` that adopts it (§`session_assign`,
+>   `adopt_session_id`). The agent holds a runtime only for a session whose `session_assign`
+>   carried `kind`. A control plane that predates this amendment never sends `kind`, so its
+>   sessions end exactly as before.
+>   - The session itself has ended. The report is an ordinary `stopped`: the control plane ends
+>     the row and its reservation as for any `stopped`.
+>   - A held runtime is not a session. It is not listed in `heartbeat.running_sessions` and has no
+>     idle reap, and its old viewer's peer connections closing ends nothing.
+>   - The agent releases it (tears it down as it tears down a stopped session; the app container
+>     gets its normal stop window) at once on a `session_stop` for the ended id, and by itself 30 s
+>     after the report if no `session_assign` adopting it has arrived. A release sends no further
+>     report, because the id is already `stopped`.
+> - **`launch_progress: {"step":"shaders","percent":42}`** rides on
+>   `session_state{state:"running", detail:"app booting"}` while Steam processes the target game's
+>   Vulkan shaders. `step` is `"shaders"`, the only value. `percent` is an integer from 0 to 100:
+>   Steam's own figure, as the launch helper read it from Steam's shader log. The agent sends it
+>   when the value changes, at most once a second, and only while the app is booting: after
+>   `app booting` and before `app presented`, including the boot that follows an in-place swap
+>   (§`session_swap_app`). It comes from inside the app container, which untrusted game code
+>   shares, so it is a hint for display only and never a lifecycle input. A report without it
+>   does not clear it; `app presented` does (`control-api.md` §Warm Steam, "Shader progress").
+
 ### `ack` — reply to a downstream command
 ```json
 { "type": "ack", "id": "<command-id>", "ok": true, "error": null }
@@ -1165,8 +1204,9 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   hardware or software H.264 encoder exposes a dropped-frame property, and shares its name with a
   completely different client-side key; and `window_ms` and `bytes_used` travel on this message but
   are **not written into the stored `metrics` JSONB** at all. Keys documented in this section that
-  no agent has ever emitted are named as such in the manifest rather than left to look absent —
-  today that is `app_launch_state` (below), which is specified here and implemented nowhere.
+  no agent has ever emitted are named as such in the manifest rather than left to look absent.
+  *(Amendment 39, #759: this named `app_launch_state` as specified and implemented nowhere. Agents
+  have emitted it since quasar#731; see the key below.)*
 - **`app_launch_state`** *(optional string)* — coarse in-container application launch
   state, when the app image reports one:
   `"starting" | "client_only" | "game_running" | "game_exited"`.
@@ -1182,6 +1222,11 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   Detection is best-effort by construction (launcher-shim titles, out-of-tree
   executables, and client quirks produce false negatives); consumers MUST NOT fail a
   session on its value. An unrecognized value is treated as absent, not an error.
+  *(Amendment 39, #759, approved in principle by the operator 2026-10-18; text reviewed before
+  landing.)* Emitted since quasar#731 for a session whose app container runs the in-container
+  launch helper (a derived Steam tile), in every sample once the helper has reported. The control
+  plane does not store this key: its stored `metrics` object omits it. It keeps the
+  `app.launch_state` trace event (§`session_trace_event`) as a `session_trace_events` row instead.
 - **`bytes_used`** *(optional, P5-03)* — last reported managed-home usage in bytes: the
   agent's post-session measurement of the session's home directory (the `local` driver
   measures the host path under the effective `QUASAR_HOME_ROOT`; `volume`-driver usage is
@@ -1771,6 +1816,69 @@ capability but does not by itself put ordinary browser sessions on a physical di
 > the agent's **independent backstop**, because the wire is not a trusted input regardless of how
 > many earlier layers exist. Additive; no existing field or shape changes.
 
+> **Amendment 39 — parked sessions and adoption (#759).** *(Approved in principle by the operator
+> 2026-10-18; text reviewed before landing.)* Two optional top-level fields, sent only to an
+> agent that advertised `parked_sessions_v1` (§`register`). A control plane with this amendment
+> always sends `kind` to such an agent. Additive; no existing field or shape changes.
+> ```json
+> { "type": "session_assign", "id": "<command-id>", "session_id": "<play uuid>", "gpu_index": 0,
+>   "kind": "play", "adopt_session_id": "<parked uuid>",
+>   "app": { "...": "..." }, "stream": { "...": "..." }, "resources": { "...": "..." },
+>   "video_topology": "stream_only" }
+> ```
+> - **`kind`**: `"play"` or `"parked"`. Omitted means `"play"`. A **parked** session is a warm
+>   Steam that nobody watches (`control-api.md` §Warm Steam). Its `app` is the Steam parent app
+>   with `STEAM_STARTUP_FLAGS=-silent`: no game and no Big Picture. Its `video_topology` is always
+>   `stream_only`. For a parked session the agent:
+>   - builds it as it builds a play session, but expects no viewer. There is no idle reap, and no
+>     app-boot watchdog, because a `-silent` Steam may never draw a window.
+>   - mounts the launch helper although `STEAM_STARTUP_FLAGS` names no appid. The helper starts
+>     in watch-only mode and arms on its first `launch`.
+>   - reports `starting` → `running` as for any session, and neither `app booting` nor
+>     `app presented`.
+>   - never ends it on its own for a game exit. It ends on `session_stop`, or as any session ends
+>     when its container or pipeline fails.
+> - **`adopt_session_id`**: a parked session, or a play session that ended with `runtime_held`
+>   (§`session_state`), whose runtime this session takes over. The control plane has already
+>   ended that row.
+>   - **The agent adopts the runtime when it holds it on `gpu_index`.** The compositor, app
+>     container, encode and WebRTC tail are kept and re-labelled `session_id`. From then on every
+>     report for it (`session_state`, `session_metrics`, trace events, signaling,
+>     `heartbeat.running_sessions`) carries `session_id`. Nothing more is sent under the adopted
+>     id.
+>   - **Otherwise it builds the session fresh from `app`**, exactly as for an assign without the
+>     field (after an agent restart, with the container gone, or when the runtime is on another
+>     GPU). An adoption therefore never fails because the runtime was lost. A runtime the agent
+>     holds under the adopted id but does not adopt is torn down as if `session_stop` had arrived
+>     for it, before the fresh build uses the managed home.
+>   - **It does not adopt** when `stream.codec`, `stream.fps`, `stream.h264_profile` or
+>     `stream.mic` differs from what the runtime encodes, or `stream.width` / `stream.height` is
+>     larger than the runtime's launch size: it tears that runtime down and builds fresh. The
+>     control plane checks the same before it claims (`control-api.md` §Warm Steam, "Claim"); this
+>     is the agent's backstop.
+>   - **A play session on an adopted runtime.** On `session_start` the agent:
+>     1. sends the launch helper `launch <appid>`, the appid being the one after `-applaunch` in
+>        the play `app`'s `STEAM_STARTUP_FLAGS` (read as for a derived tile today), or
+>        `bigpicture` when the flags name none;
+>     2. reports `starting` → `running` → `app booting`, and holds `app presented` until the game's
+>        window shows, Steam needs the user, or the reveal cap passes, as for a Steam tile launched
+>        with the helper;
+>     3. moves the render size and the stream size to the play session's `stream.width` /
+>        `stream.height` when they differ from the runtime's, as a `session_display_update`
+>        carrying both would. An encoder that cannot resize live keeps the held size, and
+>        `session_metrics` reports what is encoded;
+>     4. sends a fresh `offer` for each peer connection under `session_id`, unasked, as it answers
+>        `restart_ice` (§Signaling relay). The new viewer is a new peer. When a transport last
+>        negotiated with the ended session's viewer, the agent replaces it and sends one further
+>        `offer` for that `pc`, as amendment 27 describes (`signaling.md` §Mid-session
+>        reconnection).
+>
+>     The idle window and the app-boot watchdog start at the adoption.
+>   - **A parked session on an adopted held runtime.** The game is not relaunched, the helper
+>     returns to watch-only, and the session runs as any parked session.
+>   - `resources` is the budget the runtime already had. An adopting session reports no
+>     `home_seed`: nothing is provisioned.
+
 ### `session_start` — bring the pipeline up
 ```json
 { "type": "session_start", "id": "<command-id>", "session_id": "<uuid>" }
@@ -1793,6 +1901,14 @@ released when `stopped` arrives. *(Amendment 23, #503, signed off by the operato
 §Derived tiles. Additive: `reason` is informational, and an agent tears down the same way
 whatever its value. A stop the agent did not take is sent again, §Reconnection &
 reconciliation.)*
+
+*(Amendment 39, #759, approved in principle by the operator 2026-10-18; text reviewed before
+landing.)* `reason` also takes `parked_expired | parked_evicted | parked_superseded`, which stop a
+parked session: its idle deadline passed, a launch needed its room, or its user launched an app
+outside its Steam family (`control-api.md` §Warm Steam). Informational like the rest: the agent
+tears down the same way, and the app container gets its normal stop window, so a cloud sync in
+progress can finish. A `session_stop` for a play session that ended with `runtime_held` releases
+the held runtime at once (§`session_state`).
 
 ### `session_swap_app` — swap the source app, transport stays live (P2-02)
 Tells the agent to swap a `running` session's **source container** behind its interpipe boundary
@@ -1848,6 +1964,35 @@ a late negative ack after control-plane restart has no in-memory command-to-
 hold correlation. Older agents do not create new RH05 holds and their terminal
 reports do not certify cleanup; their claim remains marked as historically
 unprotected.
+
+> **Amendment 39 — `in_place`: Steam game A to Steam game B in one Steam (#759).** *(Approved in
+> principle by the operator 2026-10-18; text reviewed before landing.)* One optional field,
+> `"in_place": true`, sent only to an agent that advertised `parked_sessions_v1` (§`register`),
+> and only when the session's current app and `app` are two derived tiles of one Steam parent
+> (`control-api.md` §Warm Steam, "Quick switch"). It asks the agent to keep the container and
+> switch games inside the running Steam. A is the appid after `-applaunch` in the running app's
+> `STEAM_STARTUP_FLAGS`; B is the one in `app`'s.
+> 1. The agent reports `session_state{state:"running", detail:"swapping"}`.
+> 2. The launch helper sends `WM_DELETE_WINDOW` to the window whose `STEAM_GAME` is A, as a player
+>    closing it would. If A's process tree has not ended 20 s later, it sends the tree SIGTERM,
+>    then SIGKILL 10 s after that. A's exit does not end the session.
+> 3. The agent waits for Steam to finish A's exit cloud sync, up to 60 s.
+> 4. The helper runs `launch <B>`. Once it has, the agent reports `swap complete`, and the control
+>    plane commits `app_id` on it as for any swap. The agent then reports `app booting` and holds
+>    `app presented` as for a launch (§`session_assign`, adoption step 2).
+> 5. If B cannot be launched, there is nothing to roll back to, because A is gone. The session
+>    ends `stopping` → `stopped` with `detail: "game exited"`. The agent never reports
+>    `swap failed; rolled back` for an in-place swap.
+>
+> - The steps are bounded, so `swap complete` or the session's end follows the ack within 100 s.
+>   That is inside the control plane's 2-minute limit on an unresolved swap (`control-api.md`
+>   §Derived tiles).
+> - The agent swaps in place only when it holds the session's launch helper and `app` differs
+>   from the running container's spec in `STEAM_STARTUP_FLAGS` alone. Otherwise it does today's
+>   container swap, as an agent that ignores the field does.
+> - Ack semantics are unchanged: `ack{ok:false}` leaves A running and the session `running`.
+> - No container starts or stops, so the swap stays within the held reservation and the managed
+>   home it already holds.
 
 ### `session_display_update` — live render resolution / UI scale / external resolution (session-display-update; session-display-stream, approved 2026-08-16)
 > *Additive amendment. New downstream message; no existing message, field, or ack contract
@@ -2482,6 +2627,12 @@ had moved them, and a size a person pinned is kept. On the Vulkan path a size re
 the encoder session. With ABR off, or an encoder that takes no live writes, nothing is written.
 Nothing in this envelope changes, and the control plane relays that offer like any other. The
 control plane forwards no frame from a signaling socket once a later attach has displaced it.
+
+*(Amendment 39, #759, approved in principle by the operator 2026-10-18; text reviewed before
+landing.)* A play session on an adopted runtime sends its first viewer a fresh offer for each
+peer connection, unasked, under the play session's id (§`session_assign`, `adopt_session_id`).
+The control plane relays and buffers it as it does a first offer. Nothing in this envelope
+changes.
 
 ## Reconnection & reconciliation
 - On agent reconnect, the control plane trusts the agent's `heartbeat.running_sessions` /

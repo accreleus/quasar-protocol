@@ -634,7 +634,8 @@ Accounts. Login is by email; `username` is the display handle.
 | `password_hash` | `TEXT` NOT NULL | full argon2id PHC string (`$argon2id$v=19$m=...,t=...,p=...$salt$hash`); params live in the string. Never the password. |
 | `role` | `TEXT` NOT NULL DEFAULT `'user'` | `CHECK (role IN ('user','admin'))`. Multi-user authz (Phase 2) and admin CRUD (P1-3) need this from the start. |
 | `disabled_at` | `TIMESTAMPTZ` NULL | non-null = account deactivated; login + token mint refused. |
-| `max_concurrent_sessions` | `INT` NOT NULL DEFAULT `3` | *(P2-01, migration 0002)* per-user cap on simultaneously-active sessions, admin-settable. `CHECK (max_concurrent_sessions >= 0)`; `0` blocks all launches for the user (without disabling the account). Enforced at launch (`control-api.md` `session_quota_exceeded`); "active" = `state ∈ {pending, assigned, starting, running, stopping}`. |
+| `max_concurrent_sessions` | `INT` NOT NULL DEFAULT `3` | *(P2-01, migration 0002)* per-user cap on simultaneously-active sessions, admin-settable. `CHECK (max_concurrent_sessions >= 0)`; `0` blocks all launches for the user (without disabling the account). Enforced at launch (`control-api.md` `session_quota_exceeded`); "active" = `state ∈ {pending, assigned, starting, running}`, parked sessions not counted. *(Amendment 39, #759: this listed `stopping` too, which the code has not counted since at least the public move; see the note below.)* |
+| `steam_warm_suppressed` | `BOOLEAN` NOT NULL DEFAULT `false` | *(Amendment 39, #759, migration 0105)* set when a launch or swap into an app outside the user's parked Steam family stopped their parked session while `instance_settings.steam_warm_rewarm = 'next_steam_launch'`; cleared by the user's next launch of a Steam parent app or derived tile. While it is `true` the library heartbeat creates no parked session (`control-api.md` §Warm Steam). Not served. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 | `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
@@ -646,11 +647,17 @@ Accounts. Login is by email; `username` is the display handle.
 > busy host is the **per-GPU capacity governor** (encode slots / VRAM), not this per-user
 > fairness cap. The quota's "active" set **includes `pending`** (a not-yet-placed launch counts
 > against you, so a user cannot evade the cap by spamming launches faster than the scheduler
-> places them) and **includes `stopping`**: teardown still owns the app home and GPU resources,
-> so replacement launch must wait for the terminal callback. Terminal states are excluded.
+> places them). *(Amendment 39, #759: this said the set also **includes `stopping`**, because
+> teardown still owns the app home and GPU resources. The code counts `{pending, assigned,
+> starting, running}` and has since at least the public move. A same-home relaunch still waits
+> for the terminal callback, through the managed-home guard (`control-api.md` `409 home_in_use`),
+> and the stopping session's GPU room stays reserved until then (the reservation sum below); both
+> count `stopping`. A parked session, `kind = 'parked'`, is not counted either.)* Terminal states
+> are excluded.
 > This set differs from the **reservation**-holding set
 > `{assigned, starting, running, stopping}` used for GPU availability — quota counts the in-flight
-> `pending` row, GPU reservation does not (nothing is reserved until `assigned`).
+> `pending` row, GPU reservation does not (nothing is reserved until `assigned`), and the
+> reservation counts `stopping` and parked sessions, the quota does not.
 
 ## `auth_tokens`
 Opaque bearer tokens issued at login (P1-B `/auth/login`). The control plane is
@@ -694,6 +701,9 @@ A token is valid iff `revoked_at IS NULL AND expires_at > now()`.
 | `release_webhook_enabled` | `BOOLEAN` NOT NULL DEFAULT `false` | *(release notifications, amendment 4, migration 0080, additive)* whether a detected platform release is POSTed to `release_webhook_url`. **Default `false`** — an instance that has never been configured announces nothing, so the migration is a behavioural no-op on upgrade. Admin-settable via `PATCH /v1/admin/settings`, which refuses `true` with no URL: a switch that silently does nothing is worse than a refusal. Read per pass, not at boot, so switching it off stops delivery with no restart. |
 | `platform_auto_apply` | `BOOLEAN` NOT NULL DEFAULT `false` | *(unattended apply, amendment 8, migration 0081, additive)* whether a detected platform release is applied **without a click**. **Default `false`**, so the migration is a behavioural no-op on upgrade. Admin-settable via `PATCH /v1/admin/settings`; unlike `release_webhook_enabled` it refuses nothing, because it depends on nothing else being configured first — with nothing to apply it applies nothing and records why in the detection run's summary. **There is deliberately no window column beside it**: an unattended pass runs from a successful `platform.release_detect` job, so that job's schedule IS the window, and a second time model here could disagree with it. Read per pass, not at boot. |
 | `release_webhook_url` | `TEXT` NOT NULL DEFAULT `''` | *(release notifications, amendment 4, migration 0080, additive)* where one release notification is POSTed; `''` = none configured. **No CHECK**: a CHECK cannot express "https, no userinfo, a host we are willing to dial", and half of that rule in SQL would read as the whole rule. The PATCH handler validates it (absolute `https`, no userinfo, ≤ 2048 characters) and the delivery path re-checks it, so a row edited by hand still cannot become an unguarded request. **Treated as a credential** — a Slack or Discord webhook URL authenticates by being known — so it never reaches a log line, an audit record or a delivery error. **The signing secret is NOT here**: it is an `instance_secrets` row, `platform.release_webhook.secret`, encrypted under a key that is not in the database. |
+| `steam_warm_enabled` | `BOOLEAN` NOT NULL DEFAULT `false` | *(Amendment 39, #759, migration 0105)* the warm-Steam master switch (`control-api.md` §Warm Steam). **Default `false` — ship-dark**: a parked session holds a full GPU reservation while nobody watches it. Admin-settable via `PATCH /v1/admin/settings`, read per request. With it `false` no parked session is created, and the `session.parked_expire` job stops existing ones. A missing singleton row reads as `false`. |
+| `steam_warm_rewarm` | `TEXT` NOT NULL DEFAULT `'library_open'` | *(Amendment 39, #759, migration 0105)* `CHECK (steam_warm_rewarm IN ('library_open','next_steam_launch'))`. After a non-Steam launch stopped a user's parked session: `library_open` = a later heartbeat warms Steam again; `next_steam_launch` = sets `users.steam_warm_suppressed` until the user's next Steam launch. |
+| `steam_warm_idle_minutes` | `INT` NOT NULL DEFAULT `10` | *(Amendment 39, #759, migration 0105)* `CHECK (steam_warm_idle_minutes BETWEEN 1 AND 60)`. Each heartbeat, and a park on exit, sets `sessions.parked_until` to now plus this many minutes. |
 | `updated_by` | `UUID` NULL → `users(id)` ON DELETE SET NULL | last admin who changed it. |
 | `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
@@ -1135,6 +1145,9 @@ signaling (P1-D).
 | `app_log_tail` | `TEXT` NULL | *(first-run-experience §S5, migration 0062, additive)* the app container's own captured log tail (newline-joined, oldest first, ~100 lines bound), sent by the agent as `session_state.app_log_tail`. Its own column because it cannot share `error_message` — that field renders inline as a one-line reason everywhere it appears, and a hundred lines of Steam output pasted into it would wreck every existing surface. App containers run `--rm`, so these lines are otherwise unrecoverable once the daemon reaps the container (#463) — this column is the only surviving copy. NULL unless a failure warranted capturing it. |
 | `stop_reason` | `TEXT` NULL | *(amendment 24 #516, migration 0101, additive)* the `session_stop` reason (`agent-api.md`) the control plane recorded in the write that moved the session to `stopping`. Written once: a later stop of the same session keeps the first reason. NULL when the control plane never stopped the session through that path (live, `failed`, reaped). Unconstrained text, and **not served as is**: `control-api.md` §`stop_reason` exposes only its closed set and reads every other value as `null`. |
 | `home_seed` | `JSONB` NULL | *(RH05 #344, migration 0093)* actual initial Steam managed-home seeding outcome from an authenticated `session_state`. Exact object `{mode,reason}` only: `reflink/seeded`, `copy/seeded`, `existing/existing_home`, or `cold` paired with `template_unavailable`, `source_disabled`, `host_templates_disabled`, `host_setting_invalid`, `policy_unavailable`, `storage_unavailable`, `clone_failed` or `policy_changed`. NULL means no accepted evidence, never inferred cold. First accepted outcome wins; swaps leave it unchanged. No path, user identifier, image ref, command output or free text. Only `reflink/seeded` proves reflink storage saving. |
+| `kind` | `TEXT` NOT NULL DEFAULT `'play'` | *(Amendment 39, #759, migration 0105)* `CHECK (kind IN ('play','parked'))`. `play` = a session someone launched to play, which is every row before 0105. `parked` = a warm Steam: the user's Steam parent app running `-silent` with no viewer, holding a normal reservation (`control-api.md` §Warm Steam). Every user-facing read and count leaves `parked` rows out (the user's session list and per-session routes, play history, highlights, the per-user quota, `AdminApp.sessions_30d`); admin reads and the reservation sum include them. Served as `Session.kind`. |
+| `parked_until` | `TIMESTAMPTZ` NULL | *(Amendment 39, #759, migration 0105)* when a parked session expires: set to now plus `instance_settings.steam_warm_idle_minutes` at creation and by each library heartbeat. The `session.parked_expire` job stops a parked row past it. `NULL` on every play row. Not served. |
+| `launch_progress` | `JSONB` NULL | *(Amendment 39, #759, migration 0105)* the agent's last accepted `session_state.launch_progress` (`agent-api.md`), exactly `{"step":"shaders","percent":<integer 0–100>}`; validated by the control plane, not by a CHECK. Written only while the session is `running` with `state_detail = 'app booting'`, and cleared (`NULL`) when the detail leaves `app booting`. Served as `Session.launch_progress`. |
 | **launch params** | | drive the P1-5 pipeline; default from `apps` then overridable per launch. |
 | `width` | `INT` NOT NULL | |
 | `height` | `INT` NOT NULL | |
@@ -1159,7 +1172,12 @@ signaling (P1-D).
 
 Indexes: `(user_id, created_at DESC)` for a user's session list; `(host_id)` and `(gpu_id)`
 for the availability sums; partial index `(gpu_id) WHERE state IN ('assigned','starting','running','stopping')`
-to make the reservation sum cheap.
+to make the reservation sum cheap. *(Amendment 39, #759, migration 0105)* **Partial unique index
+`sessions_one_parked_per_user` ON `(user_id) WHERE kind = 'parked' AND state IN
+('pending','assigned','starting','running','stopping')`**: at most one parked, non-terminal
+session per user. It includes `stopping`, because a parked Steam that is shutting down still
+holds the user's home. This is what makes two concurrent heartbeats, or a heartbeat racing a park
+on exit, unable to leave a user with two warm Steams.
 
 ## `session_tokens`
 Repeatable issuance with single-use consumption for launch and mid-session reconnection.
@@ -1758,6 +1776,17 @@ storage decision, not a licence to store anything.
 
 A missing row is not an error state; it means "all defaults". Reads return the
 default object rather than 404.
+
+## `user_profile_preferences` (CP-01, migration 0015)
+The caller's own launch preferences, `GET`/`PATCH /v1/me/profile-preferences`. One row per user
+who has saved one; a missing row reads as every default.
+
+| column | type | notes |
+|---|---|---|
+| `user_id` | `UUID` PK → `users(id)` ON DELETE CASCADE | |
+| `default_profile_id` | `TEXT` NULL → `launch_profiles(id)` | the user's preferred launch profile, honoured only while user overrides are allowed (migration 0036 repointed the FK). |
+| `steam_dialogs` | `TEXT` NOT NULL DEFAULT `'show'` | *(Amendment 39, #759, migration 0105)* `CHECK (steam_dialogs IN ('show','dismiss_safe'))`. Whether the Steam launch helper may answer a fixed list of Steam's waits for this user (`control-api.md` §Warm Steam, "`steam_dialogs`"). Reaches the app only as `QUASAR_STEAM_DIALOGS=dismiss_safe`, from this fixed set. |
+| `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | `set_updated_at` trigger. |
 
 ## `app_launch_profiles` (UI-P5)
 > *Additive amendment (migration 0037). A new join table; it changes no existing table
@@ -2367,6 +2396,14 @@ states.
 `stopped` and `failed` are the only **terminal** states; the other five are non-terminal and
 **every one of them can transition directly to `failed`**.
 
+*(Amendment 39, #759.)* Two writes for warm Steam (`control-api.md` §Warm Steam), with no new state.
+**A claim** moves a parked row `running → stopped` with `state_detail = 'claimed'`, written by the
+control plane with no teardown, because the agent keeps the runtime for the play session. That one
+transaction releases the parked reservation and inserts the play session `assigned` on the same
+GPU, so invariant 2 below holds and no other launch can take the room in between. **A park on
+exit** stores the play session's ordinary `stopped` and, in the same transaction, inserts the
+parked row `assigned` on that GPU with the reservation moved to it.
+
 | state | meaning | resources reserved? | who drives the transition | → `failed` cause |
 |---|---|---|---|---|
 | `pending` | row created, not yet placed | no | control plane (launch) | scheduler error; `capacity_unavailable` after the row exists; launch abandoned |
@@ -2481,6 +2518,7 @@ control-plane/migrations/
   0101_session_stop_reason.up.sql -- (session stop reason, amendment 24, #516, PURELY ADDITIVE in shape -- one nullable column, no default, no backfill.) ALTER TABLE sessions ADD COLUMN stop_reason TEXT. The session_stop reason recorded in the write that moves a session to `stopping`; served only through the closed set of control-api.md `stop_reason`. The down migration drops the column, so the recorded reasons are lost and every session reads `stop_reason: null` again.
   0102_library_observation_missing_since.up.sql -- (two-scan prune, amendment 25, #521, PURELY ADDITIVE in shape -- one nullable column, no default, no backfill.) ALTER TABLE library_observations ADD COLUMN missing_since TIMESTAMPTZ. When a successful scan first did not list the observation; the reconciler deletes the row only when a scan queued at least one scan interval after that also does not list it. The down migration drops the column, so the marks are lost and a missing game needs two fresh scans again.
   0104_library_metadata.up.sql -- (library and game page metadata, logos and icons, amendment 38, #720, PURELY ADDITIVE in shape -- eight new apps columns, three new app_artwork columns, two partial indexes; no existing column touched, no backfill in SQL.) ALTER TABLE apps ADD COLUMN genres TEXT[] NOT NULL DEFAULT '{}', developer TEXT NULL, publisher TEXT NULL, release_date TEXT NULL, controller_support TEXT NULL CHECK (controller_support IS NULL OR controller_support IN ('full','partial')), store_details_at TIMESTAMPTZ NULL, logo_url TEXT NULL, icon_url TEXT NULL; ALTER TABLE app_artwork ADD COLUMN logo_asset TEXT NOT NULL DEFAULT '', icon_asset TEXT NOT NULL DEFAULT '', logo_icon_checked BOOLEAN NOT NULL DEFAULT false; CREATE INDEX app_artwork_logo_asset_idx / app_artwork_icon_asset_idx ON app_artwork (logo_asset) / (icon_asset) WHERE <> ''. Existing rows are filled by the running services, not by the migration: store details by the next library scan that observes a tile (appdetails switch on), logo and icon by the artwork sweep. The orphan sweep MUST read logo_asset and icon_asset as references, or boot's PruneOrphans deletes every cached logo and icon. NUMBERING: 0104 is the next free number at authoring time; if it is taken at landing, the SQL takes the next free number and this line records it. ROLLBACK, standing repo rule: once applied, never deploy a control-plane binary embedding only <= 0103. The down migration drops the columns and indexes; the loss is the fetched store details and the logo and icon references (their blobs become orphans the next boot reclaims), all of which the services fetch again.
+  0105_steam_warm.up.sql -- (warm Steam, parked sessions, amendment 39, #759, ADDITIVE in shape -- new columns with defaults that make every existing row valid, one partial unique index; no existing column touched, no backfill.) ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'play' CHECK (kind IN ('play','parked')), parked_until TIMESTAMPTZ NULL, launch_progress JSONB NULL; CREATE UNIQUE INDEX sessions_one_parked_per_user ON sessions (user_id) WHERE kind = 'parked' AND state IN ('pending','assigned','starting','running','stopping'); ALTER TABLE instance_settings ADD COLUMN steam_warm_enabled BOOLEAN NOT NULL DEFAULT false, steam_warm_rewarm TEXT NOT NULL DEFAULT 'library_open' CHECK (steam_warm_rewarm IN ('library_open','next_steam_launch')), steam_warm_idle_minutes INT NOT NULL DEFAULT 10 CHECK (steam_warm_idle_minutes BETWEEN 1 AND 60); ALTER TABLE users ADD COLUMN steam_warm_suppressed BOOLEAN NOT NULL DEFAULT false; ALTER TABLE user_profile_preferences ADD COLUMN steam_dialogs TEXT NOT NULL DEFAULT 'show' CHECK (steam_dialogs IN ('show','dismiss_safe')). Every existing session is a play and the switch defaults off, so the migration changes no behaviour on upgrade. DOWN: refuses (RAISE EXCEPTION) while any kind = 'parked' row is non-terminal -- turn steam_warm_enabled off and wait for the next session.parked_expire run (60 s), which stops them. It then DELETEs the terminal parked rows, whose metrics, trace, clock and token rows cascade with them; dropping kind without that would bring every one back as a play in the user's history, highlights and quota. Then it drops the index and the columns. The loss is the parked rows, each user's steam_dialogs choice and the three settings. NUMBERING: 0105 is the next free number at authoring time; if it is taken at landing, the SQL takes the next free number and this line records it. ROLLBACK, standing repo rule: once applied, never deploy a control-plane binary embedding only <= 0104 without running this down migration first; that includes going back to develop from the feature branch before it lands.
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`

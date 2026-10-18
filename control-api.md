@@ -1149,6 +1149,7 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `GET` / `PATCH /v1/me/ui-preferences` | user (self only) | client UI presentation preferences, synced across the caller's devices. No admin variant exists: these are keyed on the authenticated caller and there is no `{id}` form, so one user's preferences are unreadable by anyone else. |
 | `GET /v1/me/highlights` | user (self only) | *(home-rail amendment, 2026-08-05)* the caller's server-ranked home rail, derived from their own session history. No `user_id` parameter and no admin variant. **Entitlement-filtered**, and that filter is load-bearing rather than cosmetic — see below. |
 | `GET /v1/me/play-history` | user (self only) | *(Amendment 38, #720)* the caller's own play time, session count and last played per app, derived from their own sessions. No `user_id` parameter and no admin variant. **Entitlement-filtered** like `GET /v1/me/highlights`. |
+| `PUT /v1/me/steam-warm` | user (self only) | *(Amendment 39, #759)* the library heartbeat: keeps the caller's warm Steam (a parked session) alive, or starts one when every rule allows. Always `204`, no body. No admin variant. §Warm Steam |
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `POST /v1/admin/storage/home-claims/release` | **admin** | *(amendment 15, #379/#347)* release a conflicting managed-home claim whose owner host is gone and which records no location on a host that still exists. Bookkeeping only: no file is moved or deleted. `204`; `400 validation_failed`; `404 not_found`; `409 conflict` (the claim changed since it was read); `409 home_in_use`; `409 claim_not_releasable`. Audited as `storage.home_claim.release` |
@@ -1779,7 +1780,7 @@ cannot straddle the compare and the write.
 otherwise); persisted to the `instance_settings` singleton (`schema.md`). Takes effect
 immediately — no redeploy. `403` for non-admin (precedes any lookup).
 
-*(This envelope and PATCH body have since grown, additively, beyond the invitation switch this section was written for: `storage_provider`, the discovery switches, `mic_capture_enabled`, `image_update_policy`, `allowed_origins`, and — platform-release amendment 1 — `release_channel` / `release_edge_branch` (§Platform releases). Every one of them is an **optional pointer** on PATCH: absent means unchanged.)*
+*(This envelope and PATCH body have since grown, additively, beyond the invitation switch this section was written for: `storage_provider`, the discovery switches, `mic_capture_enabled`, `image_update_policy`, `allowed_origins`, and — platform-release amendment 1 — `release_channel` / `release_edge_branch` (§Platform releases). Every one of them is an **optional pointer** on PATCH: absent means unchanged.)* *(Amendment 39, #759: also `steam_warm_enabled`, `steam_warm_rewarm` and `steam_warm_idle_minutes`, §Warm Steam, "Admin settings".)*
 
 ## Encrypted secrets — the reusable operator-credential facility (2026-07-28)
 
@@ -2893,7 +2894,8 @@ every `inherit` app for every user in one invisible step.
 ```
 `default_profile_id` names a **launch profile**, owner is the bearer identity, and it is honoured
 only while `user_overrides_allowed` is true. The two policy fields are echoed read-only so a client
-can render "your admin has pinned everyone to the default" without a second call.
+can render "your admin has pinned everyone to the default" without a second call. *(Amendment 39,
+#759:)* both verbs also carry `steam_dialogs` (§Warm Steam, "`steam_dialogs`").
 
 ### `GET` / `PATCH /v1/me/ui-preferences`
 
@@ -2968,7 +2970,8 @@ must render, never an error.
 
 `play_seconds` is clamped per session, so an unreconciled `NULL ended_at` is
 bounded rather than open-ended, and `state='failed'` sessions are excluded — a
-launch that never ran is not play time.
+launch that never ran is not play time. *(Amendment 39, #759:)* a parked session
+(`kind = 'parked'`) is never counted either: it is a warm Steam, not play (§Warm Steam).
 
 Deliberately **absent** from `Highlight`: the app's name, artwork, kind and
 favourite flag (the client already holds the full `AppListItem` and joins on
@@ -2991,6 +2994,7 @@ is always the bearer. No `user_id` parameter, no query parameters, no admin vari
   and did not end `failed`, a live one included. A launch that never reached `running` is not
   play. A `failed` session is left out even if it ran: that is the rule `play_seconds` on
   `GET /v1/me/highlights` already applies, so the two reads never disagree about a session.
+  *(Amendment 39, #759:)* a parked session is never counted, by either read (§Warm Steam).
 - **One session's duration:** `started_at` to `ended_at`, or to the time of the request while
   it has not ended, bounded to 0 – 24 hours. That is the highlights clamp: a session whose host
   vanished before it was reconciled has no `ended_at` and cannot grow without bound, and a skewed
@@ -3046,6 +3050,9 @@ is the single hinge to `signaling.md`.
   }
 }
 ```
+- *(Amendment 39, #759:)* a launch of a Steam parent app or one of its derived tiles by a caller
+  who holds a parked session may adopt it rather than place a new one; the request and the `201`
+  are unchanged (§Warm Steam, "Claim").
 - The scheduler reserves transactionally against `gpus` availability (`schema.md`), and first
   enforces the caller's per-user session quota. Rejections (see §Admission control for the exact
   rule) — in all of which **no session row persists** (quota/availability is checked before the
@@ -3070,7 +3077,9 @@ is the single hinge to `signaling.md`.
       they have restricted grants themselves the entitlement (`POST
       /v1/admin/apps/{id}/entitlements`), which is one call and leaves an audit row.
   - **`409 session_quota_exceeded`** — the caller already holds `max_concurrent_sessions` active
-    sessions (`state ∈ {pending, assigned, starting, running, stopping}`).
+    sessions (`state ∈ {pending, assigned, starting, running}`, parked sessions not counted).
+    *(Amendment 39, #759: this listed `stopping` too. The quota has not counted `stopping` since
+    at least the public move; §Admission control has the rule.)*
   - **`503 no_host_available`** — no online host has a GPU that could serve the request.
   - **`503 capacity_exhausted`** — a matching GPU is online but its available encode slots / VRAM
     (totals − active reservations) cannot satisfy the request right now; retryable once a session
@@ -3537,10 +3546,16 @@ non-owner's `403` writes nothing.
 A `POST /v1/sessions` launch is admitted only if **both** gates pass, evaluated in this order:
 
 1. **Per-user session quota.** Let `active` = the caller's sessions in `state ∈ {pending,
-   assigned, starting, running, stopping}` (the non-terminal set — see `schema.md`
-   `users.max_concurrent_sessions`). If `count(active) ≥ user.max_concurrent_sessions`, reject
+   assigned, starting, running}` — see `schema.md` `users.max_concurrent_sessions`. If
+   `count(active) ≥ user.max_concurrent_sessions`, reject
    with **`409 session_quota_exceeded`** and persist no row. A `max_concurrent_sessions` of `0`
    blocks every launch for that user. This gate is per-user and independent of host capacity.
+   *(Amendment 39, #759, approved in principle by the operator 2026-10-18; text reviewed before
+   landing.)* Two corrections. `stopping` is not in the set: this said it was, but the code has
+   counted only these four states since at least the public move. A session being torn down
+   still holds its GPU reservation (gate 2) and its managed home (`409 home_in_use`), so leaving
+   it out of the quota lets nothing run over it. And a parked session (`kind = "parked"`,
+   §Warm Steam) is never counted.
 
 2. **Per-GPU capacity (the governor).** The request's resource ask comes from the app row —
    `requested_encode_slots = apps.default_encode_slots` (clients never set this; the `stream`
@@ -3752,6 +3767,12 @@ plane stopped the session for a reason in this closed set:
 Backed by `openapi.yaml` (`Session.stop_reason`) and `schema.md` (`sessions.stop_reason`,
 migration 0101).
 
+#### `kind` / `launch_progress` — parked sessions and shader progress (amendment 39, #759)
+Every session read shape gains `kind` (`"play"` or `"parked"`) and `launch_progress` (an object or
+`null`), both always serialized and read-only. A user-facing read never returns a parked session,
+so it only ever shows `kind: "play"`. The rules are in §Warm Steam ("`kind` on the session read",
+"Shader progress").
+
 #### `stream.external_width` / `external_height` / `external_resize_supported` / `external_owner` / `rungs` — live external (encoded) resolution (session-display-stream, approved 2026-08-16)
 > *Additive amendment, approved 2026-08-16 (PR #15). Extends the `stream` block already
 > returned by session GET/list and by `PATCH /v1/sessions/{id}/display`'s `202` body; no existing
@@ -3843,7 +3864,8 @@ absent — poll exactly as before this amendment), and a dropped stream is re-su
 polled — a client MUST NOT treat stream loss as a session-state signal.
 
 ### `GET /v1/sessions` — the user's sessions
-List, newest first, owner-scoped. Same item shape as `GET /v1/sessions/{id}`.
+List, newest first, owner-scoped. Same item shape as `GET /v1/sessions/{id}`. *(Amendment 39,
+#759:)* it never lists a parked session (§Warm Steam, "What leaves a parked session out").
 
 ### `DELETE /v1/sessions/{id}` — stop
 Requests teardown: control plane sends `session_stop` to the agent (`agent-api.md`), session
@@ -3867,6 +3889,9 @@ interpipe boundary while encode + `webrtcbin` stay up, so the browser stream nev
     "created_at": "...", "started_at": "...", "ended_at": null
   } }
 ```
+- *(Amendment 39, #759:)* between two derived tiles of one Steam parent, the swap may run inside
+  the running Steam rather than swapping the container (`in_place`, §Warm Steam, "Quick switch").
+  The request, the `202` and the errors below are unchanged.
 - **Async, like launch/stop.** The control plane validates, sends `session_swap_app`
   (`agent-api.md`) to the assigned host, sets `state_detail = "swapping"`, and returns `202`. The
   client polls `GET /v1/sessions/{id}` to watch `state_detail` go `swapping → ` (a running detail)
@@ -4030,6 +4055,276 @@ banner at the top of this document. Owner-or-admin (same rule as `DELETE`/`swap`
 
 ---
 
+## Warm Steam — parked sessions *(Amendment 39, #759)*
+
+> *(Amendment 39, #759, approved in principle by the operator 2026-10-18; text reviewed before
+> landing.)* Additive, admin-gated and off by default. One new route (`PUT /v1/me/steam-warm`),
+> two read-only fields on every session read shape (`kind`, `launch_progress`), one field on the
+> profile preferences (`steam_dialogs`), three instance settings, and new behaviour behind
+> `steam_warm_enabled`. With the switch off, and with every agent that did not advertise
+> `parked_sessions_v1` (`agent-api.md` §`register`), every route answers exactly as before. The
+> wire half is `agent-api.md` (`session_assign.kind` / `adopt_session_id`,
+> `session_state.runtime_held` / `launch_progress`, `session_swap_app.in_place`, three
+> `session_stop` reasons); the storage half is `schema.md` migration 0105.
+
+A Steam launch spends 20–35 s before the game: Steam starts, checks for updates and waits for the
+network. A warm Steam does that in the background while the user browses the library, so a click
+on a Steam game shows the loader and then the game.
+
+### The model
+
+- **A parked session** is a session row with `kind = "parked"`: the user's Steam parent app (the
+  enabled app with `library_provider = "steam"`) running on one GPU with Steam started `-silent`
+  (no game, no Big Picture). It holds a normal reservation and has no viewer. A user has at most
+  one (`schema.md` `sessions_one_parked_per_user`).
+- **One play is still one session row.** Every user-facing read and count leaves parked rows out
+  ("What leaves a parked session out", below). Admins see them, with `kind`.
+- **GPU capacity counts a parked reservation**: it holds an encode slot, and the VRAM it uses shows
+  in the live free-VRAM veto (§Admission control). The per-user quota does not count it.
+- **It runs the same managed home as a Steam launch of its family** (the parent app and the tiles
+  derived from it), so the single-writer lock (§Derived tiles, `409 home_in_use`) covers it.
+- **Only on a host whose current agent connection advertised `parked_sessions_v1`.** A parked
+  session is always `stream_only`; console and direct-display sessions are out of scope.
+
+### `PUT /v1/me/steam-warm` — the library heartbeat
+
+**`RequireAuth`**; the subject is always the bearer. No request body (one that is sent is
+ignored), no query parameters, no admin variant. Once authenticated it **always answers `204`
+with no body**, whatever it did or failed to do: the client learns nothing from it and shows
+nothing. The web client calls it every 60 s while the library page is open.
+
+Each call does two things:
+1. **If the caller has no parked session and every rule below allows one, it creates one.** That
+   is a launch of the Steam parent app exactly as `POST /v1/sessions` with that `app_id`, no
+   `profile_id` and `mic: true` (what the web client sends) would launch it for this caller: the
+   same default profile, codec resolution under the token's device, gates and placement. It
+   differs in four ways: `STEAM_STARTUP_FLAGS` is `-silent`, `kind` is `parked`, no signaling token
+   is minted, and no `session.launched` audit row is written. Placement never evicts anything: no
+   room means no parked session.
+2. **It sets the caller's parked session's `parked_until`** to now plus `steam_warm_idle_minutes`.
+
+It creates nothing when any of these holds:
+- `steam_warm_enabled` is false;
+- the caller can see no Steam parent app (the enabled + entitled predicate of `GET /v1/apps`), or
+  more than one *(this amendment's reading: a heartbeat names no app, so with two it cannot
+  choose)*;
+- the caller has no managed home for that app yet (no `user_homes` row that is not tombstoned), so
+  a warm start never does first-launch work;
+- the caller already has a live (non-terminal) session of any kind, a parked one included;
+- the caller's `steam_warm_suppressed` is set (§Non-Steam apps, below);
+- the caller's `max_concurrent_sessions` is `0`;
+- the bearer token is not bound to a device, so there is no capability probe to resolve a codec
+  from;
+- placement finds no room on an `online`, uncordoned host that advertised `parked_sessions_v1`;
+- a platform apply run is cordoning the fleet.
+
+### Claim: a Steam launch adopts the parked session
+
+`POST /v1/sessions` is unchanged on the wire, request and response alike. When the caller holds a
+parked session and launches its Steam parent app or one of that app's derived tiles, the launch's
+scheduling transaction locks the parked row and checks, after entitlement and before placement:
+1. it is the caller's, and its app is the launched app's home app (the parent itself, or the
+   tile's `parent_app_id`);
+2. it is `running`, and `parked_until` has not passed;
+3. its host is `online` and not cordoned, and its current agent connection advertised
+   `parked_sessions_v1`;
+4. the stream the launch resolves on that GPU matches what the parked session encodes: the same
+   `codec`, `fps`, `bitrate_kbps`, `h264_profile` and `mic`, and a `width` and `height` no larger
+   than the parked session's *(this amendment's reading: the spec names the codec only, but the
+   others cannot change on a live session, and a display update can only shrink below the launch
+   size, `agent-api.md` §`session_display_update`)*;
+5. the launched app's reservation fits on that GPU once the parked reservation is released.
+
+When every check passes, the same transaction:
+- inserts the play session `assigned` on the parked session's host and GPU, with the stream the
+  launch resolved and its own reservation, which takes the room the parked row releases. The
+  managed-home claim, and any hold that names the parked session, move to it in the same write;
+- moves the parked row to `stopped` with `state_detail = "claimed"`, releasing its reservation
+  (`schema.md` §Session state machine);
+- and the `session_assign` that follows carries `kind: "play"` and
+  `adopt_session_id: "<parked id>"` (`agent-api.md`).
+
+The response is today's `201`: the new session, `assigned`, with its signaling token. The client
+connects as for any launch, and the agent sends it a fresh offer. When the agent no longer holds
+the parked runtime (it restarted, or the container is gone), it builds the session fresh from the
+app, so a claim never fails because the parked session was lost.
+
+When a check fails, the parked session is stopped (`session_stop`, `reason: "parked_superseded"`)
+and the launch goes on as a launch without one. While that Steam shuts down it still holds the
+home, so this launch is refused `409 home_in_use` with the message a stopping holder gets
+("…still shutting down; try again in a moment", #434). *(Flagged for review: the web client does
+not retry `home_in_use` today.)* **A `home_in_use` body never names a parked session**: when the
+holder is parked, `session_id` is omitted, as for a holder the guard cannot name.
+
+The play session counts against the quota as any session does, and the parked one does not, so a
+claim is admitted at the quota exactly when the same launch with no parked session would be. Any
+launch of a Steam parent app or derived tile, claim or not, clears the caller's
+`steam_warm_suppressed`.
+
+### Park on exit
+
+When the control plane stores a `stopped` report carrying `runtime_held: true` (`agent-api.md`
+§`session_state`), it ends the play session as for any `stopped` and, in the same transaction,
+parks or releases the runtime:
+- **It parks it** when `steam_warm_enabled` is on, the user has no other live session, and the
+  host is `online` and not cordoned. It inserts a parked row for the Steam parent app on the same
+  host and GPU, with the ended session's stream columns (what the runtime encodes) and
+  `device_id`, and `parked_until` = now plus `steam_warm_idle_minutes`. The ended session's reservation, managed-home claim and holds move to
+  it in the same write, so the GPU is never shown free in between. It then sends
+  `session_assign{kind:"parked", adopt_session_id:"<ended play id>"}` and `session_start`; the
+  assign's `app` is the Steam parent app with `-silent`, for the case where the agent builds
+  fresh.
+- **Otherwise it releases it**, with `session_stop` for the ended id.
+
+*(This amendment's reading of the spec's "the user's heartbeat is fresh": no heartbeat is sent
+while the user plays and no column records the last one, so the park instead takes a fresh
+deadline. The library page the user returns to extends it; with no heartbeat the parked session
+expires at that deadline.)*
+
+The play session has ended at once, so the browser can go back to the library at once: Steam's
+shutdown is no longer on the path.
+
+### Expiry
+
+A managed, instance-scoped job, **`session.parked_expire`**, runs every 60 s (§Background jobs;
+its interval is admin-editable like any job's, minimum 60 s). Each run stops, with
+`session_stop{reason:"parked_expired"}`, every parked session whose `parked_until` has passed, and
+every parked session while `steam_warm_enabled` is off.
+
+### A real launch always wins
+
+When placement for any `POST /v1/sessions` launch finds no room, and releasing one parked
+session's reservation on a GPU the launch could use would make room, the control plane stops the
+oldest such parked session (`reason: "parked_evicted"`). It still refuses this attempt exactly as
+it would without that step. For a GPU whose totals fit that is `503 capacity_exhausted`, not
+`no_host_available` (§Admission control). The client's existing capacity retry gets the room once
+that session is `stopped`. At most one parked session is stopped per refused attempt. Steam gets
+its normal stop window, so a cloud sync in progress finishes. A heartbeat's placement never evicts.
+When the parked session is the caller's own, the reason is `parked_superseded` instead, with what
+follows from it (§Non-Steam apps): only a launch outside its Steam family reaches this point,
+because a launch inside it claims it or stops it first.
+
+### Non-Steam apps
+
+- A launch admitted, or a swap accepted, into an app outside the parked session's Steam family
+  stops the caller's parked session with `reason: "parked_superseded"`.
+- What happens next follows `steam_warm_rewarm`:
+  - `library_open` (default): nothing more. A later heartbeat warms Steam again once the user has
+    no live session.
+  - `next_steam_launch`: the user's `steam_warm_suppressed` is set, and heartbeats create nothing
+    until the user's next launch of a Steam parent app or derived tile clears it.
+
+### Quick switch: the in-place swap
+
+`POST /v1/sessions/{id}/swap` is unchanged on the wire. When the session's current app and the
+target are two derived tiles of one Steam parent, and the host's current connection advertised
+`parked_sessions_v1`, the control plane sends `session_swap_app` with `in_place: true`
+(`agent-api.md`). The control plane cannot see whether the launch helper is attached; the agent
+can, and does today's container swap when it is not. Every other swap is sent as today.
+- A client sees `swapping` as today, then `swap complete` (the control plane commits `app_id`),
+  then `app booting` → `app presented` as for a launch. The loader stays until `app presented`.
+- If B cannot be started, the session ends `stopped` with `state_detail = "game exited"`. There is
+  no rollback, because A is gone.
+
+### `steam_dialogs` — the account setting
+
+`GET` / `PATCH /v1/me/profile-preferences` gain **`steam_dialogs`**: `"show"` (the default) or
+`"dismiss_safe"`.
+```json
+{ "default_profile_id": "high", "steam_dialogs": "dismiss_safe",
+  "global_default_profile_id": null, "user_overrides_allowed": true }
+```
+- `GET` always returns it, and so does the `PATCH` response. On `PATCH`, an absent
+  `steam_dialogs` leaves it unchanged, and any other value is `400 validation_failed`. A `PATCH`
+  that names `steam_dialogs` but not `default_profile_id` leaves the profile unchanged; a `PATCH`
+  without `steam_dialogs` keeps today's rule for `default_profile_id`.
+- It is not gated by `user_overrides_allowed`, which governs profiles only.
+- At a launch of the Steam parent app or a derived tile, the parked kind included, the control
+  plane sets `QUASAR_STEAM_DIALOGS=dismiss_safe` in the app's env when the setting is
+  `dismiss_safe`, and removes the key otherwise. The value comes from this fixed set, never from
+  free text or the app's own runtime spec. A parked session keeps the value it started with;
+  changing the setting while Steam is parked takes effect at the next warm start.
+- With `dismiss_safe` the launch helper answers only a fixed list of Steam's waits, in v1 the
+  controller notice. It always shows sign-in, Steam Guard, a cloud conflict, the EULA, an install,
+  and every wait it does not recognise.
+
+### Admin settings
+
+`GET` / `PATCH /v1/admin/settings` gain three fields, optional pointers on `PATCH` like every other
+settings field (absent means unchanged), stored on the `instance_settings` singleton (`schema.md`):
+
+| field | type | default |
+|---|---|---|
+| `steam_warm_enabled` | boolean | `false` |
+| `steam_warm_rewarm` | `"library_open"` or `"next_steam_launch"` | `"library_open"` |
+| `steam_warm_idle_minutes` | integer, 1–60 | `10` |
+
+Any other value is `400 validation_failed`. All three are read per request, so a change needs no
+restart. Turning `steam_warm_enabled` off creates no more parked sessions, and the expiry job stops
+the existing ones at its next run. A new `steam_warm_idle_minutes` applies from each parked
+session's next heartbeat.
+
+### Shader progress: `launch_progress`
+
+Every session read shape gains **`launch_progress`**, always serialized: `{"step":"shaders",
+"percent":42}` while the agent reports Steam processing the game's Vulkan shaders, `null`
+otherwise. `GET /v1/sessions/{id}`, which the loader polls every second, returns it.
+- It is stored (`sessions.launch_progress`) from `session_state.launch_progress` (`agent-api.md`)
+  only when that report comes on the current connection of the session's assigned host, for a
+  `running` session whose `state_detail` is `app booting`.
+- It is validated as exactly `{"step":"shaders","percent":<integer 0–100>}`. Anything else drops
+  the field only, never the report, and is logged with a fixed token, never the raw value.
+- It is cleared when the session's `state_detail` leaves `app booting`: on `app presented`, on a
+  swap, and when the session ends.
+- It is a hint from inside the app container: for display only, never a session-state authority.
+  When the session SSE route is served, a change to it sends an event.
+
+### `kind` on the session read
+
+Every session read shape gains **`kind`**, `"play"` or `"parked"`, always serialized. A user-facing
+read only ever returns `"play"`, because those reads never return a parked row.
+`GET /v1/admin/sessions` returns parked rows with `kind: "parked"`, filtered by `?state=` like any
+other.
+
+### What leaves a parked session out
+
+- **`GET /v1/sessions`**, the user's own list (and so the account's sessions page).
+- **Every route under `/v1/sessions/{id}` for a caller who is not an admin**: `404 not_found`, as if
+  the session did not exist. For an admin, `GET` reads it and `DELETE` stops it, and every other
+  route under `/v1/sessions/{id}` answers `404 not_found`.
+- **`GET /v1/me/play-history`** and **`GET /v1/me/highlights`**: no parked row counts.
+- **The per-user quota** (§Admission control).
+- **`active_session_id`** on `GET /v1/me/devices` never names a parked session. Revoking the device
+  still stops a parked session launched from it.
+- **`AdminApp.sessions_30d`**, which counts plays of the app *(this amendment's reading)*.
+- **`stop_reason`**: the three parked reasons are recorded in `sessions.stop_reason` and not served,
+  so the closed set is unchanged and a parked row reads `stop_reason: null` unless an entitlement
+  revoke stopped it.
+
+Admin reads that include parked sessions: `GET /v1/admin/sessions`, host capacity, and
+`AdminUser.active_session_count`, because a parked session is open on its host.
+
+### Drains and platform applies
+
+- **A host drain** (`POST /v1/hosts/{id}/drain`, graceful or forced), **a host apply attempt** when
+  it cordons its host, and **a fleet run** when it cordons the fleet stop every parked session on
+  the hosts they cordon, with `session_stop{reason:"host_draining"}`. A parked session is not a
+  player's session to wait for, so it never holds back a drain or an apply *(this amendment's
+  reading for a graceful drain, which otherwise stops nothing: a heartbeat would extend a parked
+  session there for as long as the library stays open)*.
+- **A parked session holds its host like any live session.** Golden-home warm-up, which runs only
+  with no live session on the host, waits for it, and the user's managed home stays on that host
+  until it ends.
+
+### Costs
+
+- A parked session holds a full reservation, encode slot included, while its user browses the
+  library. That is why the switch is off by default. Releasing the encode slot while parked is a
+  later change, to be measured first.
+- The encoder keeps encoding a desktop nobody watches. Pausing it is a later change.
+
+---
+
 ## Hosts (admin lifecycle, P3-01)
 > *Additive, admin-gated amendment. New endpoints; no change to any existing shape. The host
 > status values and transitions are defined in `schema.md` §"Host status state machine".*
@@ -4122,7 +4417,8 @@ auto-transition to `offline`.
 { "host": { "id": "<uuid>", "node_name": "gpu-host-01", "status": "draining", "...": "..." } }
 ```
 - **Graceful (`force:false`, default):** the host goes `draining`; running sessions are left to end
-  on their own. The drain stops nothing.
+  on their own. The drain stops nothing. *(Amendment 39, #759: except parked sessions, which
+  either drain stops, §Warm Steam, "Drains and platform applies".)*
 - **Force (`force:true`):** the host goes `draining` and the control plane sends `session_stop` with
   `reason:"host_draining"` (`agent-api.md`) to every non-terminal session on the host; each tears
   down `stopping → stopped` and releases its reservation.
@@ -7931,7 +8227,9 @@ media path that is still carrying the stream (`signaling.md`, #128).
   sees it.
 
 **Either way the run cordons every host for its duration**, because every host in the run is about
-to be recreated at its own step and a session that lands mid-run is one the run would end. The
+to be recreated at its own step and a session that lands mid-run is one the run would end.
+*(Amendment 39, #759: when it cordons, it stops every parked session on those hosts, and so does a
+host attempt, §Warm Steam, "Drains and platform applies".)* The
 cordons the run imposed are released when it reaches a terminal state, and a host it found already
 cordoned stays cordoned. **Host attempts are unchanged** by this amendment: recreating an agent
 does end that host's sessions, so a host attempt drains exactly as documented below.
