@@ -4176,7 +4176,10 @@ parks or releases the runtime:
   `session_assign{kind:"parked", adopt_session_id:"<ended play id>"}` and `session_start`; the
   assign's `app` is the Steam parent app with `-silent`, for the case where the agent builds
   fresh.
-- **Otherwise it releases it**, with `session_stop` for the ended id.
+- **Otherwise it releases it**, with `session_stop` for the ended id. A `runtime_held` report is
+  not RH05 terminal proof (`agent-api.md` §`session_state`): on a connection that advertised
+  `terminal_home_cleanup_v1`, the ended row keeps its managed-home claim and holds until the
+  agent's qualified terminal `stopped` for that id, which follows the release.
 
 *(This amendment's reading of the spec's "the user's heartbeat is fresh": no heartbeat is sent
 while the user plays and no column records the last one, so the park instead takes a fresh

@@ -1114,7 +1114,12 @@ row, stamps `started_at`/`ended_at`, and **releases the GPU reservation** when t
 >   - The agent releases it (tears it down as it tears down a stopped session; the app container
 >     gets its normal stop window) at once on a `session_stop` for the ended id, and by itself 30 s
 >     after the report if no `session_assign` adopting it has arrived. A release sends no further
->     report, because the id is already `stopped`.
+>     report, because the id is already `stopped`, with one exception: the RH05 terminal proof.
+>   - The `runtime_held` report is not RH05 terminal proof (§`register`,
+>     `terminal_home_cleanup_v1`), because the runtime's source container is still running when
+>     it is sent. An agent that advertised `terminal_home_cleanup_v1` sends that proof once a
+>     release's cleanup is verified: one qualified terminal `session_state{stopped}` for the ended
+>     id, as for any session it holds.
 > - **`launch_progress: {"step":"shaders","percent":42}`** rides on
 >   `session_state{state:"running", detail:"app booting"}` while Steam processes the target game's
 >   Vulkan shaders. `step` is `"shaders"`, the only value. `percent` is an integer from 0 to 100:
