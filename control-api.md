@@ -4155,7 +4155,10 @@ shuts down it still holds the home, so the launch cannot run yet; the client's e
 retry launches it as a launch without a parked session once the parked one has stopped. *(Review
 decision: not `409 home_in_use`, which the web client does not retry and which would point at a
 session the caller cannot see.)* **A `home_in_use` body never names a parked session**: when the
-holder is parked, `session_id` is omitted, as for a holder the guard cannot name.
+holder is parked, `session_id` is omitted, as for a holder the guard cannot name. A launch whose
+home is still held by the caller's parked session gets the same `503 capacity_exhausted` with
+`Retry-After: 2` until that session has stopped, and a live one is stopped first
+(`parked_superseded`); only a swap answers `409 home_in_use`, without the id.
 
 The play session counts against the quota as any session does, and the parked one does not, so a
 claim is admitted at the quota exactly when the same launch with no parked session would be. Any
