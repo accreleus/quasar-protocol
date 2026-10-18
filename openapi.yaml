@@ -531,6 +531,21 @@ paths:
               schema: { $ref: "#/components/schemas/PlayHistoryList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /v1/me/steam-warm:
+    put:
+      tags: [me]
+      summary: The library heartbeat - keep or start the caller's warm Steam (amendment 39).
+      description: |
+        Per-caller, from the bearer identity only: no body (one that is sent is ignored), no
+        query parameters, no admin variant. See control-api.md §Warm Steam. Once authenticated
+        it ALWAYS answers 204 with no body, whatever it did: it starts a parked session when
+        every rule allows one, and sets the caller's parked session's deadline to now plus
+        steam_warm_idle_minutes. The web client calls it every 60 s while the library page is
+        open.
+      responses:
+        "204": { description: Done, or nothing to do. The client learns nothing either way. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   # ─── apps ────────────────────────────────────────────────────────────────
   /v1/apps:
     get:
@@ -2276,6 +2291,27 @@ paths:
                     applies nothing and records why. NO WINDOW FIELD ACCOMPANIES IT, deliberately -
                     an unattended pass runs on a successful platform.release_detect job, so that
                     job's own schedule IS the window, and it is already editable in the Jobs tab.
+                steam_warm_enabled:
+                  type: boolean
+                  description: >-
+                    Warm Steam master switch, ADDITIVE (amendment 39, #759, migration 0105).
+                    Absent = unchanged. Off stops creating parked sessions, and the
+                    session.parked_expire job stops the existing ones at its next run.
+                steam_warm_rewarm:
+                  type: string
+                  enum: [library_open, next_steam_launch]
+                  description: >-
+                    Amendment 39. What a non-Steam launch that stopped a parked session leaves
+                    behind (control-api.md §Warm Steam, "Non-Steam apps"). Absent = unchanged; any
+                    other value is 400 validation_failed.
+                steam_warm_idle_minutes:
+                  type: integer
+                  minimum: 1
+                  maximum: 60
+                  description: >-
+                    Amendment 39. Each heartbeat, and a park on exit, sets a parked session's
+                    deadline to now plus this many minutes. Absent = unchanged; outside 1-60 is
+                    400 validation_failed.
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SettingsEnvelope" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
@@ -5175,7 +5211,7 @@ components:
       # health_state/health_reason are additive (present only when running/unsustainable);
       # app_launch_state is additive (present only when the app image reports one);
       # every other key is always serialized (nullable ones present-but-null).
-      required: [id, user_id, app_id, host_id, state, state_detail, error_message, failure_code, app_log_tail, stop_reason, home_seed, profile_id, stream_profile_id, stream, codec_decision, negotiated_codec, created_at, started_at, ended_at]
+      required: [id, user_id, app_id, host_id, state, state_detail, error_message, failure_code, app_log_tail, stop_reason, home_seed, kind, launch_progress, profile_id, stream_profile_id, stream, codec_decision, negotiated_codec, created_at, started_at, ended_at]
       properties:
         id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
@@ -5217,6 +5253,21 @@ components:
           oneOf:
             - { type: "null" }
             - { $ref: "#/components/schemas/HomeSeedOutcome" }
+        kind:
+          type: string
+          enum: [play, parked]
+          description: >-
+            Amendment 39 (#759). "parked" is a warm Steam that nobody watches (control-api.md
+            §Warm Steam). A user-facing read never returns a parked session, so it only ever
+            shows "play"; GET /v1/admin/sessions returns parked rows too. Always serialized.
+        launch_progress:
+          description: >-
+            Amendment 39 (#759). Steam's shader-processing progress while the app boots, null
+            otherwise. A hint from inside the app container: display only, never a session-state
+            authority. Always serialized.
+          oneOf:
+            - { type: "null" }
+            - { $ref: "#/components/schemas/LaunchProgress" }
         profile_id:
           type: [string, "null"]
           description: >-
@@ -5267,6 +5318,13 @@ components:
         created_at: { type: string, format: date-time }
         started_at: { type: [string, "null"], format: date-time }
         ended_at: { type: [string, "null"], format: date-time }
+    LaunchProgress:
+      type: object
+      additionalProperties: false
+      required: [step, percent]
+      properties:
+        step: { type: string, enum: [shaders] }
+        percent: { type: integer, minimum: 0, maximum: 100 }
     SessionEnvelope:
       type: object
       required: [session]
@@ -6108,6 +6166,20 @@ components:
                 Unattended automatic apply, ADDITIVE (amendment 8, #122, migration 0081). Whether
                 a detected platform release is applied without a click. Default false. Optional in
                 the envelope so a pre-#122 server stays conformant; a client reads absent as false.
+            steam_warm_enabled:
+              type: boolean
+              description: >-
+                Warm Steam, ADDITIVE (amendment 39, #759, migration 0105). Default false. Optional
+                in the envelope so a pre-amendment server stays conformant; absent reads as false.
+            steam_warm_rewarm:
+              type: string
+              enum: [library_open, next_steam_launch]
+              description: Amendment 39. Default library_open.
+            steam_warm_idle_minutes:
+              type: integer
+              minimum: 1
+              maximum: 60
+              description: Amendment 39. Default 10.
             updated_by: { type: [string, "null"], format: uuid }
             updated_at: { type: string, format: date-time }
 
@@ -8080,6 +8152,15 @@ components:
         default_profile_id:
           type: [string, "null"]
           description: "UI-P4: the caller's preferred LAUNCH PROFILE; honoured only while user_overrides_allowed is true."
+        steam_dialogs:
+          type: string
+          enum: [show, dismiss_safe]
+          description: >-
+            Amendment 39 (#759). Whether the Steam launch helper may answer a fixed list of
+            Steam's waits for this user (control-api.md §Warm Steam, "steam_dialogs"). Default
+            show. Always returned by GET and PATCH. On PATCH, absent leaves it unchanged; a PATCH
+            that names it but not default_profile_id leaves the profile unchanged. Not gated by
+            user_overrides_allowed.
         global_default_profile_id: { type: [string, "null"] }
         user_overrides_allowed: { type: boolean }
 

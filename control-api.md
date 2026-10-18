@@ -4150,10 +4150,11 @@ the parked runtime (it restarted, or the container is gone), it builds the sessi
 app, so a claim never fails because the parked session was lost.
 
 When a check fails, the parked session is stopped (`session_stop`, `reason: "parked_superseded"`)
-and the launch goes on as a launch without one. While that Steam shuts down it still holds the
-home, so this launch is refused `409 home_in_use` with the message a stopping holder gets
-("…still shutting down; try again in a moment", #434). *(Flagged for review: the web client does
-not retry `home_in_use` today.)* **A `home_in_use` body never names a parked session**: when the
+and this launch is refused **`503 capacity_exhausted` with `Retry-After: 2`**. While that Steam
+shuts down it still holds the home, so the launch cannot run yet; the client's existing capacity
+retry launches it as a launch without a parked session once the parked one has stopped. *(Review
+decision: not `409 home_in_use`, which the web client does not retry and which would point at a
+session the caller cannot see.)* **A `home_in_use` body never names a parked session**: when the
 holder is parked, `session_id` is omitted, as for a holder the guard cannot name.
 
 The play session counts against the quota as any session does, and the parked one does not, so a
@@ -4166,8 +4167,9 @@ launch of a Steam parent app or derived tile, claim or not, clears the caller's
 When the control plane stores a `stopped` report carrying `runtime_held: true` (`agent-api.md`
 §`session_state`), it ends the play session as for any `stopped` and, in the same transaction,
 parks or releases the runtime:
-- **It parks it** when `steam_warm_enabled` is on, the user has no other live session, and the
-  host is `online` and not cordoned. It inserts a parked row for the Steam parent app on the same
+- **It parks it** when `steam_warm_enabled` is on, the user has no other live session, the
+  host is `online` and not cordoned, the ended session was `running`, and its Steam parent app is
+  enabled and visible to the user (the predicate of `GET /v1/apps`). It inserts a parked row for the Steam parent app on the same
   host and GPU, with the ended session's stream columns (what the runtime encodes) and
   `device_id`, and `parked_until` = now plus `steam_warm_idle_minutes`. The ended session's reservation, managed-home claim and holds move to
   it in the same write, so the GPU is never shown free in between. It then sends
