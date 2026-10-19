@@ -3649,7 +3649,8 @@ well-formed and authorized; the server simply has no room to place it now.
     "created_at": "...", "started_at": "...", "ended_at": null
   } }
 ```
-Only the owner (or an admin) may read a session (`403` otherwise). The signaling token is
+Only the owner (or an admin) may read a session (`403` otherwise). *(Amendment 39: a parked
+session answers `404` to a caller who is not an admin, §Warm Steam.)* The signaling token is
 **never** returned here — only in the launch response.
 
 #### `home_seed` — actual initial managed-home seeding outcome (RH05 #344)
@@ -4091,17 +4092,25 @@ on a Steam game shows the loader and then the game.
 **`RequireAuth`**; the subject is always the bearer. No request body (one that is sent is
 ignored), no query parameters, no admin variant. Once authenticated it **always answers `204`
 with no body**, whatever it did or failed to do: the client learns nothing from it and shows
-nothing. The web client calls it every 60 s while the library page is open.
+nothing. Like every bearer route it may answer `426 client_too_old` first (§Client version gate on
+bearer-authenticated endpoints). The web client calls it every 60 s while the library page is
+open.
 
 Each call does two things:
 1. **If the caller has no parked session and every rule below allows one, it creates one.** That
    is a launch of the Steam parent app exactly as `POST /v1/sessions` with that `app_id`, no
    `profile_id` and `mic: true` (what the web client sends) would launch it for this caller: the
    same default profile, codec resolution under the token's device, gates and placement. It
-   differs in four ways: `STEAM_STARTUP_FLAGS` is `-silent`, `kind` is `parked`, no signaling token
-   is minted, and no `session.launched` audit row is written. Placement never evicts anything: no
-   room means no parked session.
-2. **It sets the caller's parked session's `parked_until`** to now plus `steam_warm_idle_minutes`.
+   differs in five ways: `STEAM_STARTUP_FLAGS` is `-silent`, `kind` is `parked`, no signaling token
+   is minted, no `session.launched` audit row is written, and it is placed only on the host that
+   holds the caller's home for that app (a hard pin, as for a derived tile, §Derived tiles).
+   Placement never evicts anything and never waits on a settling home hold: no room means no
+   parked session. *(Only the web client sends the heartbeat today, and it launches with
+   `mic: true`. A launch with another `mic` fails claim check 4 and launches cold; photon gets warm
+   Steam when it sends the heartbeat itself.)*
+2. **It sets the caller's parked session's `parked_until`** to now plus `steam_warm_idle_minutes`,
+   while its Steam parent app is still enabled and visible to the caller and the caller's
+   `max_concurrent_sessions` is above `0`. Otherwise it stops it (`parked_superseded`).
 
 It creates nothing when any of these holds:
 - `steam_warm_enabled` is false;
@@ -4113,6 +4122,8 @@ It creates nothing when any of these holds:
 - the caller already has a live (non-terminal) session of any kind, a parked one included;
 - the caller's `steam_warm_suppressed` is set (§Non-Steam apps, below);
 - the caller's `max_concurrent_sessions` is `0`;
+- a parked session of the caller's was evicted (`parked_evicted`) in the last 5 minutes, so the
+  refused launch's retry finds the room the eviction freed (§A real launch always wins);
 - the bearer token is not bound to a device, so there is no capability probe to resolve a codec
   from;
 - placement finds no room on an `online`, uncordoned host that advertised `parked_sessions_v1`;
@@ -4132,8 +4143,14 @@ scheduling transaction locks the parked row and checks, after entitlement and be
    `codec`, `fps`, `bitrate_kbps`, `h264_profile` and `mic`, and a `width` and `height` no larger
    than the parked session's *(this amendment's reading: the spec names the codec only, but the
    others cannot change on a live session, and a display update can only shrink below the launch
-   size, `agent-api.md` §`session_display_update`)*;
+   size, `agent-api.md` §`session_display_update`)*. A launch whose codec that GPU cannot encode
+   fails this check;
 5. the launched app's reservation fits on that GPU once the parked reservation is released.
+
+**A parked session that is still warming is left to finish.** When check 2 fails only because the
+parked session is `pending`, `assigned` or `starting` and its `parked_until` has not passed, it is
+not stopped: the launch answers `503 capacity_exhausted` with `Retry-After: 2`, and the client's
+retry claims it once it is `running`. If it fails instead, the retry launches without it.
 
 When every check passes, the same transaction:
 - inserts the play session `assigned` on the parked session's host and GPU, with the stream the
@@ -4147,9 +4164,11 @@ When every check passes, the same transaction:
 The response is today's `201`: the new session, `assigned`, with its signaling token. The client
 connects as for any launch, and the agent sends it a fresh offer. When the agent no longer holds
 the parked runtime (it restarted, or the container is gone), it builds the session fresh from the
-app, so a claim never fails because the parked session was lost.
+app, so a claim never fails because the parked session was lost. A stop is sent only to a parked
+session that is still live when the stop is taken: a claimed session is already `stopped`, so no
+expiry, eviction, drain or second launch ever stops its id.
 
-When a check fails, the parked session is stopped (`session_stop`, `reason: "parked_superseded"`)
+When any other check fails, the parked session is stopped (`session_stop`, `reason: "parked_superseded"`)
 and this launch is refused **`503 capacity_exhausted` with `Retry-After: 2`**. While that Steam
 shuts down it still holds the home, so the launch cannot run yet; the client's existing capacity
 retry launches it as a launch without a parked session once the parked one has stopped. *(Review
@@ -4158,11 +4177,14 @@ session the caller cannot see.)* **A `home_in_use` body never names a parked ses
 holder is parked, `session_id` is omitted, as for a holder the guard cannot name. A launch whose
 home is still held by the caller's parked session gets the same `503 capacity_exhausted` with
 `Retry-After: 2` until that session has stopped, and a live one is stopped first
-(`parked_superseded`); only a swap answers `409 home_in_use`, without the id.
+(`parked_superseded`). A swap into that family while the caller's parked session is still
+stopping (a launch outside the family superseded it), or while the caller's released runtime
+still holds the home (§Park on exit), answers `409 home_in_use` without `session_id`; a launch
+never answers `home_in_use` for either.
 
 The play session counts against the quota as any session does, and the parked one does not, so a
 claim is admitted at the quota exactly when the same launch with no parked session would be. Any
-launch of a Steam parent app or derived tile, claim or not, clears the caller's
+admitted launch of a Steam parent app or derived tile, claim or not, clears the caller's
 `steam_warm_suppressed`.
 
 ### Park on exit
@@ -4171,18 +4193,30 @@ When the control plane stores a `stopped` report carrying `runtime_held: true` (
 §`session_state`), it ends the play session as for any `stopped` and, in the same transaction,
 parks or releases the runtime:
 - **It parks it** when `steam_warm_enabled` is on, the user has no other live session, the
-  host is `online` and not cordoned, the ended session was `running`, and its Steam parent app is
-  enabled and visible to the user (the predicate of `GET /v1/apps`). It inserts a parked row for the Steam parent app on the same
+  host is `online` and not cordoned, the ended session was still `running` when the report
+  arrived (a session that was `stopping`, because the control plane asked it to stop, is never
+  parked; the agent sends no `stopping` before this report, `agent-api.md` §`session_state`), and
+  its Steam parent app is enabled and visible to the user (the predicate of `GET /v1/apps`). It inserts a parked row for the Steam parent app on the same
   host and GPU, with the ended session's stream columns (what the runtime encodes) and
   `device_id`, and `parked_until` = now plus `steam_warm_idle_minutes`. The ended session's reservation, managed-home claim and holds move to
   it in the same write, so the GPU is never shown free in between. It then sends
   `session_assign{kind:"parked", adopt_session_id:"<ended play id>"}` and `session_start`; the
   assign's `app` is the Steam parent app with `-silent`, for the case where the agent builds
   fresh.
-- **Otherwise it releases it**, with `session_stop` for the ended id. A `runtime_held` report is
-  not RH05 terminal proof (`agent-api.md` §`session_state`): on a connection that advertised
-  `terminal_home_cleanup_v1`, the ended row keeps its managed-home claim and holds until the
-  agent's qualified terminal `stopped` for that id, which follows the release.
+- **Otherwise it releases it**, with `session_stop{reason:"user_requested"}` for the ended id. A
+  `runtime_held` report is not RH05 terminal proof (`agent-api.md` §`session_state`): on a
+  connection that advertised `terminal_home_cleanup_v1`, the ended row keeps its managed-home
+  claim and holds until the agent's qualified terminal `stopped` for that id, which follows the
+  release. The control plane records `stop_reason = "runtime_released"` on the ended row
+  (`schema.md`, not served).
+  - Until that proof arrives, a launch whose managed home is held only by the released runtime is
+    answered as one held by a stopping parked session: `503 capacity_exhausted` with
+    `Retry-After: 2`, never `home_conflict`. That holds while the host stays connected and for 2
+    minutes after the release; after that the hold reads as one awaiting repair
+    (`409 home_conflict`).
+  - If the proof never arrives (the agent died holding the runtime), the hold is recovered as any
+    unproven cleanup is: by the agent's proof after it reconnects, or by audited repair
+    (`POST /v1/admin/storage/home-claims/release`).
 
 *(This amendment's reading of the spec's "the user's heartbeat is fresh": no heartbeat is sent
 while the user plays and no column records the last one, so the park instead takes a fresh
@@ -4196,15 +4230,16 @@ shutdown is no longer on the path.
 
 A managed, instance-scoped job, **`session.parked_expire`**, runs every 60 s (§Background jobs;
 its interval is admin-editable like any job's, minimum 60 s). Each run stops, with
-`session_stop{reason:"parked_expired"}`, every parked session whose `parked_until` has passed, and
-every parked session while `steam_warm_enabled` is off.
+`session_stop{reason:"parked_expired"}`, every parked session whose `parked_until` has passed,
+every parked session whose Steam parent app is disabled, and every parked session while
+`steam_warm_enabled` is off.
 
 ### A real launch always wins
 
 When placement for any `POST /v1/sessions` launch finds no room, and releasing one parked
 session's reservation on a GPU the launch could use would make room, the control plane stops the
 oldest such parked session (`reason: "parked_evicted"`). It still refuses this attempt exactly as
-it would without that step. For a GPU whose totals fit that is `503 capacity_exhausted`, not
+it would without that step, with today's `Retry-After`. For a GPU whose totals fit that is `503 capacity_exhausted`, not
 `no_host_available` (§Admission control). The client's existing capacity retry gets the room once
 that session is `stopped`. At most one parked session is stopped per refused attempt. Steam gets
 its normal stop window, so a cloud sync in progress finishes. A heartbeat's placement never evicts.
@@ -4220,7 +4255,11 @@ because a launch inside it claims it or stops it first.
   - `library_open` (default): nothing more. A later heartbeat warms Steam again once the user has
     no live session.
   - `next_steam_launch`: the user's `steam_warm_suppressed` is set, and heartbeats create nothing
-    until the user's next launch of a Steam parent app or derived tile clears it.
+    until the user's next admitted launch of a Steam parent app or derived tile clears it.
+- Console auto-start (§Console mode) never claims: a console session is direct-display and a
+  parked one `stream_only`. When the caller's parked session holds the console app's home it is
+  stopped (`parked_superseded`), and the auto-start runs again once it has stopped; a console
+  launch outside the family supersedes it as any admitted launch does.
 
 ### Quick switch: the in-place swap
 
@@ -4243,16 +4282,17 @@ can, and does today's container swap when it is not. Every other swap is sent as
   "global_default_profile_id": null, "user_overrides_allowed": true }
 ```
 - `GET` always returns it, and so does the `PATCH` response. On `PATCH`, an absent
-  `steam_dialogs` leaves it unchanged, and any other value is `400 validation_failed`. A `PATCH`
-  that names `steam_dialogs` but not `default_profile_id` leaves the profile unchanged; a `PATCH`
-  without `steam_dialogs` keeps today's rule for `default_profile_id`.
+  `steam_dialogs` leaves it unchanged, and any other value, `null` included, is
+  `400 validation_failed`. A `PATCH` that names `steam_dialogs` but not `default_profile_id`
+  leaves the profile unchanged; a `PATCH` without `steam_dialogs` keeps the existing rule: an
+  absent or `null` `default_profile_id` clears it. Both fields are written in one statement.
 - It is not gated by `user_overrides_allowed`, which governs profiles only.
 - At a launch of the Steam parent app or a derived tile, the parked kind included, the control
   plane sets `QUASAR_STEAM_DIALOGS=dismiss_safe` in the app's env when the setting is
   `dismiss_safe`, and removes the key otherwise. The value comes from this fixed set, never from
   free text or the app's own runtime spec. A parked session keeps the value it started with;
   changing the setting while Steam is parked takes effect at the next warm start.
-- With `dismiss_safe` the launch helper answers only a fixed list of Steam's waits, in v1 the
+- With `dismiss_safe` the launch helper may answer only a fixed list of Steam's waits, in v1 the
   controller notice. It always shows sign-in, Steam Guard, a cloud conflict, the EULA, an install,
   and every wait it does not recognise.
 
@@ -4269,8 +4309,10 @@ settings field (absent means unchanged), stored on the `instance_settings` singl
 
 Any other value is `400 validation_failed`. All three are read per request, so a change needs no
 restart. Turning `steam_warm_enabled` off creates no more parked sessions, and the expiry job stops
-the existing ones at its next run. A new `steam_warm_idle_minutes` applies from each parked
-session's next heartbeat.
+the existing ones at its next run. While it is off the control plane also omits
+`session_assign.kind` (`agent-api.md`), so no game exit holds its runtime and every session ends as
+before. A new `steam_warm_idle_minutes` applies from each parked session's next heartbeat. Values
+below 2 can expire a parked session between two heartbeats while the library page is open.
 
 ### Shader progress: `launch_progress`
 

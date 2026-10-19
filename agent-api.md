@@ -396,7 +396,8 @@ proof.
 
 An agent may advertise true only if it obeys this guarantee for every session:
 it removes and verifies absence of **all** original and swapped source
-containers before emitting terminal `session_state{stopped|failed}`. It
+containers before emitting terminal `session_state{stopped|failed}`. *(Amendment 39: a `stopped`
+carrying `runtime_held` is not that terminal, §`session_state`.)* It
 retains local home references until that cleanup succeeds. A fatal swap must
 tear down the current source before reporting `failed`; an abandoned or
 panicked runner must inspect and remove its containers before reporting
@@ -1104,9 +1105,12 @@ row, stamps `started_at`/`ended_at`, and **releases the GPU reservation** when t
 >   session that ended because its Steam game exited while the launch helper was attached, when
 >   the agent keeps that session's runtime: the Steam container, compositor, encode and WebRTC
 >   tail. The runtime waits for a `session_assign` that adopts it (§`session_assign`,
->   `adopt_session_id`). The agent holds a runtime only for a session whose `session_assign`
->   carried `kind`. A control plane that predates this amendment never sends `kind`, so its
->   sessions end exactly as before.
+>   `adopt_session_id`). The agent holds a runtime only for a `stream_only` session whose
+>   `session_assign` carried `kind`. A control plane that predates this amendment never sends
+>   `kind`, nor does one with `steam_warm_enabled` off, so those sessions end exactly as before.
+>   - The agent sends no `stopping` for that session before this report: the session goes from
+>     `running` to `stopped` in this one report (the old viewer's `bye` still goes first). A
+>     `stopping` before it always means the control plane asked for the stop.
 >   - The session itself has ended. The report is an ordinary `stopped`: the control plane ends
 >     the row and its reservation as for any `stopped`.
 >   - A held runtime is not a session. It is not listed in `heartbeat.running_sessions` and has no
@@ -1120,6 +1124,10 @@ row, stamps `started_at`/`ended_at`, and **releases the GPU reservation** when t
 >     it is sent. An agent that advertised `terminal_home_cleanup_v1` sends that proof once a
 >     release's cleanup is verified: one qualified terminal `session_state{stopped}` for the ended
 >     id, as for any session it holds.
+>   - The `runtime_held` report does not retire the id. The agent retires it, and sends its
+>     qualified terminal, only once a release's cleanup is verified. An adopted id is retired when
+>     its runtime's last session is, or at once on a `session_stop` for it, which then answers the
+>     qualified terminal and does not touch the adopted runtime.
 > - **`launch_progress: {"step":"shaders","percent":42}`** rides on
 >   `session_state{state:"running", detail:"app booting"}` while Steam processes the target game's
 >   Vulkan shaders. `step` is `"shaders"`, the only value. `percent` is an integer from 0 to 100:
@@ -1824,7 +1832,9 @@ capability but does not by itself put ordinary browser sessions on a physical di
 > **Amendment 39 — parked sessions and adoption (#759).** *(Approved in principle by the operator
 > 2026-10-18; text reviewed before landing.)* Two optional top-level fields, sent only to an
 > agent that advertised `parked_sessions_v1` (§`register`). A control plane with this amendment
-> always sends `kind` to such an agent. Additive; no existing field or shape changes.
+> sends `kind` on every assign to such an agent while `steam_warm_enabled` is on, and omits it
+> while the switch is off, so with the switch off no runtime is held and a game exit ends as
+> before. Additive; no existing field or shape changes.
 > ```json
 > { "type": "session_assign", "id": "<command-id>", "session_id": "<play uuid>", "gpu_index": 0,
 >   "kind": "play", "adopt_session_id": "<parked uuid>",
@@ -1850,14 +1860,15 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >     container, encode and WebRTC tail are kept and re-labelled `session_id`. From then on every
 >     report for it (`session_state`, `session_metrics`, trace events, signaling,
 >     `heartbeat.running_sessions`) carries `session_id`. Nothing more is sent under the adopted
->     id.
+>     id, except the RH05 answer to a `session_stop` for it, which does not touch the runtime.
 >   - **Otherwise it builds the session fresh from `app`**, exactly as for an assign without the
 >     field (after an agent restart, with the container gone, or when the runtime is on another
 >     GPU). An adoption therefore never fails because the runtime was lost. A runtime the agent
 >     holds under the adopted id but does not adopt is torn down as if `session_stop` had arrived
 >     for it, before the fresh build uses the managed home.
->   - **It does not adopt** when `stream.codec`, `stream.fps`, `stream.h264_profile` or
->     `stream.mic` differs from what the runtime encodes, or `stream.width` / `stream.height` is
+>   - **It does not adopt** when `stream.codec`, `stream.fps`, `stream.bitrate_kbps`,
+>     `stream.h264_profile` or `stream.mic` differs from what the runtime was launched with (the
+>     launch values, not what ABR has moved the bitrate to), or `stream.width` / `stream.height` is
 >     larger than the runtime's launch size: it tears that runtime down and builds fresh. The
 >     control plane checks the same before it claims (`control-api.md` §Warm Steam, "Claim"); this
 >     is the agent's backstop.
@@ -1870,8 +1881,10 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >        with the helper;
 >     3. moves the render size and the stream size to the play session's `stream.width` /
 >        `stream.height` when they differ from the runtime's, as a `session_display_update`
->        carrying both would. An encoder that cannot resize live keeps the held size, and
->        `session_metrics` reports what is encoded;
+>        carrying both would. The runtime's sizes are its current render size, an old viewer's
+>        render override included, and its encoded size. The UI scale returns to its default,
+>        because a new session starts with new display defaults. An encoder that cannot resize
+>        live keeps the held size, and `session_metrics` reports what is encoded;
 >     4. sends a fresh `offer` for each peer connection under `session_id`, unasked, as it answers
 >        `restart_ice` (§Signaling relay). The new viewer is a new peer. When a transport last
 >        negotiated with the ended session's viewer, the agent replaces it and sends one further
