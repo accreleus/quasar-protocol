@@ -4161,12 +4161,21 @@ When every check passes, the same transaction:
 - and the `session_assign` that follows carries `kind: "play"` and
   `adopt_session_id: "<parked id>"` (`agent-api.md`).
 
+If the play session fails before the agent takes its assign (the connection is gone, the agent
+rejects the assign, or a step before dispatch fails), the agent still runs the parked runtime
+under the parked id. The control plane then hands the managed-home claim and hold back to the
+parked id in one write, marks it a released runtime (§Park on exit, `stop_reason =
+"runtime_released"`) and stops it, so only that runtime's own cleanup proof clears the hold. An
+assign queued to the agent whose ack was lost is left as is: the agent may have adopted.
+
 The response is today's `201`: the new session, `assigned`, with its signaling token. The client
 connects as for any launch, and the agent sends it a fresh offer. When the agent no longer holds
 the parked runtime (it restarted, or the container is gone), it builds the session fresh from the
 app, so a claim never fails because the parked session was lost. A stop is sent only to a parked
 session that is still live when the stop is taken: a claimed session is already `stopped`, so no
-expiry, eviction, drain or second launch ever stops its id.
+expiry, eviction, drain or second launch ever stops its id. (The heartbeat's orphan stop after a
+short grace, and a claim whose assign cannot be delivered, do stop it: the agent then still runs
+it under that id.)
 
 When any other check fails, the parked session is stopped (`session_stop`, `reason: "parked_superseded"`)
 and this launch is refused **`503 capacity_exhausted` with `Retry-After: 2`**. While that Steam
@@ -4202,7 +4211,8 @@ parks or releases the runtime:
   it in the same write, so the GPU is never shown free in between. It then sends
   `session_assign{kind:"parked", adopt_session_id:"<ended play id>"}` and `session_start`; the
   assign's `app` is the Steam parent app with `-silent`, for the case where the agent builds
-  fresh.
+  fresh. If the parked row fails before the agent takes that assign, its claim and holds go back
+  to the ended play row in one write, and that runtime is released as below.
 - **Otherwise it releases it**, with `session_stop{reason:"user_requested"}` for the ended id. A
   `runtime_held` report is not RH05 terminal proof (`agent-api.md` §`session_state`): on a
   connection that advertised `terminal_home_cleanup_v1`, the ended row keeps its managed-home
@@ -4258,8 +4268,10 @@ because a launch inside it claims it or stops it first.
     until the user's next admitted launch of a Steam parent app or derived tile clears it.
 - Console auto-start (§Console mode) never claims: a console session is direct-display and a
   parked one `stream_only`. When the caller's parked session holds the console app's home it is
-  stopped (`parked_superseded`), and the auto-start runs again once it has stopped; a console
-  launch outside the family supersedes it as any admitted launch does.
+  stopped (`parked_superseded`), and the auto-start runs again once it has stopped; when the
+  caller's released runtime holds it (§Park on exit), the auto-start runs again once its cleanup
+  proof arrives. A console launch outside the family supersedes the parked session as any
+  admitted launch does.
 
 ### Quick switch: the in-place swap
 
@@ -4310,8 +4322,8 @@ settings field (absent means unchanged), stored on the `instance_settings` singl
 Any other value is `400 validation_failed`. All three are read per request, so a change needs no
 restart. Turning `steam_warm_enabled` off creates no more parked sessions, and the expiry job stops
 the existing ones at its next run. While it is off the control plane also omits
-`session_assign.kind` (`agent-api.md`), so no game exit holds its runtime and every session ends as
-before. A new `steam_warm_idle_minutes` applies from each parked session's next heartbeat. Values
+`session_assign.kind` (`agent-api.md`), so no session assigned while it is off holds its
+runtime. A new `steam_warm_idle_minutes` applies from each parked session's next heartbeat. Values
 below 2 can expire a parked session between two heartbeats while the library page is open.
 
 ### Shader progress: `launch_progress`

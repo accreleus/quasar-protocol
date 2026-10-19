@@ -1125,9 +1125,10 @@ row, stamps `started_at`/`ended_at`, and **releases the GPU reservation** when t
 >     release's cleanup is verified: one qualified terminal `session_state{stopped}` for the ended
 >     id, as for any session it holds.
 >   - The `runtime_held` report does not retire the id. The agent retires it, and sends its
->     qualified terminal, only once a release's cleanup is verified. An adopted id is retired when
->     its runtime's last session is, or at once on a `session_stop` for it, which then answers the
->     qualified terminal and does not touch the adopted runtime.
+>     qualified terminal, only once a release's cleanup is verified. An adopted id counts as live
+>     while its runtime lives on under the adopting session: a `session_stop` for it touches
+>     nothing and is answered with no terminal. It is retired with that runtime's last session; a
+>     later `session_stop` for it is answered with the qualified terminal, as for any retired id.
 > - **`launch_progress: {"step":"shaders","percent":42}`** rides on
 >   `session_state{state:"running", detail:"app booting"}` while Steam processes the target game's
 >   Vulkan shaders. `step` is `"shaders"`, the only value. `percent` is an integer from 0 to 100:
@@ -1860,7 +1861,7 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >     container, encode and WebRTC tail are kept and re-labelled `session_id`. From then on every
 >     report for it (`session_state`, `session_metrics`, trace events, signaling,
 >     `heartbeat.running_sessions`) carries `session_id`. Nothing more is sent under the adopted
->     id, except the RH05 answer to a `session_stop` for it, which does not touch the runtime.
+>     id until its runtime has ended (above).
 >   - **Otherwise it builds the session fresh from `app`**, exactly as for an assign without the
 >     field (after an agent restart, with the container gone, or when the runtime is on another
 >     GPU). An adoption therefore never fails because the runtime was lost. A runtime the agent
