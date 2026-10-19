@@ -1879,12 +1879,14 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >     2. reports `starting` → `running` → `app booting`, and holds `app presented` until the game's
 >        window shows, Steam needs the user, or the reveal cap passes, as for a Steam tile launched
 >        with the helper;
->     3. moves the render size and the stream size to the play session's `stream.width` /
->        `stream.height` when they differ from the runtime's, as a `session_display_update`
->        carrying both would. The runtime's sizes are its current render size, an old viewer's
->        render override included, and its encoded size. The UI scale returns to its default,
->        because a new session starts with new display defaults. An encoder that cannot resize
->        live keeps the held size, and `session_metrics` reports what is encoded;
+>     3. resets the display to the new viewer's defaults, so the adopting session starts with
+>        the new viewer's display, not the old viewer's: an old viewer's render override is
+>        dropped (the render size follows the stream again), and the UI scale returns to its
+>        default. It moves the render size and the stream size to the play session's
+>        `stream.width` / `stream.height` when either differs from the runtime's current one
+>        (its current render size, that override included, and its encoded size), as a
+>        `session_display_update` carrying both would. An encoder that cannot resize live keeps
+>        the held size, and `session_metrics` reports what is encoded;
 >     4. sends a fresh `offer` for each peer connection under `session_id`, unasked, as it answers
 >        `restart_ice` (§Signaling relay). The new viewer is a new peer. When a transport last
 >        negotiated with the ended session's viewer, the agent replaces it and sends one further
