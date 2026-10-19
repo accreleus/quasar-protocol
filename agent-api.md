@@ -1857,6 +1857,13 @@ capability but does not by itself put ordinary browser sessions on a physical di
 > - **`adopt_session_id`**: a parked session, or a play session that ended with `runtime_held`
 >   (§`session_state`), whose runtime this session takes over. The control plane has already
 >   ended that row.
+>   - **The agent decides the adoption at `session_start`; a `session_assign` alone never
+>     adopts.** Until then the runtime runs on under the adopted id, so an assign that is lost,
+>     refused or followed by a `session_stop` leaves it there. The agent sends no non-terminal
+>     report under `session_id` before it has adopted the runtime or holds none under the adopted
+>     id: a fresh build first waits for the declined runtime's teardown, and fails the session if
+>     that teardown does not finish. The control plane moves the managed-home hold on that first
+>     report (`control-api.md` §Warm Steam, "Claim").
 >   - **The agent adopts the runtime when it holds it on `gpu_index`.** The compositor, app
 >     container, encode and WebRTC tail are kept and re-labelled `session_id`. From then on every
 >     report for it (`session_state`, `session_metrics`, trace events, signaling,

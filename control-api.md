@@ -4154,28 +4154,36 @@ retry claims it once it is `running`. If it fails instead, the retry launches wi
 
 When every check passes, the same transaction:
 - inserts the play session `assigned` on the parked session's host and GPU, with the stream the
-  launch resolved and its own reservation, which takes the room the parked row releases. The
-  managed-home claim, and any hold that names the parked session, move to it in the same write;
+  launch resolved and its own reservation, which takes the room the parked row releases. It
+  copies the parked session's managed-home binding and records the adoption
+  (`sessions.adopt_session_id`, `schema.md`); the hold stays on the parked id (below);
 - moves the parked row to `stopped` with `state_detail = "claimed"`, releasing its reservation
   (`schema.md` §Session state machine);
 - and the `session_assign` that follows carries `kind: "play"` and
   `adopt_session_id: "<parked id>"` (`agent-api.md`).
 
-If the play session fails before the agent takes its assign (the connection is gone, the agent
-rejects the assign, or a step before dispatch fails), the agent still runs the parked runtime
-under the parked id. The control plane then hands the managed-home claim and hold back to the
-parked id in one write, marks it a released runtime (§Park on exit, `stop_reason =
-"runtime_released"`) and stops it, so only that runtime's own cleanup proof clears the hold. An
-assign queued to the agent whose ack was lost is left as is: the agent may have adopted.
+**The managed-home hold moves when the agent adopts, not at the claim.** The agent adopts at
+`session_start`, and reports under the play id only once it has adopted the runtime or that
+runtime has ended (`agent-api.md` §`session_assign`, `adopt_session_id`). So the hold moves from
+the parked id to the play session in the same write that stores the play session's first
+non-terminal report. If the parked runtime's own cleanup proof arrives first while the play
+session is live (the agent tore it down to build fresh), the hold passes to the play session
+instead of clearing, so the home is never unheld in between. Until one of those, only the parked
+runtime's own proof clears the hold. A play session that ends before the agent adopted (its
+assign lost, refused or unacknowledged, its start refused, a stop, a reap, a control-plane
+restart) therefore leaves the hold on the parked id, and the agent's proof for the play id
+clears nothing. The control plane stops the parked id: at once where it fails the play session
+itself, and through the heartbeat's orphan stop and the cleanup reconcile, which skip a runtime
+only while a live session adopts it. Meanwhile a launch is answered as one held by a released
+runtime (§Park on exit), the 2 minutes counting from the play session's end.
 
 The response is today's `201`: the new session, `assigned`, with its signaling token. The client
 connects as for any launch, and the agent sends it a fresh offer. When the agent no longer holds
 the parked runtime (it restarted, or the container is gone), it builds the session fresh from the
 app, so a claim never fails because the parked session was lost. A stop is sent only to a parked
 session that is still live when the stop is taken: a claimed session is already `stopped`, so no
-expiry, eviction, drain or second launch ever stops its id. (The heartbeat's orphan stop after a
-short grace, and a claim whose assign cannot be delivered, do stop it: the agent then still runs
-it under that id.)
+expiry, eviction, drain or second launch ever stops its id. (A claim that ended before the
+agent adopted does stop it, as above: the agent then still runs it under that id.)
 
 When any other check fails, the parked session is stopped (`session_stop`, `reason: "parked_superseded"`)
 and this launch is refused **`503 capacity_exhausted` with `Retry-After: 2`**. While that Steam
@@ -4207,12 +4215,14 @@ parks or releases the runtime:
   parked; the agent sends no `stopping` before this report, `agent-api.md` §`session_state`), and
   its Steam parent app is enabled and visible to the user (the predicate of `GET /v1/apps`). It inserts a parked row for the Steam parent app on the same
   host and GPU, with the ended session's stream columns (what the runtime encodes) and
-  `device_id`, and `parked_until` = now plus `steam_warm_idle_minutes`. The ended session's reservation, managed-home claim and holds move to
-  it in the same write, so the GPU is never shown free in between. It then sends
+  `device_id`, and `parked_until` = now plus `steam_warm_idle_minutes`. The ended session's
+  reservation and managed-home binding move to it in the same write, so the GPU is never shown
+  free in between; its hold stays on the ended play id and moves as for a claim, when the agent
+  adopts (§Claim). It then sends
   `session_assign{kind:"parked", adopt_session_id:"<ended play id>"}` and `session_start`; the
   assign's `app` is the Steam parent app with `-silent`, for the case where the agent builds
-  fresh. If the parked row fails before the agent takes that assign, its claim and holds go back
-  to the ended play row in one write, and that runtime is released as below.
+  fresh. If the parked row ends before the agent adopted, the ended play row still holds the
+  home and its runtime is released as below.
 - **Otherwise it releases it**, with `session_stop{reason:"user_requested"}` for the ended id. A
   `runtime_held` report is not RH05 terminal proof (`agent-api.md` §`session_state`): on a
   connection that advertised `terminal_home_cleanup_v1`, the ended row keeps its managed-home
@@ -4222,8 +4232,8 @@ parks or releases the runtime:
   - Until that proof arrives, a launch whose managed home is held only by the released runtime is
     answered as one held by a stopping parked session: `503 capacity_exhausted` with
     `Retry-After: 2`, never `home_conflict`. That holds while the host stays connected and for 2
-    minutes after the release; after that the hold reads as one awaiting repair
-    (`409 home_conflict`).
+    minutes after the release (for a runtime a claim or park did not adopt, after that session
+    ended); after that the hold reads as one awaiting repair (`409 home_conflict`).
   - If the proof never arrives (the agent died holding the runtime), the hold is recovered as any
     unproven cleanup is: by the agent's proof after it reconnects, or by audited repair
     (`POST /v1/admin/storage/home-claims/release`).
