@@ -47,6 +47,8 @@ Either direction (optional, diagnostics):
 { "type": "bye" }
 ```
 
+*(Amendment 42: a host `error` may also carry `code` and `pc`; §Why a takeover gets no media.)*
+
 ### `pc` field — separate audio/video PeerConnections (amendment, #304)
 
 The `offer`, `answer`, and `ice` messages gain an **optional** `pc` field identifying which
@@ -147,7 +149,8 @@ This adds to amendment 29, above. No message, field or close code is added.
 
 **An answer the host cannot apply.** The host's WebRTC library refuses some answers when they
 are applied; one with no `a=fingerprint` is one of them. The host sends the client no `error`
-and no other message for it. What follows depends on the transport that `pc` is on:
+and no other message for it. *(Amendment 42: on a transport that replaced another it now sends one; §Why a takeover gets no media.)*
+What follows depends on the transport that `pc` is on:
 - **The transport the session launched with.** The session ends `failed`, the cause in its
   `error_message`, and the signaling WebSocket closes with `4404`.
 - **A transport that replaced it** (amendment 27). The session keeps running and the
@@ -179,6 +182,29 @@ nothing, and the log line is not part of this contract.
 8122 also registers `sha-224` and `sha-384`. The warning is logged by a host built with
 accreleus/quasar#577 or later; amendment 29's note that the host does not yet report a failed
 check holds for earlier builds.)*
+
+### Why a takeover gets no media (amendment 42, #566) *(Signed off by the operator 2026-10-21.)*
+
+> **Amendment 42 — the host tells a taking client why it gets no media (#566). Additive: two
+> optional fields on the existing `error` message; no new message, and no close.** A host
+> `error` may carry `code` and `pc`:
+> ```json
+> { "type": "error", "pc": "video", "code": "takeover_abandoned", "message": "…" }
+> { "type": "error", "pc": "video", "code": "takeover_rate_limited", "message": "…" }
+> ```
+> The host sends one to the client that holds signaling, once per answer, when:
+> - **`takeover_abandoned`:** on a transport that replaced another for this client (amendment
+>   27), the client's answer cannot be applied, or, on `pc:"video"`, it rejects the video
+>   m-line (port 0 or `a=inactive`). A browser that cannot decode the session's codec answers
+>   this way; the client can tell that case from its own answer.
+> - **`takeover_rate_limited`:** the host ignored the client's answer as a new peer's because
+>   that `pc` is past amendment 27's bound (6 in 60 s). A late answer from the peer the host
+>   already streams to gets none.
+>
+> Nothing else changes: the session keeps running, the WebSocket stays open, and the client
+> gets no media on that `pc`. `pc` absent means `"video"`. `code` is an open string: a client
+> treats an `error` with no `code`, or a `code` it does not know, as before. `message` is for a
+> person and is not part of the rule. The control plane relays the message unchanged.
 
 ## Phase 0 simplifications (revisit later)
 - No authentication on the WebSocket. Phase 1 puts signaling behind the control plane with an authenticated, single-use session token in the connect URL.
@@ -369,7 +395,8 @@ Two bounded recovery paths are defined:
 > - **Bounds.** One further offer per answer from a new peer. A `pc`'s transport is replaced,
 >   or made to offer again by a late answer, at most 6 times in any 60 s. Past that the host
 >   ignores such answers until the window clears, and goes on streaming to the peer it has.
->   It sends that client no error and no close. An answer whose ICE ufrag is one of the last
+>   It sends that client no error and no close *(amendment 42: it now sends an `error`, `takeover_rate_limited`, and still no close)*.
+>   An answer whose ICE ufrag is one of the last
 >   four peers whose transport on that `pc` was replaced is ignored.
 > - **A client written before this amendment.** One that applies offers for a `pc` one at a
 >   time and answers only the latest, as the native client does, needs no change. One that
