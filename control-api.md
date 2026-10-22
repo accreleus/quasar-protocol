@@ -1059,7 +1059,7 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   `host_not_ready` (503, *amendment 11, #260* — a host/GPU that could otherwise serve the request
   is online, and the **only** reason none qualified is a failing evidence-based readiness check;
   the remedy is the host's admin, not the caller),
-  `internal` (500). **Retryable:** `no_host_available`, `capacity_exhausted`, `host_not_ready`, `rate_limited`
+  `internal` (500). **Retryable:** `no_host_available` *(not one with `reason: home_host_unavailable`, amendment 40)*, `capacity_exhausted`, `host_not_ready`, `rate_limited`
   (and `session_quota_exceeded` / `home_in_use` once one of the caller's sessions ends).
   **`home_not_provisioned` is NOT retryable** — retrying reproduces it forever. It is resolved by
   a user *action* (launch the parent app once, so its home exists), which is why the message names
@@ -3637,6 +3637,20 @@ kept distinct so the client and the admin UI can tell "nothing is serving" (`no_
 — operator should check why the agent is offline) from "everything is busy" (`capacity_exhausted`
 — a transient, retry-later condition). `503` (not a 4xx) because in both cases the request is
 well-formed and authorized; the server simply has no room to place it now.
+
+> **Amendment 40 — a machine-readable reason on `no_host_available` (#602), signed off by the operator 2026-10-21. Additive: one
+> optional field on the error body; no status, code or existing field changes.** When the
+> launch is pinned to the host that holds the caller's home for this app (§RH05: an existing
+> home is a hard host constraint) and that host is `offline` or no longer enrolled, the
+> `503 no_host_available` body carries `reason`:
+> ```json
+> { "error": { "code": "no_host_available", "reason": "home_host_unavailable", "message": "…" } }
+> ```
+> It is set with or without a codec constraint and names no host. A home host in any other
+> status, and every other `no_host_available`, omits it. Only an admin clears this refusal
+> (bring the host back, or forget it and release the claim on the saves), so a client SHOULD
+> NOT spend its automatic retry on it and SHOULD show its own copy. `reason` is an open string:
+> a client treats a value it does not know as absent.
 
 ### `GET /v1/sessions/{id}` — poll lifecycle
 ```json
