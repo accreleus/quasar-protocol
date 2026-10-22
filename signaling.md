@@ -161,6 +161,10 @@ What follows depends on the transport that `pc` is on:
 An answer with no `a=fingerprint` names no peer, so the host does not take it for a new
 peer's and replaces no transport for it: it goes to the transport that `pc` already has, and
 the rule above applies to that transport.
+*(Amendment 43 replaces this paragraph; see below.)*
+
+> **Amendment 43 — an answer that names no peer (#591), signed off by the operator 2026-10-21. Changes behaviour; no shape changes.**
+> An answer that names no peer (no `a=ice-ufrag`, or no `a=fingerprint`) is not applied to a transport that has already negotiated with a peer. The host drops it, sends the client nothing, and the session and that peer's stream are unaffected. If the transport has no peer yet (the first answer it receives), the host applies it, and an answer the host cannot apply ends the session as above.
 
 **A failed check.** The check belongs to one transport. The host does nothing about a
 failure: it does not end the session or close the transport. An answer that states another
