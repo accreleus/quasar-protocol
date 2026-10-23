@@ -818,9 +818,7 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
 >
 > **P5 side effect (image management):** flipping `library_discovery_enabled` `false→true`
 > **auto-installs** every catalog image with a non-null `library_provider` (the canonical Steam
-> image) that is not already installed — idempotent, via the P3 install path (adopt +
-> ensure-everywhere + runtime-preset materialization), so enabling discovery guarantees the
-> provider's image and preset are present rather than failing at a later launch. A provider image
+> image) that is not already installed — idempotent, via the P3 install path (adopt + runtime-preset materialization), then creates the provider app. The flip promises the adoption and the preset, not a pulled image: hosts prepare the image later, through the requirement reconcile, once an enabled app uses it. *(Amendment 45, #690, signed off 2026-10-23.)* A provider image
 > that cannot resolve its digest (private registry) stays `digest_unresolved` and is surfaced in
 > `GET /v1/admin/images`, never fatal to the setting flip. Disabling discovery does **not**
 > uninstall (destructive; an admin uninstalls explicitly). See the image-management P5 spec.
@@ -1625,7 +1623,7 @@ placement instead.
 // 204 No Content
 ```
 *(Amendment 36, #658, signed off 2026-10-15.)*
-Uninstalls: deletes the `installed_images` row and that image's `host_images` rows. Nothing is sent to a host: each host keeps the image in its local cache until an admin removes it with the RH05 host image cleanup (`POST /v1/admin/hosts/{id}/images/cleanup`). `host_images` rows are **not** FK-cascaded from `installed_images` (they FK `image_catalog`, not the adoption row), so the control plane deletes them itself. A late `image_state` report for an id no longer installed re-upserts
+Uninstalls: deletes the `installed_images` row and that image's `host_images` rows. No host removes the image: each host keeps it in its local cache until an admin removes it with the RH05 host image cleanup (`POST /v1/admin/hosts/{id}/images/cleanup`). After the commit the control plane sends `image_inventory_reconcile` to each capable connected host (`agent-api.md`). That command only refreshes inventory and never removes anything. *(Amendment 45, #690, signed off 2026-10-23.)* `host_images` rows are **not** FK-cascaded from `installed_images` (they FK `image_catalog`, not the adoption row), so the control plane deletes them itself. A late `image_state` report for an id no longer installed re-upserts
 `host_images` if the id is still in the catalog — harmless, reconciled at the host's next
 register.
 - **Errors:** `404 not_installed` — no `installed_images` row for this id (this includes an
@@ -1654,8 +1652,7 @@ itself trigger an update; the next `auto`-policy sync or an explicit `.../update
 { "applied": true, "image": { "id": "steam", "installed_version": "1.4.0", "...": "..." } }
 ```
 The `notify` policy's action and `manual`'s escape hatch (§Update-policy semantics below):
-re-adopts the catalog's current `(version, registry_digest)` and re-ensures everywhere,
-identically to a fresh install's dispatch. `applied:false` (still `200`) when
+re-adopts the catalog's current `(version, registry_digest)` and prepares it exactly as a fresh install does: on each host that an enabled app using it is placed on, and on no host when the adoption is `lazy`. *(Amendment 45, #690, signed off 2026-10-23.)* `applied:false` (still `200`) when
 `installed_version` already equals the catalog `version` — a no-op, not an error, so a UI
 button click never has to branch on status code to tell "worked" from "was already
 current".

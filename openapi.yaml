@@ -2075,7 +2075,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
       tags: [images]
-      summary: Re-adopt the catalog's current version/digest and re-ensure everywhere (200 applied or no-op).
+      summary: Re-adopt the catalog's current version/digest and prepare it where its apps are placed, as an install does (200 applied or no-op).
       description: >-
         The notify policy's action and manual's escape hatch. applied:false (still 200)
         when installed_version already equals the catalog version. 409 conflict when the
@@ -4586,7 +4586,7 @@ components:
         installed: { type: boolean }
         installed_version: { type: [string, "null"] }
         pinned: { type: boolean, description: "P3: real. A pinned image is never auto-updated under any policy (auto sync or explicit .../update, both 409 while pinned)." }
-        lazy: { type: boolean, description: "P3. True when installed without dispatching ensure-everywhere; hosts pull this image on first launch placement instead." }
+        lazy: { type: boolean, description: "P3. True when installed without preparing it on any host; hosts pull this image on first launch placement instead." }
         runtime_preset_id: { type: [string, "null"], format: uuid, description: "P5. The managed runtime_presets row materialized from this image's manifest runtime block at install; null when not installed or the image carries no runtime block. Makes the installed image launchable." }
         update_available: { type: boolean }
         hosts:
@@ -4597,7 +4597,7 @@ components:
       type: object
       description: "P3. Optional body; an omitted body or {} installs eagerly (lazy defaults false)."
       properties:
-        lazy: { type: boolean, default: false, description: "P3. When true, seeds the installed_images adoption row without dispatching ensure-everywhere; hosts pull on first launch placement instead." }
+        lazy: { type: boolean, default: false, description: "P3. When true, seeds the installed_images adoption row and prepares it on no host; hosts pull on first launch placement instead." }
     ImageUpdateResult:
       type: object
       required: [applied, image]
