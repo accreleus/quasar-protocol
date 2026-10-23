@@ -2271,6 +2271,7 @@ The control plane sends `config_update`:
   connection state) and contains exact DRM mode timing identity (`width`, `height`, integer
   `refresh_millihz`, preferred/interlaced flags, pixel clock and totals). Legacy
   `connectors: string[]` remains for hotplug and older-control-plane compatibility.
+  *(Amendment 47, #782, pre-approved by the operator 2026-10-23: once the agent has its console configuration, `connectors` lists the connected outputs whose monitor did not read as powered off, or as showing another input, over DDC/CI; an output that `outputs` reports connected but `connectors` leaves out is one the agent read as off. Before its first console configuration the agent reports no `connectors`. The control plane may stop an auto-started console session whose monitor has read off for a grace period.)*
 - **`settings`** is the host's **sparse override map** — only admin-set knobs appear. Keys absent
   from the map are left at the agent's env baseline. A nullable knob that an admin clears is
   simply omitted (not sent as `null`). The agent recomputes `RuntimeSettings::baseline()` (env)
