@@ -1033,6 +1033,8 @@ states; the agent enters the picture at `starting`.) The control plane writes th
 row, stamps `started_at`/`ended_at`, and **releases the GPU reservation** when the agent reports
 `stopped`/`failed`. `error` is set (string) only with `failed`.
 
+> *(Amendment 46, #749, pre-approved by the operator 2026-10-23: a session that will boot an app container reports its first `running` with detail `app booting`, so no client sees a `running` session before its app has started booting. A session with no app container, a parked session and a console session report `running` with another detail, as before. The JSON above is an example of the latter.)*
+
 > *(first-run-experience §S5, additive, 2026-08-09)* `session_state` may also carry two optional
 > fields, both present only on a terminal report that warrants them:
 > - **`reason_code`: string** — a machine-readable classification of a terminal failure. Today's
@@ -1884,7 +1886,7 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >     1. sends the launch helper `launch <appid>`, the appid being the one after `-applaunch` in
 >        the play `app`'s `STEAM_STARTUP_FLAGS` (read as for a derived tile today), or
 >        `bigpicture` when the flags name none;
->     2. reports `starting` → `running` → `app booting`, and holds `app presented` until the game's
+>     2. reports `starting`, then `running` with detail `app booting` in one `session_state` *(amendment 46)*, and holds `app presented` until the game's
 >        window shows, Steam needs the user, or the reveal cap passes, as for a Steam tile launched
 >        with the helper;
 >     3. resets the display to the new viewer's defaults, so the adopting session starts with
