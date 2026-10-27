@@ -7018,6 +7018,10 @@ untrustworthy.
 > `PATCH` `interval_secs` equal to the reported value is accepted and not stored. A different
 > value is refused like any locked job's: `422 validation_failed` when it is below 60, otherwise
 > `409 schedule_locked`. A period saved on the job before this amendment is ignored.
+>
+> *(Amendment 48, #840: `platform.release_detect` takes its period from
+> `instance_settings.release_check` in the same way, under the same `PATCH` rule, with `locked_by`
+> naming that setting; §"Platform-release preview channel".)*
 
 ### Schedule and window semantics
 
@@ -7946,7 +7950,8 @@ and what is wrong. **It is a read and only a read** — it applies nothing, writ
 **Top level.**
 - `channel` — the instance's channel (`stable` | `beta` | `edge`), read from `instance_settings`.
   Everything in `available` is what it selects; another channel's releases are never mixed in. On
-  `beta` the entries themselves report `channel: "stable"` (amendment 3).
+  `beta` the entries themselves report `channel: "stable"` (amendment 3). *(Amendment 48 adds
+  `preview`: §"Platform-release preview channel".)*
 - `source_repo` — **additive (#104)**: the configured release repository as `owner/name`
   (default `accreleus/quasar`), so a client composes the release, commit and issue links from
   the repository detection actually reads rather than a hard-coded one; `""` when detection is
@@ -8006,7 +8011,7 @@ Per release:
 | field | meaning |
 |---|---|
 | `id` | the `platform_releases` row id (uuid). Stable across detections; the handle amendment 2's apply will name. |
-| `channel` | `stable` \| `edge` — the channel the row is **stored** on. Equal to the top-level `channel` except on `beta`, which stores no rows and reads `stable`'s, so its entries report `stable` here (amendment 3). |
+| `channel` | `stable` \| `edge` \| `preview` (`preview` added by amendment 48) — the channel the row is **stored** on. Equal to the top-level `channel` except on `beta`, which stores no rows and reads `stable`'s, so its entries report `stable` here (amendment 3). |
 | `version` | stable semver without a leading `v` (`"0.2.0"`, `"0.2.0-rc.1"`). **`null` on edge**: an edge build is a commit, not a version, and inventing one would be a lie the UI would then render. |
 | `source_commit` | full 40-character lowercase hex. The identity, on both channels. |
 | `built_at` | RFC3339 UTC. The second ordering key. |
@@ -8138,7 +8143,8 @@ duplicate its auth and audit wiring, and make a UI issue two calls to render one
   installs is an edge build until a stable one ships. Seeded once, at the first boot, and never
   rewritten; `schema.md` `instance_settings.release_channel`.)* Anything else is `400
   validation_failed`. Takes effect immediately, with no redeploy: the next
-  `GET /v1/admin/platform/releases` selects a different set of rows.
+  `GET /v1/admin/platform/releases` selects a different set of rows. *(Amendment 48 adds
+  `preview`, every build of `develop`: §"Platform-release preview channel".)*
 - **`release_edge_branch`** — **default `develop`**. Validation: non-empty, at most **255**
   characters, and a valid git ref name component — **no whitespace, no `..`, no leading `-`, no
   control characters**. Anything else is `400 validation_failed`. It is validated (and stored)
@@ -8159,7 +8165,8 @@ duplicate its auth and audit wiring, and make a UI issue two calls to render one
 **Detection's schedule is not part of this amendment.** It rides the existing jobs framework
 (§Background jobs) as an ordinary job definition with an admin-editable schedule and a run history;
 nothing about it needs a contract change here, and this surface deliberately exposes no schedule
-field that would then have two owners.
+field that would then have two owners. *(Amendment 48: the period now has one owner,
+`release_check`; the window keeps its owner, the job. §"Platform-release preview channel".)*
 
 ### The release manifest asset
 
@@ -8758,6 +8765,120 @@ new fault kind, and no new field; a client that already renders `stable` and `ed
 by adding it to the channel control. A client that predates this amendment and meets
 `"channel": "beta"` should render the value verbatim rather than failing — the same rule the
 closed vocabularies above carry.
+
+---
+
+## Platform-release preview channel (amendment 48, #840, additive, admin-gated)
+
+> **Amendment 48 — the `preview` release channel, its commit list, and a daily or weekly check
+> (#840), signed off by the operator 2026-10-27. Additive: one enum value, one optional
+> manifest field, one release field and one setting; no existing shape, route, status or error
+> code changes.** `release_channel` on the instance-settings envelope and PATCH body,
+> `PlatformReleaseView.channel` and `PlatformRelease.channel` gain **`preview`**; a preview
+> manifest may carry **`commits`**; `PlatformRelease` gains **`new_commit_count`**; the settings
+> envelope and PATCH body gain **`release_check`**. Storage: `schema.md`
+> `instance_settings.release_channel` and `release_check`, `platform_releases.channel`, migration
+> 0107. `agent-api.md` and `signaling.md` are untouched; ADR 0001, 0002 and 0003
+> are unchanged.
+
+### What `preview` is
+
+`preview` offers **every build of `develop`**: the images workflow publishes one for each landing.
+It is a branch channel like `edge`, and **every rule this contract states for an edge build holds
+for a preview build**: the ordering (`schema_version` DESC, then `built_at` DESC), ADR 0002's
+rules, `version` `null`, `notes` `""`, `compare_url`, one commit for every image, and the apply,
+which carries `release.version` `null` as an edge apply does (so ADR 0003's `require` refuses it).
+Three things differ:
+
+- **Where it is read.** From the preview manifest below, not from branch tags. Its rows are stored
+  on channel `preview`, and `PlatformRelease.manifest` serves the document verbatim.
+  `release_edge_branch` and the view's `edge_branch` select nothing on `preview`.
+- **Its notes are a commit list** carried in that manifest, and the release view says which of
+  its entries are newer than the installed control plane (`new_commit_count`).
+- **Its check defaults to daily** (`release_check`).
+
+`edge` is unchanged: an on-demand build of `release_edge_branch`. A client that predates this
+amendment and meets `"channel": "preview"` renders the value verbatim, as amendment 3 asked for
+`beta`.
+
+### The preview manifest
+
+Each preview build publishes **one** document at the tag `preview` of `quasar-release-manifest`,
+in the registry and repository the edge channel reads (by default
+`ghcr.io/accreleus/quasar/quasar-release-manifest:preview`). It is an OCI image manifest with
+**exactly one layer**, and that layer's bytes are the document. The workflow moves the tag to each
+new build, and only after every image the document names is published.
+
+The document is a format-2 manifest (§"Release manifest format 2") with these differences, and
+one that differs in any other way is invalid:
+
+```json
+{
+  "format_version": 2,
+  "version": null,
+  "prerelease": false,
+  "source_commit": "<40 lowercase hex>",
+  "built_at": "2026-10-27T12:00:00Z",
+  "schema_version": 106,
+  "components": [ "the three format-2 components, unchanged" ],
+  "floor": [ "the two format-2 floor entries, unchanged" ],
+  "commits": [
+    { "commit": "<40 lowercase hex>", "subject": "#875 Classic layout marked deprecated" }
+  ]
+}
+```
+
+- **`version` is `null` and `prerelease` is `false`**: a preview build is a commit, not a
+  version. The floor's "no floor version may order above `version`" has nothing to compare
+  against and is not applied; each floor entry keeps its grammar.
+- **One commit for every image.** Every component was built from `source_commit`, as on edge. A
+  build never names an image carried forward from an earlier commit: `up_to_date`,
+  `control_plane_not_first` and the post-apply `register` all match on this one commit.
+- **`commits`** (optional): the build's first-parent history, newest first, from `source_commit`
+  itself back to, and not including, the newest stable release tag reachable from it. At most
+  **500** entries; a longer history is cut to the newest 500. Each entry is exactly `commit` (40
+  lowercase hex) and `subject`: one line of at most 200 characters, `#<number> <title>` for a
+  pull-request merge and the commit's subject line for any other commit. A subject is upstream
+  text: a client renders it as plain text, never as markdown or HTML.
+- **A preview manifest without `commits` is valid.** Its release is listed and applied as any
+  other, and its `new_commit_count` is `null`.
+- **Only a preview manifest may carry `commits`.** A release asset that carries it is invalid, so
+  a stable release stays readable by a control plane that predates this amendment, which rejects
+  an unknown key.
+- **Detection reads the tag only while the channel is `preview`**, as it reads the edge branch
+  only on `edge`, and keeps one row per `source_commit`. It calls only the registry: preview adds
+  no call to the release repository's API. An unreachable registry fails the run (the view's
+  `last_error`); a tag not yet published lists nothing; an invalid document is not listed and is
+  counted in the run summary, as an invalid release asset is (amendment 26).
+
+### `new_commit_count` — the commits newer than what is installed
+
+`PlatformRelease` gains **`new_commit_count`**, always serialized by a server implementing this
+amendment. On a preview release whose manifest carries `commits`, it is how many leading entries
+the installed control plane does not run: the entries before the one whose `commit` equals the
+installed control plane's `source_commit`, or all of them when none does (the installed build is
+a stable release, an edge build, unstamped, or older than the list). `null` on every other
+release. A client shows the first `new_commit_count` entries of `manifest.commits` as the commits
+newer than what is installed. It is derived and served, like `migrates`, so the server and a
+client cannot disagree about what counts as new.
+
+### Daily or weekly — `release_check`
+
+The settings envelope and PATCH body gain **`release_check`**: `"daily"` | `"weekly"` | `null`.
+**`null`, the default, follows the channel: daily on `preview`, weekly on every other channel.**
+PATCH: absent = unchanged, explicit `null` = follow the channel again, any other value is `400
+validation_failed`. A channel switch never changes it. Audited by the existing
+`instance.settings.updated` event.
+
+`platform.release_detect` takes its period from it, one day or seven, read at every scheduling
+decision, as `library.discovery` takes its period from the Libraries interval (amendment 28). The
+jobs read reports that period as `interval_secs`, with `locked: true` and `locked_by`
+`instance_settings.release_check`; a `PATCH` of `interval_secs` follows amendment 28's rule. The
+window stays the Jobs tab's: `window_start`, `window_end` and `timezone` apply as before, and on
+daily the window opens every day, whatever `window_days` holds.
+`QUASAR_PLATFORM_RELEASE_DETECT_INTERVAL` stays authoritative when set, and is then what
+`locked_by` names. A period saved on the job before this amendment is ignored, as amendment 28
+did for `library.discovery`.
 
 ---
 
@@ -10162,6 +10283,7 @@ produced by the same publish workflow from the same tag as the notes and the for
   running a release declares the same floor its build carries; publishing it in the manifest is what
   lets the release-time check (ADR 0008) and an operator read it before the release is applied.
 - **No other keys, at either level**, exactly as format 1: an unknown key is invalid.
+  *(Amendment 48: a preview manifest may also carry `commits`; a release asset may not.)*
 - **Signature.** A release that is signed carries **`platform-release-manifest.v2.json.sig`**, a
   detached signature over the v2 asset's exact bytes in the format ADR 0003 defines. An actor that
   verifies signatures fetches the v2 pair; nothing about the signature format, the trust

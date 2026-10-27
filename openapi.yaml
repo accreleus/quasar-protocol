@@ -2239,10 +2239,11 @@ paths:
                     reports which source is in force.
                 release_channel:
                   type: string
-                  enum: [stable, beta, edge]
+                  enum: [stable, beta, edge, preview]
                   description: >-
                     Platform-release amendment 1 (#104/#106, migration 0074); `beta` added by
-                    amendment 3 (#121, migration 0079). Which platform
+                    amendment 3 (#121, migration 0079); `preview` added by amendment 48 (#840,
+                    migration 0107). Which platform
                     releases the admin console is shown. Absent = unchanged (pointer decode, the
                     same rule every field on this body follows - a plain decode would read "" and
                     silently reset the channel whenever an admin changed the registration mode).
@@ -2261,6 +2262,16 @@ paths:
                     leading "-", no control characters - 400 validation_failed otherwise. Validated
                     and stored whatever the channel is, and NEVER CLEARED BY A CHANNEL SWITCH, so
                     an operator who visits stable and comes back keeps their branch.
+                release_check:
+                  type: [string, "null"]
+                  enum: [daily, weekly, null]
+                  description: >-
+                    Amendment 48 (#840, migration 0107). How often platform.release_detect runs.
+                    Absent = unchanged; explicit null = follow the channel again (daily on
+                    preview, weekly on every other channel); any other value is 400
+                    validation_failed. Never changed by a channel switch. The job takes its
+                    period from it (locked_by instance_settings.release_check); its window
+                    stays the Jobs tab's, and on daily the window opens every day.
                 release_webhook_enabled:
                   type: boolean
                   description: >-
@@ -6148,13 +6159,15 @@ components:
                 the envelope so pre-amendment servers stay conformant.
             release_channel:
               type: string
-              enum: [stable, beta, edge]
+              enum: [stable, beta, edge, preview]
               description: >-
                 Platform-release amendment 1 (#104/#106, migration 0074); `beta` added by
-                amendment 3 (#121, migration 0079). The instance's platform-
+                amendment 3 (#121, migration 0079); `preview` added by amendment 48 (#840,
+                migration 0107). The instance's platform-
                 release channel: stable = tagged, noted releases; beta = those AND the
                 prereleases among them; edge = whatever was last
-                published from release_edge_branch, with no notes. DEFAULT stable - an instance
+                published from release_edge_branch, with no notes; preview = every build of
+                develop, with its commit list. DEFAULT stable - an instance
                 that has never been configured is not shown prereleases or branch builds. Read per
                 request rather than at boot, so a switch needs no restart. Optional in the envelope
                 so pre-amendment servers stay conformant.
@@ -6165,6 +6178,14 @@ components:
                 channel follows; default develop. Reported whatever the channel is (it selects
                 nothing while the channel is stable) so a UI can render the control without a
                 second read. Optional in the envelope so pre-amendment servers stay conformant.
+            release_check:
+              type: [string, "null"]
+              enum: [daily, weekly, null]
+              description: >-
+                Amendment 48 (#840, migration 0107). How often platform.release_detect runs.
+                NULL, THE DEFAULT, FOLLOWS THE CHANNEL: daily on preview, weekly on every other
+                channel. Optional in the envelope so pre-amendment servers stay conformant; a
+                client reads absent as null.
             release_webhook_enabled:
               type: boolean
               description: >-
@@ -6328,11 +6349,12 @@ components:
         id: { type: string, format: uuid, description: "Stable across detections; the handle amendment 2's apply will name." }
         channel:
           type: string
-          enum: [stable, edge]
+          enum: [stable, edge, preview]
           description: >-
             The channel this row is STORED on, which is not always the instance's channel: beta
             has no rows of its own and reads stable's, so a release listed while the instance is
-            on beta reports `stable` here. Unchanged by amendment 3.
+            on beta reports `stable` here. Unchanged by amendment 3; `preview` added by
+            amendment 48 (#840), whose builds are rows of their own.
         version:
           type: [string, "null"]
           description: >-
@@ -6368,12 +6390,14 @@ components:
           oneOf:
             - { $ref: "#/components/schemas/ReleaseManifest" }
             - { $ref: "#/components/schemas/ReleaseManifestV2" }
+            - { $ref: "#/components/schemas/ReleaseManifestPreview" }
             - { type: "null" }
           description: >-
             The release manifest asset verbatim. NULL ON EDGE, which publishes no asset.
             Amendment 14 (#353): the format-2 asset (platform-release-manifest.v2.json) when the
             release publishes one and this control plane reads it, else the format-1 asset; a
-            client tells them apart by format_version.
+            client tells them apart by format_version. Amendment 48 (#840): on preview, the
+            preview manifest verbatim (version null).
         migrates:
           type: boolean
           description: >-
@@ -6384,6 +6408,17 @@ components:
             than left to a client to re-derive, exactly as identity_known is: a client twin
             of the rule would keep naming the old policy after the rule moved. Always
             present. With no release to apply, read the cautious answer, true.
+        new_commit_count:
+          type: [integer, "null"]
+          minimum: 0
+          description: >-
+            ADDITIVE, amendment 48 (#840). On a preview release whose manifest carries commits,
+            how many of its leading entries the installed control plane does not run: the
+            entries before the one whose commit equals the installed control plane's
+            source_commit, or all of them when none does. Null on every other release. A client
+            shows the first new_commit_count entries of manifest.commits. DERIVED AND SERVED,
+            like migrates. Always serialized by a server implementing amendment 48; a client
+            reads absent as null.
         discovered_at:
           type: string
           format: date-time
@@ -6551,7 +6586,7 @@ components:
       properties:
         channel:
           type: string
-          enum: [stable, beta, edge]
+          enum: [stable, beta, edge, preview]
           description: >-
             The instance's channel. Everything in `available` is what it selects; another
             channel's releases are never mixed in. On `beta` the entries carry channel `stable`,
@@ -7207,6 +7242,53 @@ components:
       properties:
         name: { type: string, enum: [node-agent, recovery-actor] }
         version: { type: string, description: "Semver without a leading \"v\" - the same grammar as ReleaseManifestV2.version. Compared by SemVer precedence." }
+    ReleaseManifestPreview:
+      type: object
+      description: >-
+        AMENDMENT 48 (#840). The preview manifest: one document at the tag `preview` of
+        quasar-release-manifest in the platform registry, the single layer of an OCI image
+        manifest. Format 2 with three differences: version is null, prerelease is false, and it
+        may carry commits. Every component was built from source_commit. Served back VERBATIM
+        as PlatformRelease.manifest. Full semantics: control-api.md
+        §"Platform-release preview channel".
+      # Unknown keys are invalid at every level, exactly as for format 2.
+      additionalProperties: false
+      required: [format_version, version, prerelease, source_commit, built_at, schema_version, components, floor]
+      properties:
+        format_version: { type: integer, enum: [2] }
+        version: { type: "null", description: "A preview build is a commit, not a version." }
+        prerelease: { type: boolean, enum: [false] }
+        source_commit: { type: string, description: "40 lowercase hex. Every component was built from it." }
+        built_at: { type: string, format: date-time }
+        schema_version: { type: integer, description: "As in format 2." }
+        components:
+          type: array
+          description: "Exactly as in format 2: control-plane, node-agent, recovery-actor, in this order."
+          minItems: 3
+          maxItems: 3
+          items: { $ref: "#/components/schemas/ReleaseManifestV2Component" }
+        floor:
+          type: array
+          description: "Exactly as in format 2, except that no floor version is compared with version, which is null."
+          minItems: 2
+          maxItems: 2
+          items: { $ref: "#/components/schemas/ReleaseManifestFloorEntry" }
+        commits:
+          type: array
+          description: >-
+            OPTIONAL. The build's first-parent history, newest first, from source_commit back
+            to, and not including, the newest stable release tag reachable from it; cut to the
+            newest 500. Absent is valid (new_commit_count is then null). Only a preview manifest
+            may carry it.
+          maxItems: 500
+          items: { $ref: "#/components/schemas/ReleaseManifestCommit" }
+    ReleaseManifestCommit:
+      type: object
+      additionalProperties: false
+      required: [commit, subject]
+      properties:
+        commit: { type: string, description: "40 lowercase hex." }
+        subject: { type: string, maxLength: 200, description: "One line: `#<number> <title>` for a pull-request merge, the commit's subject line otherwise. UNTRUSTED UPSTREAM TEXT: render as plain text, never as markdown or HTML." }
 
     # ─── remote access (first-run wizard v2 §S6) ───────────────────────────
     TLSCertificateInfo:
@@ -9718,7 +9800,8 @@ components:
           description: >-
             True when an environment variable is authoritative over this job's interval, and,
             for `library.discovery`, whenever its interval is not writable here, which is
-            always (amendment 28). The
+            always (amendment 28); likewise always for `platform.release_detect`, whose period
+            follows instance_settings.release_check (amendment 48). The
             env override stays the winner (the pre-existing documented behaviour of knobs like
             QUASAR_LIBRARY_SCAN_INTERVAL); the API says so rather than silently accepting an
             edit the environment will overrule - a PATCH of interval_secs on a locked job is
@@ -9727,7 +9810,7 @@ components:
             otherwise 409 schedule_locked: amendment 28).
         locked_by:
           type: [string, "null"]
-          description: "The authority that is in force: the environment variable, e.g. \"QUASAR_LIBRARY_SCAN_INTERVAL\", or, for `library.discovery` when that override is not set, `instance_settings.library_discovery_interval_minutes` (amendment 28). Null when not locked."
+          description: "The authority that is in force: the environment variable, e.g. \"QUASAR_LIBRARY_SCAN_INTERVAL\", or, for `library.discovery` when that override is not set, `instance_settings.library_discovery_interval_minutes` (amendment 28), and for `platform.release_detect` `instance_settings.release_check` (amendment 48). Null when not locked."
     JobRun:
       type: object
       description: "One record of one run - the shape that appears as `last_run` and as an item of the run-history page."
