@@ -1909,6 +1909,26 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >   - `resources` is the budget the runtime already had. An adopting session reports no
 >     `home_seed`: nothing is provisioned.
 
+> **Amendment 49 — Region and Input values (#845).** *(Approved in principle by the operator
+> 2026-10-26; text signed off before landing.)* The control plane sets nine keys in the env of every
+> `app` it sends in a `session_assign` or `session_swap_app`: `TZ`, `LANG`, `LC_TIME`,
+> `LC_NUMERIC`, `LC_MONETARY`, `LC_MEASUREMENT`, `LC_PAPER`, `XKB_DEFAULT_LAYOUT` and
+> `XKB_DEFAULT_VARIANT` (`control-api.md` §Region and Input settings). The agent passes them to the
+> app container like any other env key. No field or message changes. The agent also:
+> - **builds the session's keymap from them.** When it builds a session's compositor, the keymap
+>   is the layout in `XKB_DEFAULT_LAYOUT` with the variant in `XKB_DEFAULT_VARIANT`; with no
+>   `XKB_DEFAULT_LAYOUT` it is `us`, as today. A keymap that does not build falls back to `us`
+>   with a warning and never fails the session. A swap keeps the session's keymap. A `local_only`
+>   session has no compositor; its container still gets the keys.
+> - **does not adopt a runtime started with other values.** Beside the `stream` checks above, it
+>   does not adopt when any of the nine keys in `app.env` differs from the value the runtime's
+>   container was started with (a key absent from both is equal): it tears that runtime down and
+>   builds fresh. The control plane does not compare them before it claims, so this check is the
+>   only one.
+>
+> An agent without this amendment passes the keys to the container, keeps the `us` keymap, and
+> adopts as before.
+
 ### `session_start` — bring the pipeline up
 ```json
 { "type": "session_start", "id": "<command-id>", "session_id": "<uuid>" }

@@ -1148,6 +1148,7 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `GET /v1/me/highlights` | user (self only) | *(home-rail amendment, 2026-08-05)* the caller's server-ranked home rail, derived from their own session history. No `user_id` parameter and no admin variant. **Entitlement-filtered**, and that filter is load-bearing rather than cosmetic — see below. |
 | `GET /v1/me/play-history` | user (self only) | *(Amendment 38, #720)* the caller's own play time, session count and last played per app, derived from their own sessions. No `user_id` parameter and no admin variant. **Entitlement-filtered** like `GET /v1/me/highlights`. |
 | `PUT /v1/me/steam-warm` | user (self only) | *(Amendment 39, #759)* the library heartbeat: keeps the caller's warm Steam (a parked session) alive, or starts one when every rule allows. Always `204`, no body. No admin variant. §Warm Steam |
+| `GET` / `PATCH /v1/me/region-input` | user (self only) | *(Amendment 49, #845)* the caller's own Region and Input settings, with the install defaults read-only. No admin variant. §Region and Input settings |
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
 | `DELETE /v1/admin/storage/homes/{id}` | **admin** | *(P5-01)* tombstone a home for GC |
 | `POST /v1/admin/storage/home-claims/release` | **admin** | *(amendment 15, #379/#347)* release a conflicting managed-home claim whose owner host is gone and which records no location on a host that still exists. Bookkeeping only: no file is moved or deleted. `204`; `400 validation_failed`; `404 not_found`; `409 conflict` (the claim changed since it was read); `409 home_in_use`; `409 claim_not_releasable`. Audited as `storage.home_claim.release` |
@@ -4408,6 +4409,158 @@ Admin reads that include parked sessions: `GET /v1/admin/sessions`, host capacit
 
 ---
 
+## Region and Input settings *(Amendment 49, #845)*
+
+> *(Amendment 49, #845, approved in principle by the operator 2026-10-26; text signed off before
+> landing.)* Additive. One new route (`GET` / `PATCH /v1/me/region-input`), nine install defaults
+> on `/v1/admin/settings`, two optional strings in the device record, and nine keys in the app's
+> env at launch. No existing field, route or status changes. The wire half is `agent-api.md`
+> (§`session_assign`, Amendment 49); the storage half is `schema.md` migration 0108.
+
+Each user picks their own timezone, language, region format, keyboard layout, and mouse, scroll
+and gamepad behaviour. The settings are stored on the account, so they follow the user to any
+device, and apply from the user's next launch. Admins set install-wide defaults. A user who has not
+picked a value gets the default; no value can be locked.
+
+### `GET` / `PATCH /v1/me/region-input`
+
+**`RequireAuth`**; the subject is always the bearer. No admin variant: one user's settings are
+unreadable by anyone else.
+```json
+{
+  "region": { "timezone": null, "language": "de-DE", "region_format": null },
+  "input": {
+    "keyboard": { "layout": "de", "variant": "nodeadkeys" },
+    "match_cursor": null, "mouse_sensitivity": 1.5,
+    "raw_mouse": null, "flip_scroll": true, "nintendo_layout": null
+  },
+  "defaults": {
+    "region": { "timezone": "UTC", "language": "en-US", "region_format": null },
+    "input": {
+      "keyboard": { "layout": "us", "variant": "" },
+      "match_cursor": "auto", "mouse_sensitivity": 1,
+      "raw_mouse": false, "flip_scroll": false, "nintendo_layout": false
+    }
+  }
+}
+```
+- `region` and `input` are the caller's own values. `null` means not set, and the field resolves
+  as below. A user who has saved nothing reads every field `null`.
+- `defaults` holds the install defaults (§Admin settings, below), read-only, so a client can show
+  what a `null` resolves to. Every field in it has a value except `region_format`, where `null`
+  means the same as the language.
+- `PATCH` is a partial merge one level deep, as for `ui-preferences`: an absent field is
+  unchanged, `null` clears it, and `keyboard` is replaced whole. `defaults` and
+  `parked_session_stopped` are ignored on a `PATCH`. Any other key, and any value outside the
+  table below, is `400 validation_failed`, and nothing is written. The response is the `GET` body
+  plus `parked_session_stopped` (§Saving ends an idle Steam).
+
+| field | accepted values | built-in default |
+|---|---|---|
+| `region.timezone` | an IANA time zone name the control plane's own tz database knows, its backward-compatible links included (`Asia/Calcutta` as well as `Asia/Kolkata`), other than `Local` | `UTC` |
+| `region.language` | a language and region, `ll-RR` (`^[a-z]{2,3}-[A-Z]{2}$`), e.g. `de-DE` | `en-US` |
+| `region.region_format` | as `region.language` | the language |
+| `input.keyboard` | `{"layout", "variant"}`: one xkeyboard-config layout name (`^[A-Za-z0-9_-]{1,32}$`) and one of its variant names (`^[A-Za-z0-9_-]{0,64}$`, `""` for the basic variant) | `{"layout": "us", "variant": ""}` |
+| `input.match_cursor` | `"auto"`, `"on"` or `"off"` | `"auto"` |
+| `input.mouse_sensitivity` | a number from 0.25 to 4, inclusive | `1` |
+| `input.raw_mouse` | boolean | `false` |
+| `input.flip_scroll` | boolean | `false` |
+| `input.nintendo_layout` | boolean | `false` |
+
+The control plane checks the form of a language, region format, layout and variant, not whether
+an image carries that locale or xkeyboard-config has that layout. A locale an image lacks falls
+back as its C library does; a layout the compositor cannot build falls back to `us`
+(`agent-api.md`). Clients offer the names from their own lists.
+
+### What the app container gets
+
+For every `session_assign` and `session_swap_app` it sends, the control plane resolves four
+values, each from the first of these that has one:
+- **timezone**: the user's `region.timezone`, the device record's `timezone` (below), then
+  `default_timezone`;
+- **language**: the user's `region.language`, the device record's `language`, then
+  `default_language`;
+- **region format**: the user's `region.region_format`, `default_region_format`, then the
+  resolved language;
+- **keyboard**: the user's `input.keyboard`, then `default_keyboard`.
+
+It sets these keys in that `app`'s env, over any value the app or its runtime preset carries:
+
+| key | value |
+|---|---|
+| `TZ` | the timezone, e.g. `Europe/London` |
+| `LANG` | the language as `ll_RR.UTF-8`, e.g. `de_DE.UTF-8` |
+| `LC_TIME`, `LC_NUMERIC`, `LC_MONETARY`, `LC_MEASUREMENT`, `LC_PAPER` | the region format, in the same form |
+| `XKB_DEFAULT_LAYOUT` | the keyboard layout |
+| `XKB_DEFAULT_VARIANT` | the keyboard variant, `""` for the basic one |
+
+- The values come only from the validated settings and device record, never from free text.
+- The control plane sets neither `LC_ALL` nor `LANGUAGE`. Either one, set by an image or an app's
+  env, overrides these values in the container, so Quasar's images set neither.
+- The agent also builds the session's keymap from the two `XKB_DEFAULT_*` keys (`agent-api.md`
+  §`session_assign`, Amendment 49).
+- A session keeps the values it started with. A swap's new container gets the values resolved at
+  the swap; the session's keymap does not change.
+
+**The device record.** `POST /v1/me/devices` `capabilities` may carry two more strings:
+`timezone`, the browser's IANA zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`), and
+`language`, the browser's preferred language as `ll-RR`. The control plane reads them from the
+record that rung resolution reads (`schema.md` `sessions.device_id`, Amendment 31), and reads a
+value that fails the rules above as absent. A client posts its record again as soon as either value
+changes. A client that sends neither gets the install defaults for a user who has not picked a
+value.
+
+### What the client applies
+
+`match_cursor`, `mouse_sensitivity`, `raw_mouse`, `flip_scroll` and `nintendo_layout` never reach
+the agent. The client resolves each as the user's value, then the install default, and applies it
+in the next session view it opens; the input wire (`input.md`) is unchanged.
+
+| field | what the client does |
+|---|---|
+| `match_cursor` | `on` scales relative mouse movement by the stream's size over the size the stream is shown at, keeping the fractional remainder. `auto` is `on` for an app whose `kind` is `desktop`, `off` for every other kind. |
+| `mouse_sensitivity` | multiplies relative mouse movement, after `match_cursor` |
+| `raw_mouse` | `true` asks for pointer lock with `unadjustedMovement`; a browser that cannot locks as today and the client says so |
+| `flip_scroll` | `true` reverses the wheel direction before sending |
+| `nintendo_layout` | `true` swaps gamepad buttons A with B and X with Y before sending |
+
+### Saving ends an idle Steam
+
+When a `PATCH` changes the stored `region.timezone`, `region.language`, `region.region_format` or
+`input.keyboard` and the caller has a parked session (§Warm Steam), the control plane stops it with
+`session_stop{reason:"parked_superseded"}`, so the next heartbeat warms Steam again with the new
+values. The response then carries `"parked_session_stopped": true`, and otherwise `false`. It never
+stops a session in use and never sets `steam_warm_suppressed`. A change to a client field stops
+nothing.
+
+A claim (§Warm Steam, "Claim") does not compare these values. When the parked or held runtime was
+started with other ones (an install default changed, or the browser reported another zone), the
+agent does not adopt it and builds the session fresh (`agent-api.md`), so no launch runs with stale
+values.
+
+### Admin settings
+
+`GET` / `PATCH /v1/admin/settings` gain the install defaults, optional on `PATCH` like every other
+settings field (absent means unchanged), stored on the `instance_settings` singleton
+(`schema.md`):
+
+| field | accepted values | default |
+|---|---|---|
+| `default_timezone` | as `region.timezone` | `"UTC"` |
+| `default_language` | as `region.language` | `"en-US"` |
+| `default_region_format` | as `region.region_format`, or `null` for the same as the language | `null` |
+| `default_keyboard` | as `input.keyboard` | `{"layout": "us", "variant": ""}` |
+| `default_match_cursor` | as `input.match_cursor` | `"auto"` |
+| `default_mouse_sensitivity` | as `input.mouse_sensitivity` | `1` |
+| `default_raw_mouse` | boolean | `false` |
+| `default_flip_scroll` | boolean | `false` |
+| `default_nintendo_layout` | boolean | `false` |
+
+`null` is accepted only for `default_region_format`; any other value outside the table is
+`400 validation_failed`. A change applies from each user's next launch and stops no session.
+
+---
+
 ## Hosts (admin lifecycle, P3-01)
 > *Additive, admin-gated amendment. New endpoints; no change to any existing shape. The host
 > status values and transitions are defined in `schema.md` §"Host status state machine".*
@@ -4768,6 +4921,8 @@ certification record**. The extended (and entirely optional/best-effort) fields:
   decode/presentation pass-fail and basic playback metrics. In AS10-08 it is the
   **shape only** (populated empty / where trivially available); the harness that
   fills it from historical playback is AS10-10.
+- *(Amendment 49, #845)* `timezone` and `language`: the browser's zone and preferred language,
+  read at launch (§Region and Input settings, "The device record").
 
 ### `GET /v1/me/devices` — read the caller's latest device capability record (AS10-08)
 

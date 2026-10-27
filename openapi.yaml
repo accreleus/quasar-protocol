@@ -463,6 +463,33 @@ paths:
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /v1/me/region-input:
+    get:
+      tags: [me]
+      summary: "Read the caller's Region and Input settings, with the install defaults (amendment 49, #845)."
+      description: >-
+        See control-api.md §Region and Input settings. Self only: no admin variant. A user who
+        has saved nothing reads every field null.
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/RegionInputSettings" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      tags: [me]
+      summary: "Update the caller's Region and Input settings (amendment 49, #845)."
+      description: >-
+        Partial merge one level deep: an absent field is unchanged, null clears it, keyboard is
+        replaced whole, defaults and parked_session_stopped are ignored. Any other key or an
+        invalid value is 400 validation_failed and nothing is written. A change to timezone,
+        language, region_format or keyboard stops the caller's parked session (warm Steam), never
+        a session in use; the response says so in parked_session_stopped.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/RegionInputSettings" } } }
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/RegionInputSettings" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /v1/me/highlights:
     get:
       tags: [me]
@@ -2329,6 +2356,15 @@ paths:
                     Amendment 39. Each heartbeat, and a park on exit, sets a parked session's
                     deadline to now plus this many minutes. Absent = unchanged; outside 1-60 is
                     400 validation_failed.
+                default_timezone: { type: string, description: "Amendment 49 (#845). As RegionSettings.timezone. Default UTC. Absent = unchanged." }
+                default_language: { type: string, pattern: "^[a-z]{2,3}-[A-Z]{2}$", description: "Amendment 49. Default en-US. Absent = unchanged." }
+                default_region_format: { type: [string, "null"], pattern: "^[a-z]{2,3}-[A-Z]{2}$", description: "Amendment 49. null = the same as the language (the default). Absent = unchanged." }
+                default_keyboard: { $ref: "#/components/schemas/KeyboardLayout" }
+                default_match_cursor: { type: string, enum: [auto, "on", "off"], description: "Amendment 49. Default auto." }
+                default_mouse_sensitivity: { type: number, minimum: 0.25, maximum: 4, description: "Amendment 49. Default 1." }
+                default_raw_mouse: { type: boolean, description: "Amendment 49. Default false." }
+                default_flip_scroll: { type: boolean, description: "Amendment 49. Default false." }
+                default_nintendo_layout: { type: boolean, description: "Amendment 49. Default false." }
       responses:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/SettingsEnvelope" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
@@ -6220,6 +6256,15 @@ components:
               minimum: 1
               maximum: 60
               description: Amendment 39. Default 10.
+            default_timezone: { type: string, description: "Amendment 49 (#845). Default UTC. Optional in the envelope so a pre-amendment server stays conformant." }
+            default_language: { type: string, description: "Amendment 49. Default en-US." }
+            default_region_format: { type: [string, "null"], description: "Amendment 49. null = the same as the language." }
+            default_keyboard: { $ref: "#/components/schemas/KeyboardLayout" }
+            default_match_cursor: { type: string, enum: [auto, "on", "off"] }
+            default_mouse_sensitivity: { type: number }
+            default_raw_mouse: { type: boolean }
+            default_flip_scroll: { type: boolean }
+            default_nintendo_layout: { type: boolean }
             updated_by: { type: [string, "null"], format: uuid }
             updated_at: { type: string, format: date-time }
 
@@ -8333,6 +8378,65 @@ components:
         endpoint. Unknown top-level keys are preserved through a PATCH.
       properties:
         session_overlay: { $ref: "#/components/schemas/SessionOverlayPreferences" }
+
+    # ─── Region and Input settings (amendment 49, #845) ──────────────────────
+    # control-api.md §Region and Input settings. null on a user field = not set; it resolves
+    # to the browser's value (timezone, language) or the install default.
+    KeyboardLayout:
+      type: object
+      required: [layout, variant]
+      properties:
+        layout: { type: string, pattern: "^[A-Za-z0-9_-]{1,32}$", description: "One xkeyboard-config layout name, e.g. gb." }
+        variant: { type: string, pattern: "^[A-Za-z0-9_-]{0,64}$", description: "One variant of that layout, e.g. extd; empty for the basic variant." }
+      additionalProperties: false
+    RegionSettings:
+      type: object
+      properties:
+        timezone:
+          type: [string, "null"]
+          description: >-
+            An IANA zone name the control plane's tz database knows, backward-compatible links
+            included, other than Local. Reaches the container as TZ.
+        language:
+          type: [string, "null"]
+          pattern: "^[a-z]{2,3}-[A-Z]{2}$"
+          description: "A language and region, e.g. de-DE. Reaches the container as LANG=de_DE.UTF-8."
+        region_format:
+          type: [string, "null"]
+          pattern: "^[a-z]{2,3}-[A-Z]{2}$"
+          description: "As language; reaches the container as LC_TIME, LC_NUMERIC, LC_MONETARY, LC_MEASUREMENT and LC_PAPER. null in defaults = the same as the language."
+      additionalProperties: false
+    InputSettings:
+      type: object
+      properties:
+        keyboard:
+          oneOf: [ { $ref: "#/components/schemas/KeyboardLayout" }, { type: "null" } ]
+          description: "Reaches the container as XKB_DEFAULT_LAYOUT / XKB_DEFAULT_VARIANT and the session's keymap."
+        match_cursor:
+          type: [string, "null"]
+          enum: [auto, "on", "off", null]
+          description: "Client only. auto = on for an app of kind desktop, off for every other kind."
+        mouse_sensitivity: { type: [number, "null"], minimum: 0.25, maximum: 4, description: "Client only. Multiplies relative mouse movement." }
+        raw_mouse: { type: [boolean, "null"], description: "Client only. Pointer lock with unadjustedMovement where the browser has it." }
+        flip_scroll: { type: [boolean, "null"], description: "Client only. Reverses the wheel direction before sending." }
+        nintendo_layout: { type: [boolean, "null"], description: "Client only. Swaps gamepad A with B and X with Y before sending." }
+      additionalProperties: false
+    RegionInputSettings:
+      type: object
+      properties:
+        region: { $ref: "#/components/schemas/RegionSettings" }
+        input: { $ref: "#/components/schemas/InputSettings" }
+        defaults:
+          type: object
+          readOnly: true
+          description: "The install defaults (GET /v1/admin/settings default_*). Every field has a value except region.region_format."
+          properties:
+            region: { $ref: "#/components/schemas/RegionSettings" }
+            input: { $ref: "#/components/schemas/InputSettings" }
+        parked_session_stopped:
+          type: boolean
+          readOnly: true
+          description: "PATCH response only: true when this change stopped the caller's parked session."
 
     # ─── home rail (GET /v1/me/highlights) ────────────────────────────────────
     HighlightList:
