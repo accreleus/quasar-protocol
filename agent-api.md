@@ -1928,6 +1928,11 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >
 > An agent without this amendment passes the keys to the container, keeps the `us` keymap, and
 > adopts as before.
+>
+> *(Amendment 49 note, #902, signed off 2026-10-28.)* An agent replaces a keyboard layout and
+> variant pair it cannot find in its own keyboard data with `us` and an empty variant, and logs one
+> warning, before the app container or the compositor sees the pair. The adoption compare uses the
+> replaced values.
 
 ### `session_start` — bring the pipeline up
 ```json
