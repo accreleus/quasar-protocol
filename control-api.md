@@ -1241,7 +1241,21 @@ seeded); a partial set is an operator error.
 
 ## Auth
 
+> **Amendment 50 — sign-in, registration and password change are refused over plain HTTP (#604), signed off by the operator 2026-10-30. It changes behaviour; `POST /v1/auth/login` and `POST /v1/me/password` gain a documented `403 forbidden`, and the `403` of `POST /v1/auth/register` gains a second code.**
+
+**Transport.** `POST /v1/auth/login`, `POST /v1/auth/register` and `POST /v1/me/password` carry a password, so each is served only under the rule of `POST /v1/setup/claim` (§First-run setup, "Transport", steps 1 and 2): the direct peer is named in `QUASAR_TRUSTED_PROXIES` and every `X-Forwarded-Proto` value it sent is `https`, or, with no such header from a named peer, the request arrived on the control plane's HTTPS listener. There is no loopback exception.
+
+Any other request gets `403 forbidden` before its body is read: no password is compared, no invite is consumed, and nothing is charged to the login rate limit. On `POST /v1/me/password` the bearer middleware runs first, as on every authenticated route (`401`, then `426 client_too_old`, §Client version gate), so a request with no valid token gets `401`, not this `403`. The `message` is written for the person at the form: that the server accepts these only over HTTPS, how to reach it, and that a password or invite code sent this way may have crossed the network in clear and should be changed once the user can sign in over HTTPS. A client shows the `message`. The status is `403`, not `401`, because the session is valid and only the transport is refused: a client that ends its session on a `401` to a bearer request must not end it here. A refusal is logged at `WARN` (`credential-route-plaintext`) with the route and source address, bounded per source as the claim's refusals are; neither the email nor the body is logged.
+
+With `QUASAR_TLS=off` these routes are served only through a proxy named in `QUASAR_TRUSTED_PROXIES`. `BOOTSTRAP_ADMIN_*` does not change that: it creates an admin, who signs in under this rule. `QUASAR_HTTP_REDIRECT=off` does not lift it.
+
+**Not gated.** Other bearer-authenticated routes. A browser signs in only over a secure transport and then calls the origin it signed in on.
+
+**Unchanged by design.** The agent-facing routes (`/agent/ws`, `/v1/agent/*`) and `/health` stay on the plaintext listener. A node agent is not a browser: its encrypted path is the `wss://` URL in the enrollment string (§`POST /v1/admin/hosts/enrollments`), and an operator who gives an agent a `ws://` URL has chosen plain HTTP for that host.
+
 ### `POST /v1/auth/register`
+*(Amendment 50, #604.)* Served over TLS only; see §Auth, "Transport".
+
 ```json
 // request — invite_code REQUIRED when registration_mode = invite_only (LP-SEC-01)
 { "email": "a@b.com", "username": "ada", "password": "<plaintext, TLS only>",
@@ -1268,6 +1282,8 @@ returned — the client logs in next (keeps register/login flows independent).
 > never types it. The bootstrap-admin path is unaffected by `registration_mode`.*
 
 ### `POST /v1/auth/login`
+*(Amendment 50, #604.)* Served over TLS only; see §Auth, "Transport".
+
 ```json
 // request
 { "email": "a@b.com", "password": "<plaintext, TLS only>",
@@ -1400,6 +1416,8 @@ Revokes the presented bearer token (`auth_tokens.revoked_at = now()`). `204`. Id
 > `auth_tokens` table already supports them. Not in the frozen Phase-1 surface.
 
 ### `POST /v1/me/password`
+*(Amendment 50, #604.)* Served over TLS only; see §Auth, "Transport".
+
 ```json
 // request — RequireAuth; the subject is the bearer identity, never a body field
 { "current_password": "<plaintext, TLS only>", "new_password": "<plaintext, TLS only>" }
@@ -2064,13 +2082,14 @@ connection failed" with no cause. Nothing in the product explained either.
 |---|---|---|---|
 | **A** self-signed (default, LAN) | Quasar's own listener | download the cert, trust it, **verify the fingerprint** | — |
 | **B** own certificate | Quasar's own listener | mount cert + key at `QUASAR_TLS_CERT`/`QUASAR_TLS_KEY` | — |
-| **C** external reverse proxy (e.g. their own Caddy + Let's Encrypt) | the proxy | set allowed origins; name the proxy in `QUASAR_TRUSTED_PROXIES` when it forwards to the plaintext listener *(amendment 33: first-run setup through it is refused until then; a proxy that forwards to the HTTPS listener needs nothing)*; Quasar keeps its self-signed cert internally and **that is correct** | must **not** report the cert as a problem — its SANs are irrelevant when the browser never sees it |
+| **C** external reverse proxy (e.g. their own Caddy + Let's Encrypt) | the proxy | set allowed origins; name the proxy in `QUASAR_TRUSTED_PROXIES` when it forwards to the plaintext listener *(amendments 33 and 50: first-run setup, sign-in, registration and password change through it are refused until then; a proxy that forwards to the HTTPS listener needs nothing)*; Quasar keeps its self-signed cert internally and **that is correct** | must **not** report the cert as a problem — its SANs are irrelevant when the browser never sees it |
 
 **Normative:** A, B and C all complete setup, and a client MUST NOT present any of them as a
 required step.
 *(Amendment 33: in C, a proxy on the plaintext listener completes first-run setup once it is
 named. Until then the claim is made on the control plane's own HTTPS port where that port is
 published, or the first admin is provisioned with `BOOTSTRAP_ADMIN_*`.)*
+*(Amendment 50: the same holds for sign-in, registration and password change, which have no `BOOTSTRAP_ADMIN_*` way round. Until the proxy is named they work only on the control plane's own HTTPS port.)*
 
 **Topology detection.** When a request arrives carrying `X-Forwarded-Proto` or RFC 7239
 `Forwarded`, a proxy is in front of the control plane, so its certificate is an internal
@@ -2078,10 +2097,7 @@ detail: `certificate.in_use` is `false` with a reason saying the setup is suppor
 complete. **Forwarded headers may only SOFTEN advice — they authorise nothing.** They are
 trivially spoofable; the worst a hostile client achieves is making an admin-gated diagnostics
 page tell *them* that their own certificate is not in use.
-*(Amendment 33: one named exception. On `POST /v1/setup/claim` and the dev-only
-`POST /v1/dev/agent-session`, `X-Forwarded-Proto` is believed from a peer named in
-`QUASAR_TRUSTED_PROXIES`, and from no other peer; see §First-run setup. It still authorises
-nothing alone: the setup token or the dev key does.)*
+*(Amendments 33 and 50: one named exception, on five routes. On `POST /v1/setup/claim`, the dev-only `POST /v1/dev/agent-session`, `POST /v1/auth/login`, `POST /v1/auth/register` and `POST /v1/me/password`, `X-Forwarded-Proto` is believed from a peer named in `QUASAR_TRUSTED_PROXIES`, and from no other peer; see §First-run setup and §Auth. It still authorises nothing alone: the credential in the request does.)*
 
 ### `GET /v1/tls/certificate.pem` — public
 
