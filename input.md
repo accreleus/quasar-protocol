@@ -9,7 +9,7 @@ DataChannel transport: the agent-offered channel is **reliable + ordered** by de
 > **Amendment (input-jitter investigation, 2026-06):** the reliable+ordered default was validated against the Moonlight common-c input path, which also sends relative mouse packets reliably (`ENET_PACKET_FLAG_RELIABLE`). A late or dropped relative-motion sample is more costly to perceived smoothness than the small head-of-line delay of reliable delivery, because the agent now coalesces bursty arrivals into one uinput write per ~1 ms (see Host-side batching below), so a dropped sample leaves a gap the batching cannot reconstruct.
 
 ## Coordinate + code conventions
-- Relative motion (`dx`,`dy`) is in device pixels at the streamed resolution.
+- Relative motion (`dx`,`dy`) is in compositor pixels: the host applies it unscaled. That is the streamed resolution unless the render or external size has moved (`control-api.md` `PATCH /v1/sessions/{id}/display`). *(Amendment 52, #898.)*
 - Absolute motion (`x`,`y`) is normalized `0.0..1.0` across the streamed surface.
 - Scroll (`dx`,`dy`) is in high-resolution wheel units.
 - Mouse buttons use Linux input codes: left `0x110` (BTN_LEFT), right `0x111`, middle `0x112`.

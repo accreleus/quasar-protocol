@@ -4535,7 +4535,7 @@ in the next session view it opens; the input wire (`input.md`) is unchanged.
 
 | field | what the client does |
 |---|---|
-| `match_cursor` | `on` scales relative mouse movement by the stream's size over the size the stream is shown at, keeping the fractional remainder. `auto` is `on` for an app whose `kind` is `desktop`, `off` for every other kind. |
+| `match_cursor` | `on` scales relative mouse movement by the compositor's size over the size the stream is shown at, keeping the fractional remainder. The compositor's size is the render size last acknowledged by `PATCH /v1/sessions/{id}/display`, else the launch `stream.width`/`stream.height`. It differs from the stream's size only while the render or external size has moved. `auto` is `on` for an app whose `kind` is `desktop`, `off` for every other kind. *(Amendment 52, #898, signed off by the operator 2026-10-31.)* |
 | `mouse_sensitivity` | multiplies relative mouse movement, after `match_cursor` |
 | `raw_mouse` | `true` asks for pointer lock with `unadjustedMovement`; a browser that cannot locks as today and the client says so |
 | `flip_scroll` | `true` reverses the wheel direction before sending |
