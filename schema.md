@@ -853,6 +853,7 @@ defaults the scheduler and pipeline need.
 | `enabled` | `BOOLEAN` NOT NULL DEFAULT `true` | hidden from the public library when false. *(Steam library discovery Phase 3, review ruling)* **A DERIVED TILE'S OWN `enabled` AND ITS PARENT'S ARE `AND`ed AT LAUNCH** — launching or swapping into a tile whose `parent_app_id` names a disabled app is `409 parent_app_disabled` (`control-api.md`). A tile has no independent existence: image, runtime, mounts and home are all the parent's, so launching a tile **is** running the parent, and `enabled = false` means *"stop this from running"*. **This is a launch-path rule, not a stored one** — disabling a parent does **not** write to its tiles, so their own `enabled` stays `true` and they keep appearing in the library; re-enabling the parent restores them all at once, which is the point of a kill switch. Nothing here is denormalised and no migration touches child rows. |
 | `managed_home` | `BOOLEAN` NOT NULL DEFAULT `false` | *(P5-01, migration 0008)* when true the control plane injects the caller's per-(user, app) home into `runtime_spec.mounts` at dispatch (assign **and** swap) and enforces the single-writer + quota rules (`control-api.md` §Storage). False = today's stateless behaviour, byte-identical dispatch. |
 | `home_container_path` | `TEXT` NOT NULL DEFAULT `'/home/quasar'` | *(P5-01, migration 0008)* container-side mount point for the managed home. |
+| `share_steam_library` | `BOOLEAN` NOT NULL DEFAULT `false` | *(Amendment 53, #1001, migration 0110, signed off 2026-10-31.)* the admin's switch: this app's sessions also mount the user's Steam data dir (`control-api.md` §Storage, "A shared Steam library"). Named CHECK **`apps_share_steam_library_ck`**: `NOT share_steam_library OR (parent_app_id IS NULL AND library_provider = '')` — never on a derived tile or a provider app. Read at launch from the app's own row, never a parent's. |
 | `default_profile_id` | `TEXT` NULL → **`launch_profiles(id)`** | *(migration 0015; **FK repointed by UI-P4 / migration 0036** from `stream_profiles(id)`)* the **launch profile** this app pins or prefers, per `profile_policy`. The stored value is unchanged by the repoint, because existing ids are preserved as launch profile ids. |
 | `profile_policy` | `TEXT` NOT NULL DEFAULT `'inherit'` | *(migration 0015)* `CHECK (profile_policy IN ('inherit','prefer','force'))` **as of UI-P4 / migration 0036 — `'custom'` was removed** (`control-api.md` amendment B2). `inherit` = the user/global default decides; `prefer` = the app's `default_profile_id`, user may still override; `force` = the app's profile always. `custom` (the app opting out of profiles and carrying its own `default_width/height/fps/bitrate_kbps`) is gone: under the two-object model every app points at a launch profile, and `custom` was also the one mode that could not express a codec. **The `default_*` columns above stay** — they are the `display_stream` COALESCE fallback when no launch profile resolves, they are what `LaunchConsoleSession` uses unconditionally, and they are the ceiling on the `POST /v1/sessions` stream-override escape hatch, which is reachable for **any** app. |
 | *(no column)* | — | *(UI-P5, migration 0037)* the app's **launchable launch-profile allow-list** lives in the join table **`app_launch_profiles`**, not on this row. Empty = unrestricted = the pre-UI-P5 behaviour of every app. `default_profile_id` above is implicitly always included in it and is deliberately not duplicated there. |
@@ -1160,6 +1161,7 @@ signaling (P1-D).
 | `parked_until` | `TIMESTAMPTZ` NULL | *(Amendment 39, #759, migration 0105)* when a parked session expires: set to now plus `instance_settings.steam_warm_idle_minutes` at creation and by each library heartbeat. The `session.parked_expire` job stops a parked row past it. `NULL` on every play row. Not served. |
 | `launch_progress` | `JSONB` NULL | *(Amendment 39, #759, migration 0105)* the agent's last accepted `session_state.launch_progress` (`agent-api.md`), exactly `{"step":"shaders","percent":<integer 0–100>}`; validated by the control plane, not by a CHECK. Written only while the session is `running` with `state_detail = 'app booting'`, and cleared (`NULL`) when the detail leaves `app booting`. Served as `Session.launch_progress`. |
 | `adopt_session_id` | `UUID` NULL | *(Amendment 39, #759, migration 0105)* the session whose runtime this one adopts: the parked id on a claim's play row, the ended play id on a parked row made by a park on exit. Partial unique index `sessions_one_adopter`: at most one row adopts a runtime. No foreign key. The managed-home hold stays on that id until this row's first non-terminal agent report, or passes to this row on that id's cleanup proof while this row is live (`control-api.md` §Warm Steam, "Claim"). `NULL` on every other row. Not served. |
+| `shared_home_app_id` | `UUID` NULL → `apps(id)` **ON DELETE SET NULL** | *(Amendment 53, #1001, migration 0110, signed off 2026-10-31.)* the Steam app whose home this session also mounts; `NULL` = none. Written once by the placement transaction, under the per-user lock. A swap does not change it; only the FK sets it to `NULL` when the Steam app is deleted, which is refused while the session is live. **Every storage-keyed in-use guard counts it**: a live session holds `parent_app_id ?? id` of its app **and** this app's home (the single-writer launch and swap guard, whose self-exclusion on a swap never covers this home; the home-tombstone guard; claim release; the GC claim cleanup; app delete). Partial index `sessions_shared_home_live_idx ON sessions (user_id, shared_home_app_id) WHERE shared_home_app_id IS NOT NULL AND state NOT IN ('stopped','failed')`. |
 | **launch params** | | drive the P1-5 pipeline; default from `apps` then overridable per launch. |
 | `width` | `INT` NOT NULL | |
 | `height` | `INT` NOT NULL | |
@@ -2564,6 +2566,15 @@ an edit to `0001`). The default applies to existing rows, so no backfill is need
 committed SQL in `migrations/` is the authoritative DDL — this document is its prose companion;
 if they ever disagree, that is a bug to fix under sign-off, not a silent divergence.
 
+### 0110 — share the user's Steam library *(Amendment 53, #1001, signed off 2026-10-31.)*
+
+Adds `apps.share_steam_library BOOLEAN NOT NULL DEFAULT false` with
+`apps_share_steam_library_ck`, and `sessions.shared_home_app_id UUID NULL REFERENCES apps(id)
+ON DELETE SET NULL` with `sessions_shared_home_live_idx`. No data change: every existing app
+shares nothing. The down refuses while a session with `shared_home_app_id` is live (without the
+column the single-writer guard stops counting it); after a refusal, end those sessions, run
+`migrate … force 110`, then the down again. It then drops the index, both columns and the CHECK.
+
 
 ## Steam preparation persistence (2026-09-06, Quasar #145)
 
@@ -3309,6 +3320,22 @@ The home ID is a historical dispatch identity, deliberately not a foreign key:
 home GC may delete its `user_homes` row, and materialization independently
 requires that row to be live at the running transition.
 The 0090 down migration drops both columns before `managed_home_claims`.
+
+*(Amendment 53, #1001, signed off 2026-10-31.)* A session with `shared_home_app_id` binds and holds two claims. Placement and
+dispatch lock the session's own claim and home rows, then the shared claim and its home rows;
+before claiming a shared home that has no claim and no `user_homes` row yet, placement also share-locks the Steam app's `app_placement` row, after its own claim and home rows and before the shared claim. This
+is an exception to the ascending claim-key order above, and it cannot deadlock: every other writer
+that locks the shared claim either locks no other claim (a Steam-family launch, tombstone, GC
+confirm, claim release, the release of an unused shared claim) or locks the session row first
+(terminal reconciliation, dispatch, user and app deletion); a placement edit locks no claim, and meets a sharing launch's locks only through the image fence, when the desktop app runs the Steam app's own image (Postgres then aborts one of the two); and a
+placement or dispatch that finds the shared claim held by another session stops before it locks
+anything after it. Dispatch checks that the shared claim is on the assigned host and not held by
+another session, and that the dispatch's last mount is the shared mount for the live `user_homes`
+row, with the session's own managed-home mount before it. For a cleanup-capable dispatch it sets
+the shared claim's `pending_home_session_id` with the **same** `pending_home_token` as its own.
+For one that is not, it marks the shared claim `legacy_unprotected_dispatch`, as it marks its own.
+The shared mount is not part of the managed-home digest. A proved-unstarted release clears every
+claim held under the token; the qualified terminal clears every claim the session holds.
 
 Backfill 0090 from known `user_homes` locations only. A unique live legacy
 location becomes `reserved` on its known host, not `materialized`, because a

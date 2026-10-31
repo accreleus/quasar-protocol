@@ -3667,6 +3667,13 @@ well-formed and authorized; the server simply has no room to place it now.
 > NOT spend its automatic retry on it and SHOULD show its own copy. `reason` is an open string:
 > a client treats a value it does not know as absent.
 
+*(Amendment 53, #1001, signed off 2026-10-31.)* `reason` is also set on `409 home_in_use`: `steam_library_open_in_desktop`
+when the holder mounts the Steam library as a shared home, `steam_game_running` when the refused
+launch shares the library and a Steam-family session holds it. It is absent when the holder is
+already `stopping`, and on every other `home_in_use`. `home_host_unavailable` also covers a
+sharing launch pinned to the host of the caller's Steam home (§Storage, "A shared Steam
+library").
+
 ### `GET /v1/sessions/{id}` — poll lifecycle
 ```json
 // 200
@@ -5544,6 +5551,99 @@ Storage usage is **visibility-only** in this amendment: `bytes_used` is reported
 surfaced (admin + self reads below) but nothing enforces a cap. A per-user quota, if ever
 wanted, is a later additive amendment (one column + one error code).
 
+### A shared Steam library *(Amendment 53, #1001, signed off 2026-10-31.)*
+
+> *Additive. One app field, one session field, one launch-response field, two `home_in_use`
+> reasons and one migration (`schema.md` 0110). `agent-api.md` is byte-identical: the extra
+> mount rides in the opaque `app.mounts` array like the managed home.*
+>
+> The agent treats a mount whose container target lies inside another home mount's target as no
+> second home: it creates it, owned by the app user, and never seeds, measures or counts it. An
+> agent before this release does not, so turn sharing on only once every host runs this release.
+
+An admin may set `share_steam_library` on an app (`AppWrite`, `AdminApp`; default `false`).
+It is refused with `400 validation_failed` on a derived tile and on a library provider app.
+It takes effect only on a managed-home app; the admin editor offers it on desktop apps.
+
+**What a sharing session mounts.** The **user's Steam app** is the one enabled, root,
+`library_provider = 'steam'`, managed-home app the caller is entitled to (the warm-Steam
+choice); with none, or more than one, nothing is shared and the `201` carries the notice. A
+sharing launch carries, after its own managed-home mount, one more mount:
+
+    {steam home ref}/.local/share/Steam:{home_container_path}/.local/share/Steam:rw
+
+`{steam home ref}` is the `user_homes.ref` of the user's Steam app on the session's host. When
+the user has neither a Steam home nor a Steam claim, the control plane creates its `user_homes` row and claim on the
+session's host, but only when the Steam app's placement selects that host; otherwise the launch
+runs without sharing, with the notice. A Steam home created this way is not seeded from the
+Steam golden home, and its claim stays `reserved` until a Steam-family session runs on it. The
+session's own managed-home binding (`managed_home_id`, its digest) is unchanged. The session
+row records the Steam app in `shared_home_app_id`.
+
+**Same host.** A sharing launch runs on the host of its own home. When the desktop has no home
+yet and the Steam home exists, the launch is pinned to the Steam home's host if the desktop
+app's placement selects it; while that host is offline or no longer enrolled the launch is
+refused `503 no_host_available`, `reason: home_host_unavailable`, as a launch pinned to its own
+home is (Amendment 40). The launch runs **without** sharing, and the `201` carries a `notice`
+(below), when the Steam home is on a different host from the desktop's home, when the desktop
+has no home and its placement does not select the Steam home's host, when the caller has neither a Steam home nor a Steam claim and the Steam app's placement does not select the launch's host, when the Steam home
+needs operator review or its hold will not clear by itself, or when the caller has no Steam app.
+Nothing is moved.
+
+**One Steam at a time.** No two sessions ever mount one Steam data dir at once. A session
+holds the home it mounts as a shared home exactly as it holds its own:
+
+- the single-writer guard (launch and swap) counts a live session whose `shared_home_app_id`
+  is the home-owning app. So while a sharing session is live, every Steam-family launch or swap
+  (the parent and every tile) and every sharing launch of another app is `409 home_in_use`
+  naming it, `reason: steam_library_open_in_desktop`. That includes a swap of the sharing
+  session itself into the Steam family, which names the session itself. A second launch of the
+  same desktop app collides on its own home first and gets the ordinary `home_in_use`, with no
+  `reason`;
+- a sharing launch is refused `409 home_in_use` while a Steam-family play session is live,
+  naming it, `reason: steam_game_running` (message "Close your Steam game first.");
+- while the caller's own **parked** Steam (§Warm Steam) holds the library it is superseded, and
+  the launch answers the retryable `503 capacity_exhausted` with `Retry-After`, as a family
+  launch does; a released held runtime (§Warm Steam, "Park on exit") answers the same `503`.
+  Once the parked session has stopped, the launch waits for its home hold to clear for the same
+  bounded time as any launch waiting on a settling hold, then answers `409 home_conflict` if the
+  hold has not cleared;
+- a sharing session takes the Steam claim's pending-home hold together with its own, under one
+  token; the agent's qualified terminal for the session clears both (RH05, `schema.md`);
+- the home-tombstone, claim-release, GC claim-cleanup and app-delete in-use checks count it too;
+- when the control plane fails a sharing launch before its assignment reaches the agent, it deletes
+  the Steam claim if that claim is `reserved` with no hold, no home row of the Steam family exists,
+  and no live session uses it.
+
+A `home_in_use` naming a session that is already `stopping` keeps the existing "still shutting
+down" message and carries no `reason`.
+
+When the sharing session ends, warm Steam re-warms by its existing setting
+(`steam_warm_rewarm`); nothing else changes.
+
+Only `POST /v1/sessions` shares. A console auto-start (§Console mode) never shares. A swap
+neither adds nor drops a shared home: a swap target is dispatched with its own managed home
+only, and the session keeps `shared_home_app_id`, and its hold on the Steam claim, until it
+ends.
+
+`shared_home_app_id` on the session read (`Session`): the Steam app whose library the session
+mounts, `null` otherwise. Always serialized. A client marks that app's family in use (as it does
+for a live session's own family) and may render it dimmed.
+
+`notice` on the `POST /v1/sessions` `201`: present only when the app shares and the launch runs
+without the library; omitted, never empty.
+
+```json
+{ "session": { … }, "signaling": { … },
+  "notice": { "code": "steam_library_not_shared",
+              "message": "Your Steam library is on another host" } }
+```
+
+`message` is display text: `"Your Steam library is on another host"` when the Steam home is on a
+host this launch cannot run on (the homes are on different hosts, or the desktop has no home and
+its placement does not select the Steam home's host), `"Your Steam library could not be shared
+with this desktop"` otherwise. A client shows `message` and never branches on it.
+
 ### `GET /v1/admin/storage/homes` — list managed homes (admin)
 Query: `user_id`, `app_id`, `pending_gc` (bool) — all optional filters. Paginated like
 `GET /v1/users`.
@@ -5813,6 +5913,12 @@ Nesting an extra field inside the error object is the existing idiom (`live_sess
 >
 > Switching games *inside* a live session is the desirable end state and is future work; it is not
 > smuggled in here.
+
+*(Amendment 53, #1001, signed off 2026-10-31.)* The lock also covers a session that mounts the parent's home as a shared home
+(§Storage, "A shared Steam library"): while a sharing session is live the whole family is
+refused, naming that session, with `reason: steam_library_open_in_desktop`. A client renders it
+as "Your Steam library is open in the desktop. Close the desktop first." and, as for a live
+family member, may mark the family blocked from `Session.shared_home_app_id`.
 
 **`409 home_not_provisioned`** — *new.*
 
