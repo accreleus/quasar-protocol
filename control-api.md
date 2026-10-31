@@ -3224,6 +3224,7 @@ null when the actor row is gone or the event had no actor) and a server-derived
 `app.delete` · `app.entitlement.{grant,revoke,set_mode}` · `app.artwork.{set,upload,cleared,reresolve}` ·
 `app.library.rule.{set,delete}` · `library.scan.force` · `runtime_preset.{create,update,delete}` ·
 `stream_profile.*` · `launch_profile.*` · `host.{drain,uncordon,delete,restart}` ·
+`host.recovery.release` *(amendment 51)* ·
 `host.settings.update` · `console.config.update` · `storage.home.tombstone` · `storage.gc.confirm` ·
 `session.{stop,capture,launched,failed}` · `job.{run,update}` · `instance.secret.{set,cleared}` ·
 `instance.settings.updated` · `user.{role_changed,disabled,enabled,quota_changed,deleted}` ·
@@ -9985,6 +9986,73 @@ reload. An unswept expiry can still read as `waiting` with its hold; approval
 replay and dispatch check expiry synchronously and refuse it. A sweep settles
 the durable state without ever treating time expiry as agent nonacceptance for
 an offered or restored approval.
+
+### Releasing a recovery hold (amendment 51, #656)
+
+`POST /v1/admin/hosts/{id}/idle-apply/{attempt_id}/release-recovery` is the
+explicit repair of an `uncertain` restart attempt and its `recovery` admission
+hold. Admin only. The body is exactly `{"acknowledge":"unverified"}`: the
+administrator states that the host's configuration was never verified. Any other
+body, a missing or different `acknowledge`, an unknown field, trailing data, or a
+malformed host or attempt UUID is `400 validation_failed` and writes nothing. An
+attempt that is not a restart attempt of that host is `404 not_found`; one that
+is neither `uncertain` nor `released` is `409 attempt_not_uncertain`. Neither
+writes anything.
+
+The request lifts nothing by itself. For an `uncertain` attempt the control
+plane durably records the request (`schema.md` 0109; repeating it keeps the first
+time), writes the audit event `host.recovery.release` (target the host, details
+`attempt_id` and `acknowledge`) for the first request only, and answers `202`
+with the `IdleApplyAttempt` (`200` if the agent's `released` report has already
+been recorded). It sends `config_policy_release` (`agent-api.md`)
+whenever the host's current connection has a reconciled journal and advertised
+`recovery_release`: at once, after every later reconciliation, and again on a
+repeated request. For an attempt already `released` it answers `200` with the
+attempt and sends nothing.
+
+`IdleApplyAttempt` gains `recovery_release`: `null` unless a release was
+requested or the attempt is `released`; otherwise
+`{"state":"pending"|"released","requested_at":<time|null>,"waiting_for":<code|null>}`.
+`requested_at` is null only for an attempt reconciled as `released` from an agent
+journal the database had no request for (a restored database). While pending,
+`waiting_for` is `agent_connection` (no connected agent that holds the
+`hardware` restart grant with a reconciled journal; nothing is sent to one
+without the grant), `agent_upgrade` (the connected agent did not advertise
+`recovery_release`; the release waits for an agent that does), or
+`agent_report` (sent, not yet reported); it is null once released. The phase
+enum gains `released`.
+
+While the release is pending, everything an `uncertain` attempt holds stays as
+it is: its `recovery` restriction, its setting group's `uncertain` status, and
+every refusal keyed on either (new restart approvals, the legacy restart guard,
+conflicting jobs). The host stays `draining`.
+
+Only the agent's report of the attempt as `released`, live or in a complete
+journal inventory, ends it. In the transaction that records that phase, the
+control plane:
+
+1. deletes that attempt's `recovery` (and any `idle_apply`) restriction row;
+2. moves the attempt's setting group from `uncertain` to `failed` when its
+   desired revision and digest are still the attempt's, so the group can be
+   reviewed and approved again (a fresh preview and approval; nothing is offered
+   by the release itself);
+3. recomputes `hosts.status` as every owner-scoped release does: `draining` while
+   any other restriction remains, which turns an `online` host `draining`;
+   otherwise a `draining` host becomes `online` if the agent is connected and no
+   disconnect is recorded, else `offline`; any other status is unchanged;
+4. rotates the host's approval review IDs, since an unresolved disruptive hold
+   resolved.
+
+A journal replay accepts `uncertain` → `released` for that attempt at a higher
+sequence, the one move out of a final phase; an exact replay of `released`
+changes nothing. A `released` entry for an attempt the database still holds as
+`uncertain` without a request (a database restored from before the request) is
+accepted the same way, because the agent writes it only on this command and a
+quarantine would leave that host held with no repair. The agent is trusted to
+report `released`, as it is trusted for every other phase of its own journal;
+`release_requested_at` is a retry and durability aid, not an authorization check.
+The release sends nothing else to the agent and changes nothing on the host
+machine.
 
 ### Active admission reasons on the existing Host response
 

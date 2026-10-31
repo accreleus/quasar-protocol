@@ -2897,6 +2897,8 @@ An agent advertises `"config_policy_versions":{"typed_settings":2,
 "deployment_baseline":1},"config_policy_groups":["idle_timeout_secs"]` on
 `register`, alongside the existing `source_policy_versions` object. Each
 version member is independently versioned; omission means unsupported.
+*(Amendment 51, #656.)* `"recovery_release":1` means the agent takes
+`config_policy_release` (§Releasing an uncertain restart record).
 `typed_settings:2` requires a sorted, unique `config_policy_groups` array of
 group keys: `hardware` owns `encoder`, `render_node` and `cuda_device`;
 every other catalog key names its own group. The advertisement is replaced on
@@ -3175,7 +3177,8 @@ UTF-8 UUID, one NUL byte, its current journal phase, one LF byte; concatenate
 and SHA-256 the bytes. The empty set hashes the empty
 byte sequence. Current phases are `accepted`, `activating`, `awaiting_startup`,
 `verifying`, `applied`, `failed`, `recovery_verifying`,
-`recovery_awaiting_startup`, `recovered`, and `uncertain`. An unknown phase,
+`recovery_awaiting_startup`, `recovered`, `uncertain`, and *(amendment 51)*
+`released`. An unknown phase,
 missing record, or incomplete inventory makes the fact indeterminate and
 blocks approval. An agent rejects a missing or mismatched fact before durable
 acceptance, including when the grant claims the empty set but its journal has
@@ -3340,8 +3343,9 @@ historical grant identity and requested revision/digest remain unchanged.
 `grant_*` fields identify the historical grant and are retained across reconnect
 or process restart. Phases are `accepted`, `activating`, `awaiting_startup`,
 `verifying`, `applied`, `failed`, `recovery_verifying`,
-`recovery_awaiting_startup`, `recovered`, `uncertain`, and
-`revoked_unstarted`. The control plane's `offered` phase means a grant was
+`recovery_awaiting_startup`, `recovered`, `uncertain`,
+`revoked_unstarted`, and *(amendment 51)* `released`, which follows only
+`uncertain`. The control plane's `offered` phase means a grant was
 sent, not accepted. Each state carries the same attempt identity and an increasing
 `journal_sequence` per attempt. A repeated sequence with byte-identical content
 is idempotent; conflicting content at one sequence is rejected. A higher sequence
@@ -3529,8 +3533,54 @@ their original revision and digest; reseeding never reactivates them.
 An idle operation owns only its admission restriction. It releases that hold
 after confirmed nonacceptance or a safe terminal/recovered outcome; manual and
 platform holds remain independent. An uncertain started attempt retains its
-protective hold until verified reconciliation or explicit repair. A waiting
+protective hold until explicit repair (amendment 51). A waiting
 operation never kills sessions to reach idle and has no deadline that does so.
+
+*(Amendment 51, #656.)* `uncertain` is final: a later journal entry for that
+attempt quarantines the inventory rather than replacing it, so no journal of the
+attempt's own execution ends this hold. It ends only by an administrator's
+explicit repair (`control-api.md` "Releasing a recovery hold"), which reaches the
+agent as `config_policy_release` below and returns as the one later entry the
+control plane accepts, `released`. The control plane never clears the hold on
+its own or by elapsed time.
+
+#### Releasing an uncertain restart record (amendment 51, #656)
+
+```json
+{
+  "type": "config_policy_release", "attempt_id": "<uuid>",
+  "boot_incarnation": "<uuid>", "connection_incarnation": "<uuid>"
+}
+```
+
+The control plane sends `config_policy_release` only to an agent that advertised
+`config_policy_versions.recovery_release:1` and was granted the `hardware`
+restart group on the current connection, and only after that connection's
+complete journal inventory is reconciled. It sends it again after every later
+reconciliation, and when the administrator repeats the request, until the
+agent reports the attempt `released`. An agent without the capability never
+receives it; its release stays pending.
+
+Under the host-wide operation lock the agent:
+
+- replies `config_policy_feature_error` with `code:"stale_release_request"`
+  when `boot_incarnation` or `connection_incarnation` is not its current one;
+- replies `code:"release_refused"` unless its journal holds `attempt_id` as a
+  restart-scope record in `uncertain` or `released`;
+- for an `uncertain` record, fsyncs it as phase `released` at the next journal
+  sequence, keeping its grant identity, revision, digest and error, and only then
+  replies `config_policy_state` with that phase and sequence (`active_scope` and
+  `evidence` null). If that write fails it replies `code:"journal_write_failed"`
+  and keeps reporting `uncertain` until a boot reads whichever write held;
+- for a `released` record, replies the same `config_policy_state` again
+  without writing.
+
+None of these feature errors asks for a reconnect. `released` activates nothing
+and proves nothing: the running configuration stays as it was, unverified, and
+the active snapshot does not change. It is final and open for nothing: it does
+not exclude new restart-scope offers, it does not hold session readiness (an
+`uncertain` record does), and a boot leaves it as it is. Inventory pages list it
+like every other record.
 
 **Existing-behavior amendment.** The older `config_update` and `restart`
 paragraphs above describe the legacy settings writer. For a typed-owned group,
