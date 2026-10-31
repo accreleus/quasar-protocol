@@ -5558,7 +5558,7 @@ wanted, is a later additive amendment (one column + one error code).
 > mount rides in the opaque `app.mounts` array like the managed home.*
 >
 > The agent treats a mount whose container target lies inside another home mount's target as no
-> second home: it creates it, owned by the app user, and never seeds, measures or counts it. An
+> second home: it creates it, owned by the app user (nothing when that user's uid or gid is 0), and never seeds, measures or counts it. An
 > agent before this release does not, so turn sharing on only once every host runs this release.
 
 An admin may set `share_steam_library` on an app (`AppWrite`, `AdminApp`; default `false`).
