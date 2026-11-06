@@ -116,13 +116,13 @@ For a PyroWave configuration, `video` is:
   | `color_space` | PyroWave header |
   |---|---|
   | `primaries: "bt709"` | `color_primaries = SRGB` (0) |
-  | `transfer: "bt709"` | `transfer_function = SRGB` (0), the bitstream spec's SDR curve |
+  | `transfer: "bt709"` | `transfer_function = SRGB` (0), the bitstream spec's SDR curve; for this codec `bt709` here means that curve (WebCodecs `iec61966-2-1`) by definition |
   | `matrix: "bt709"` | `ycbcr_transform = BT709` (0) |
   | `full_range: true` / `false` | `ycbcr_range = FULL` (0) / `LIMITED` (1) |
 
   PyroWave has no BT.601 matrix, so `smpte170m` is never used for it: the agent converts the
   compositor's RGB to YCbCr with BT.709 for every PyroWave configuration, whatever the standard
-  codec signals. Only `full_range` may differ between configurations. HDR (BT.2020, PQ) is a
+  codec signals. Only `full_range` may differ between PyroWave configurations. HDR (BT.2020, PQ) is a
   later amendment.
 - `retransmit_window_ms` is present, as in every `hello_ack` (a re-sent one repeats every field),
   and keeps the standard codec's value: it applies only to standard-codec frames. PyroWave frames
@@ -281,7 +281,7 @@ frame (`maximum_bitstream_size`), and the frame lands within it.
   plane:
 
   ```
-  target_kbps = min(height_default × fps / 60, pyrowave_kbps ?? 1 000 000)
+  target_kbps = min(floor(height_default × fps / 60), pyrowave_kbps ?? 1 000 000)
   height_default = 200 000 if launch height ≤ 1080, 300 000 if ≤ 1440, else 400 000   (kbit/s)
   ```
 
@@ -300,8 +300,9 @@ frame (`maximum_bitstream_size`), and the frame lands within it.
   the target is unchanged.
 - **Seeding.** When PyroWave starts on a connection and at every switch on, the agent **seeds its
   estimate at `target_kbps`**, whatever the estimate was under the standard codec (a 20 Mbit/s
-  H.264 stream says nothing about a 200 Mbit/s link). From there the estimate only **falls** on
-  loss or delay signals (`feedback`, or QUIC's congestion state); it never rises above the target.
+  H.264 stream says nothing about a 200 Mbit/s link). From there it drops below the target only
+  on loss or delay signals (`feedback`, or QUIC's congestion state), recovers as they clear, and
+  never exceeds the target.
 - **One controller per codec.** `transport-webtransport.md` §Feedback says the estimate feeds the
   session's ABR and there is no second bitrate controller. For a PyroWave session that rule is
   overridden: while PyroWave is active its per-session rate controller (this section) is the one
