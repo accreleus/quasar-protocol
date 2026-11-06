@@ -191,12 +191,16 @@ does for it:
   refuses every other stream (unidirectional, or a second bidirectional one) with
   `STOP_SENDING`/`RESET_STREAM`, before and after `hello_ack`.
 - It **drops every datagram** that arrives before it has sent `hello_ack`, and **sends no datagram**
-  before it, so QUIC's anti-amplification limit (three times what the client sent) bounds its
-  output until the client is authenticated.
+  before it, so before authentication it sends nothing beyond the QUIC/WebTransport handshake and
+  its reply to `hello`. (QUIC's anti-amplification limit stops applying once the handshake
+  validates the client's address, which is before `hello`; it is not what bounds this.)
 - It closes the connection (`4400`) when no complete `hello` has arrived **5 s** after the
   WebTransport session was established, and on a control message over 64 KiB (§Channels).
 - It holds at most **64 unauthenticated connections** per host by default (agent-configured); past
-  that it refuses new WebTransport sessions until one authenticates or closes.
+  that it refuses new WebTransport sessions until one authenticates or closes. It MAY also cap
+  unauthenticated connections per source address, so one source reconnecting every 5 s cannot
+  hold every slot; behind an edge proxy all clients share the proxy's address, so this cap is
+  optional and agent-configured.
 
 The client sends nothing but `hello` (and then waits) until it receives `hello_ack`.
 
