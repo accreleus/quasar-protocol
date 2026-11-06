@@ -1824,6 +1824,26 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "503": { description: "agent_not_connected — the session's host agent is reconnecting. RETRYABLE: the session is alive and its media may still be flowing; retry with backoff rather than treating this as terminal." , content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /v1/sessions/{id}/transport-token:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [sessions]
+      summary: Mint a fresh WebTransport token for the same live session (amendment 54).
+      description: >-
+        Amendment 54 (accreleus/quasar#1026). Mirrors POST /v1/sessions/{id}/signaling-token:
+        owner only, states assigned/starting/running, independent single-use tokens. The endpoint
+        URL and certificate hashes are resolved again at mint time. The 201 is sent only after the
+        agent acked the token's hash (agent-api.md session_transport_token).
+      responses:
+        "201":
+          description: Independent single-use transport token created.
+          content: { application/json: { schema: { $ref: "#/components/schemas/TransportEnvelope" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "session_not_reconnectable (terminal or stopping), or transport_unavailable (the session's transport is webrtc, or its host's WebTransport endpoint is no longer usable; use signaling-token instead)."
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "503": { description: "agent_not_connected — the agent is reconnecting or did not ack within 5 s. RETRYABLE." , content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /v1/sessions/{id}/swap:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
@@ -3436,6 +3456,32 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: "restart_required (live sessions, confirm != true), conflict (host offline), or attempt_conflict (open/uncertain RH05 attempt or incomplete journal reconciliation)." , content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /v1/admin/hosts/{id}/webtransport:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin]
+      summary: Read a host's WebTransport endpoint, its override and the resolved endpoint (amendment 54).
+      x-required-role: admin
+      responses:
+        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/HostWebTransport" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [admin]
+      summary: Set or clear a host's public WebTransport URL (edge proxy) (amendment 54). Audited as host.webtransport.update.
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostWebTransportWrite" }
+      responses:
+        "200": { description: New state. , content: { application/json: { schema: { $ref: "#/components/schemas/HostWebTransport" } } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /v1/admin/hosts/{id}/console-config:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     get:
@@ -5431,6 +5477,15 @@ components:
             Amendment 53 (#1001): the Steam app whose library this session mounts, null otherwise.
             Always serialized. While that session is live, every launch of that app's family is
             409 home_in_use. A client may mark that family in use.
+        transport:
+          allOf: [ { $ref: "#/components/schemas/Transport" } ]
+          description: "Amendment 54: the transport the stream plan chose. Always serialized by a server implementing the amendment; absent from an older one, read as webrtc."
+        transport_reason:
+          type: [string, "null"]
+          description: "Amendment 54: why a wanted WebTransport was not chosen (profile_disallows, host_no_endpoint, device_no_webtransport, device_no_webcodecs; an open string), else null. Absent from an older server."
+        transport_fallback_reason:
+          type: [string, "null"]
+          description: "Amendment 54: the reason in the latest transport.fallback trace event the client posted, else null. Observability only. Absent from an older server."
         created_at: { type: string, format: date-time }
         started_at: { type: [string, "null"], format: date-time }
         ended_at: { type: [string, "null"], format: date-time }
@@ -5515,6 +5570,7 @@ components:
         profile_id: { type: string, description: "User-facing selector (AS10-03)." }
         client_type: { type: string, enum: [browser, native], description: "Absent ⇒ browser." }
         mic: { type: boolean, description: "Microphone capture request (2026-08-02). Absent ⇒ false. Granted only when instance setting mic_capture_enabled is on; an ungranted request is not an error — the session stream body reports the granted state." }
+        transport: { $ref: "#/components/schemas/TransportPreference" }
         stream:
           type: object
           description: "Admin/debug/back-compat override; beats profile_id field-by-field."
@@ -5531,6 +5587,7 @@ components:
       properties:
         session: { $ref: "#/components/schemas/Session" }
         signaling: { $ref: "#/components/schemas/SignalingCoords" }
+        transport_options: { $ref: "#/components/schemas/TransportOptions" }
         notice:
           type: object
           required: [code, message]
@@ -5565,6 +5622,107 @@ components:
           items: { type: string }
         username: { type: string, description: "TURN username. Present for turn:/turns: entries, absent for stun:/stuns: (STUN has no authentication)." }
         credential: { type: string, description: "TURN credential. Present for turn:/turns: entries. Readable by every authenticated user who launches a session, which is inherent to browser TURN — deployments should issue ephemeral, time-limited credentials rather than a shared static password." }
+    TransportPreference:
+      type: string
+      enum: [webrtc, webtransport]
+      description: >-
+        Amendment 54 (accreleus/quasar#1026): the client's transport preference on POST
+        /v1/sessions. Absent means the launch profile decides. Honoured only as the profile's
+        transport allows (control-api.md §Transport); WebRTC is always the floor.
+    Transport:
+      type: string
+      enum: [webrtc, webtransport]
+      description: "Amendment 54: the transport the stream plan chose for a session."
+    LaunchProfileTransport:
+      type: string
+      enum: [webrtc, webtransport_opt_in, webtransport]
+      description: >-
+        Amendment 54: whether a launch profile's sessions may use WebTransport. webrtc = never;
+        webtransport_opt_in = only when the launch request asks for it; webtransport = unless
+        the launch request asks for webrtc.
+    TransportOptions:
+      type: object
+      description: >-
+        Amendment 54 (accreleus/quasar#1026): the coordinates for the session's WebTransport
+        transport. On the POST /v1/sessions 201 it is present only when session.transport is
+        webtransport (omitted otherwise, never null), beside the signaling block that is the
+        client's fallback. It is also the body of POST /v1/sessions/{id}/transport-token
+        (TransportEnvelope), freshly resolved and minted.
+      required: [webtransport]
+      properties:
+        webtransport: { $ref: "#/components/schemas/WebTransportCoords" }
+    WebTransportCoords:
+      type: object
+      required: [url, token, expires_at, cert_hashes]
+      properties:
+        url: { type: string, description: "Opaque https URL; pass to new WebTransport(url) unchanged. The agent's listener (direct) or an admin-set public URL (edge)." }
+        token: { type: string, description: "Transport token: single-use, 60 s, plaintext in this response only, presented in the WebTransport hello (transport-webtransport.md), never in the URL. Never accepted by /v1/signal." }
+        expires_at: { type: string, format: date-time }
+        cert_hashes:
+          type: array
+          maxItems: 2
+          description: "serverCertificateHashes for a direct endpoint: the agent's unexpired self-signed certificates (current and, during a rotation, next). Empty for an edge endpoint or a publicly trusted certificate."
+          items: { $ref: "#/components/schemas/CertHash" }
+    CertHash:
+      type: object
+      required: [algorithm, value]
+      properties:
+        algorithm: { type: string, enum: [sha-256] }
+        value: { type: string, description: "Base64 SHA-256 of the certificate's DER encoding." }
+    TransportEnvelope:
+      type: object
+      required: [transport_options]
+      properties:
+        transport_options: { $ref: "#/components/schemas/TransportOptions" }
+    WebTransportCertificate:
+      type: object
+      required: [sha256, not_before, not_after]
+      properties:
+        sha256: { type: string, description: "Base64 SHA-256 of the DER certificate." }
+        not_before: { type: string, format: date-time }
+        not_after: { type: string, format: date-time }
+    HostWebTransport:
+      type: object
+      description: "Amendment 54: a host's WebTransport endpoint as reported, its admin override, and the endpoint the control plane resolves from them."
+      required: [reported, override, endpoint, usable, reason]
+      properties:
+        reported:
+          type: [object, "null"]
+          description: "The agent's capacity.transports and capacity.webtransport; null until it reports webtransport."
+          required: [transports, port, addresses, certificates]
+          properties:
+            transports: { type: array, items: { $ref: "#/components/schemas/Transport" } }
+            port: { type: integer, minimum: 1, maximum: 65535 }
+            addresses: { type: array, items: { type: string } }
+            certificates: { type: array, maxItems: 2, items: { $ref: "#/components/schemas/WebTransportCertificate" } }
+        override:
+          oneOf:
+            - { $ref: "#/components/schemas/HostWebTransportOverride" }
+            - { type: "null" }
+        endpoint:
+          type: [object, "null"]
+          description: "The resolved endpoint; null when not usable."
+          required: [url, mode, cert_hashes]
+          properties:
+            url: { type: string }
+            mode: { type: string, enum: [direct, edge] }
+            cert_hashes: { type: array, items: { $ref: "#/components/schemas/CertHash" } }
+        usable: { type: boolean }
+        reason:
+          type: [string, "null"]
+          description: "Why the endpoint is not usable: not_reported, host_offline, no_address or certificate_expired (an open string); null when usable."
+    HostWebTransportOverride:
+      type: object
+      required: [public_url, certificate]
+      properties:
+        public_url: { type: string, maxLength: 2048, description: "Absolute https URL with a host, no user info, no fragment." }
+        certificate: { type: string, enum: [public, agent], description: "public: the URL presents a publicly trusted certificate (edge proxy), no hashes sent. agent: it presents the agent's own, hashes sent." }
+    HostWebTransportWrite:
+      type: object
+      required: [public_url]
+      properties:
+        public_url: { type: [string, "null"], maxLength: 2048, description: "Absolute https URL, or null to clear the override." }
+        certificate: { type: string, enum: [public, agent], description: "Default public." }
     SignalingEnvelope:
       type: object
       required: [signaling]
@@ -8253,6 +8411,9 @@ components:
           type: array
           minItems: 1
           items: { $ref: "#/components/schemas/LaunchProfileRung" }
+        transport:
+          allOf: [ { $ref: "#/components/schemas/LaunchProfileTransport" } ]
+          description: "Amendment 54. Always serialized by a server implementing the amendment; absent from an older one, read as webrtc."
         used_by: { $ref: "#/components/schemas/LaunchProfileUsedBy" }
         warnings:
           type: array
@@ -8274,6 +8435,9 @@ components:
         description: { type: string }
         visibility: { type: string, enum: [user, debug, internal] }
         sort_order: { type: integer }
+        transport:
+          allOf: [ { $ref: "#/components/schemas/LaunchProfileTransport" } ]
+          description: "Amendment 54. Absent on POST = webrtc; absent on PATCH = unchanged."
         rungs:
           type: array
           minItems: 1

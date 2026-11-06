@@ -1175,6 +1175,8 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `GET /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* read a host's resolved settings + overrides |
 | `PATCH /v1/admin/hosts/{id}/settings` | **admin** | *(host-runtime-settings)* update per-host overrides |
 | `POST /v1/admin/hosts/{id}/restart` | **admin** | *(host-observability-2)* restart the host's agent (apply pending restart-class config) |
+| `GET /v1/admin/hosts/{id}/webtransport` | **admin** | *(amendment 54, accreleus/quasar#1026)* read a host's reported WebTransport endpoint, its override and the resolved endpoint |
+| `PATCH /v1/admin/hosts/{id}/webtransport` | **admin** | *(amendment 54)* set or clear the host's public WebTransport URL (edge proxy) |
 | `GET /v1/admin/hosts/{id}/console-config` | **admin** | *(CM-01)* read a host's console-mode config + reported capabilities |
 | `PATCH /v1/admin/hosts/{id}/console-config` | **admin** | *(CM-01)* update a host's console-mode config |
 | `GET /v1/admin/sessions/{id}/trace`, `.../trace/window`, `.../trace/metrics`, `.../trace/events` | **admin** | *(ST-01)* the bounded recent session trace (samples + events + clock) |
@@ -2865,6 +2867,9 @@ unaffected by this feature.
 ] }
 ```
 
+- *(Amendment 54, accreleus/quasar#1026)* A launch profile also carries **`transport`**
+  (`webrtc` | `webtransport_opt_in` | `webtransport`, default `webrtc`): whether its sessions may
+  use WebTransport (§Transport — WebRTC and WebTransport).
 - **Order is preference.** The write shape takes an **ordered array of stream-profile ids**; the
   server assigns `position` from that order. A client does not send positions.
 - A stream profile may appear **at most once** in one launch profile (`400 validation_failed` on a
@@ -3064,6 +3069,9 @@ is the single hinge to `signaling.md`.
   }
 }
 ```
+- *(Amendment 54, accreleus/quasar#1026:)* the request takes an optional `transport`, and the
+  `201` carries `transport_options` when the session's transport is WebTransport, beside the
+  unchanged `signaling` block (§Transport — WebRTC and WebTransport).
 - *(Amendment 39, #759:)* a launch of a Steam parent app or one of its derived tiles by a caller
   who holds a parked session may adopt it rather than place a new one; the request and the `201`
   are unchanged (§Warm Steam, "Claim").
@@ -3225,6 +3233,7 @@ null when the actor row is gone or the event had no actor) and a server-derived
 `app.library.rule.{set,delete}` · `library.scan.force` · `runtime_preset.{create,update,delete}` ·
 `stream_profile.*` · `launch_profile.*` · `host.{drain,uncordon,delete,restart}` ·
 `host.recovery.release` *(amendment 51)* ·
+`host.webtransport.update` *(amendment 54)* ·
 `host.settings.update` · `console.config.update` · `storage.home.tombstone` · `storage.gc.confirm` ·
 `session.{stop,capture,launched,failed}` · `job.{run,update}` · `instance.secret.{set,cleared}` ·
 `instance.settings.updated` · `user.{role_changed,disabled,enabled,quota_changed,deleted}` ·
@@ -4092,6 +4101,222 @@ banner at the top of this document. Owner-or-admin (same rule as `DELETE`/`swap`
 
 ---
 
+## Transport — WebRTC and WebTransport *(Amendment 54, accreleus/quasar#1026, pre-approved by the owner 2026-11-06)*
+
+> *Additive. One optional launch-request field, three session fields, one optional launch-response
+> object, one launch-profile field, one owner endpoint, one admin endpoint pair, additive device-probe
+> keys, one trace event type and migration 0111 (`schema.md`). No existing shape, status code or
+> endpoint changes. The wire contract is `transport-webtransport.md`; the agent side is
+> `agent-api.md` amendment 54. An independent Opus review runs before merge.*
+>
+> **Invariant 6.** The client still talks only to the control plane for the API and all control.
+> Its **media** may connect to the agent, or to an edge in front of it, with a short-lived token
+> this API mints. The quasar-side ADR 0010 (accreleus/quasar#1027) rewords `CLAUDE.md` invariant 6
+> to that: media may connect to the agent with a control-plane-minted token; API and control never.
+
+A session's **transport** is how its media reaches the client: `webrtc` (`signaling.md`, the
+default and the guaranteed floor) or `webtransport` (`transport-webtransport.md`, experimental,
+opt-in). It is chosen once, at launch, by the stream plan, after the codec. **WebRTC is always
+available**: every launch response carries `signaling`, and a client whose WebTransport connect
+fails, or whose stream dies, falls back to it on its own (*transport fallback*).
+
+### The launch profile's `transport`
+
+`LaunchProfile` and `LaunchProfileWrite` (§Stream profiles and launch profiles) gain
+**`transport`**:
+
+| value | meaning |
+|---|---|
+| `webrtc` | the default. Sessions use WebRTC; a request for WebTransport is not honoured. |
+| `webtransport_opt_in` | WebRTC unless the launch request asks for WebTransport (the client's URL switch). |
+| `webtransport` | WebTransport (experimental) unless the request asks for WebRTC. |
+
+Always serialized on the read. Optional on the write: absent on `POST` is `webrtc`, absent on
+`PATCH` leaves it unchanged; any other value is `400 validation_failed`. Upgrading changes nothing,
+because every existing profile reads `webrtc`. Admin-only, like the rest of the launch-profile
+write path.
+
+### `POST /v1/sessions` — `transport`
+
+The request accepts an optional **`transport`: `"webrtc" | "webtransport"`**, the client's
+preference; absent means the profile decides. Any other value is `400 validation_failed`.
+
+**The choice** (a pure step of the stream plan, after the codec is resolved; it never changes the
+codec). WebTransport is wanted when the profile is `webtransport` and the request is not
+`"webrtc"`, or the profile is `webtransport_opt_in` and the request is `"webtransport"`. A request
+for `"webtransport"` on a `webrtc` profile is not an error: the session is `webrtc` with
+`transport_reason: "profile_disallows"`. A wanted WebTransport is chosen only when all of these
+hold; otherwise the session is `webrtc` and `transport_reason` says which failed first:
+
+| check | `transport_reason` |
+|---|---|
+| the placed host's WebTransport endpoint is usable (§WebTransport endpoint) | `host_no_endpoint` |
+| the launching device's fresh probe has `webtransport.available` and `webtransport.datagrams` true | `device_no_webtransport` |
+| the same probe has `webcodecs.<codec>` true for the session's codec (catalog spelling, `hevc`) and `webcodecs.opus_decode` true | `device_no_webcodecs` |
+
+A probe is fresh under the same rule as the codec clamp (§Codec resolution). Placement does not
+look at transport: a host without an endpoint is never avoided, it yields `webrtc`. A console
+session (`local_only`) and a parked session are always `webrtc`. A claim of a parked session plans
+its transport like any launch. A swap keeps the session's transport.
+
+**The `201`.** Unchanged, plus `transport_options` when the session is `webtransport` (omitted
+otherwise, never `null`):
+
+```json
+{ "session": { "...": "...", "transport": "webtransport", "transport_reason": null,
+               "transport_fallback_reason": null },
+  "signaling": { "url": "wss://<control-plane-host>/v1/signal", "token": "…",
+                 "expires_at": "…", "ice_servers": [] },
+  "transport_options": {
+    "webtransport": {
+      "url": "https://192.0.2.10:4433/wt",
+      "token": "<single-use, plaintext, this response only>",
+      "expires_at": "2026-11-06T12:01:00Z",
+      "cert_hashes": [ { "algorithm": "sha-256", "value": "<base64>" } ]
+    }
+  } }
+```
+
+- `url` is opaque: the client passes it to `new WebTransport(url, …)` unchanged.
+- `token` is the transport token: single-use, 60 s, stored hashed (`schema.md` `session_tokens`,
+  `kind = 'transport'`), plaintext only here. **Tokens do not cross:** `/v1/signal` redeems only
+  `kind = 'signaling'` rows (a transport token there is closed `4401`), and only `kind =
+  'transport'` hashes reach the agent, so a signaling token in a WebTransport `hello` is
+  `auth_failed`. An implementation test proves both directions. *(Implementation obligation,
+  accreleus/quasar#1030, A05: the control plane's signaling token store looks a token up by hash
+  alone today; it must filter on `kind = 'signaling'`.)*
+- `cert_hashes`: always serialized; the client passes it as `serverCertificateHashes` (base64
+  decoded) when it is non-empty. `[]` on an edge endpoint, or when the agent presents a publicly
+  trusted certificate.
+- `signaling` is the fallback and is minted exactly as before. A client whose fallback comes after
+  that token's TTL mints a fresh one with `POST /v1/sessions/{id}/signaling-token`.
+
+**The session body** (`Session`, every read) gains three fields, always serialized by a server
+implementing this amendment (optional in `openapi.yaml`, so a client reads an absent field as the
+pre-amendment value):
+
+- **`transport`** — `"webrtc"` or `"webtransport"`: what the stream plan chose. `"webrtc"` for every
+  earlier session.
+- **`transport_reason`** — why a wanted WebTransport was not chosen (the table above), else
+  `null`. An open string.
+- **`transport_fallback_reason`** — the reason the client last reported for falling back
+  (§Transport fallback), else `null`. An open string.
+
+### Transport fallback
+
+A client SHOULD give WebTransport a connect deadline (to the agent's `hello_ack`) well below its
+own launch give-up time, and fall back to WebRTC when it passes, when `hello` is refused
+(`transport-webtransport.md` §Hello), when its decoder cannot configure, or when the stream is
+lost and a fresh transport token does not restore it. A client that was displaced (close `4410`,
+`bye {reason: "taken_over"}`) does not fall back: it stops.
+
+**Close first.** A client that falls back closes its WebTransport session before it opens
+signaling, and sends no WebTransport `hello` for the session after that, so a late `hello` of its
+own cannot take over its WebRTC peer (`transport-webtransport.md` §Falling back to WebRTC).
+
+It reports the fallback as a trace event (§Session trace) of the new type **`transport.fallback`**:
+
+```json
+{ "ts_unix_ms": 1762400000123, "type": "transport.fallback",
+  "payload": { "from": "webtransport", "to": "webrtc", "reason": "connect_timeout" } }
+```
+
+`reason` is an open string, `^[a-z0-9_]{1,64}$`; the client's vocabulary is `connect_timeout`,
+`connect_failed`, `auth_failed`, `unsupported_version`, `takeover_rate_limited`,
+`decoder_unsupported`, `decode_error`, `stream_lost` and `internal`. On ingest the control plane
+also writes `reason` to `sessions.transport_fallback_reason` while the session is non-terminal,
+latest wins; a malformed reason is dropped. This is observability, never session state: nothing
+is decided on it. The trace allow-list (`trace-format.md`, in the quasar repository) gains the
+type.
+
+### `POST /v1/sessions/{id}/transport-token` — a fresh transport token
+
+Mints a WebTransport token for an existing session owned by the authenticated caller, for a
+reconnect (a reload, a lost connection) or a takeover from another device. Mirrors
+`POST /v1/sessions/{id}/signaling-token`: the same allowed states (`assigned`, `starting`,
+`running`), the same ownership rule and rate limits; concurrent calls produce independent tokens;
+each inserts a `session_tokens` row (`kind = 'transport'`).
+
+The control plane resolves the endpoint again (so a rotated certificate or a changed override is
+picked up), sends the token's hash to the agent (`agent-api.md` `session_transport_token`) and
+answers only after the agent's `ack{ok:true}`.
+
+**Response `201`:**
+```json
+{ "transport_options": { "webtransport": {
+    "url": "https://192.0.2.10:4433/wt", "token": "<single-use plaintext token>",
+    "expires_at": "2026-11-06T12:05:00Z",
+    "cert_hashes": [ { "algorithm": "sha-256", "value": "<base64>" } ] } } }
+```
+
+- `404 not_found`: no such session, or another user's.
+- `409 session_not_reconnectable`: terminal or stopping, as for the signaling token.
+- `409 transport_unavailable` *(new code)*: the session's `transport` is `webrtc`, or its host's
+  endpoint is no longer usable. The client uses WebRTC (`signaling-token`) instead.
+- `503 agent_not_connected`: retryable, exactly as for the signaling token; also when the agent
+  has not acked within 5 s.
+
+### WebTransport endpoint *(admin)*
+
+Each host's endpoint comes from its agent's report (`agent-api.md` `capacity.webtransport`) and an
+optional admin **override**. The control plane resolves it at every mint:
+
+- **No override (direct).** `url` = `https://<address>:<port>/wt`, `address` the first reported
+  `addresses` entry (an IPv6 address in brackets), `cert_hashes` = the reported certificates not
+  yet expired.
+- **Override, `certificate: "public"` (edge).** `url` = `public_url`, `cert_hashes` = `[]`. The
+  edge proxy forwards to the agent's listener; how is the operator's.
+- **Override, `certificate: "agent"`.** `url` = `public_url`, `cert_hashes` as in direct mode: a
+  port forward, or a name the agent's own certificate is presented under.
+
+The endpoint is **usable** when the host is online, its agent lists `"webtransport"` in
+`capacity.transports`, there is a URL (an override, or at least one address), and, when hashes are
+needed, at least one reported certificate is unexpired. Otherwise `reason` says why:
+`not_reported`, `host_offline`, `no_address` or `certificate_expired`.
+
+#### `GET /v1/admin/hosts/{id}/webtransport` (admin)
+
+```json
+{ "reported": { "transports": ["webrtc", "webtransport"], "port": 4433,
+                "addresses": ["192.0.2.10"],
+                "certificates": [ { "sha256": "<base64>", "not_before": "…", "not_after": "…" } ] },
+  "override": { "public_url": "https://play.example.com/wt/host-a", "certificate": "public" },
+  "endpoint": { "url": "https://play.example.com/wt/host-a", "mode": "edge", "cert_hashes": [] },
+  "usable": true, "reason": null }
+```
+
+`reported` is `null` until the agent reports `webtransport`; `override` is `null` when unset;
+`endpoint` is `null` when not usable; `mode` is `direct` or `edge` (`edge` means
+`certificate: "public"`). `404 not_found` for an unknown host.
+
+#### `PATCH /v1/admin/hosts/{id}/webtransport` (admin)
+
+```json
+{ "public_url": "https://play.example.com/wt/host-a", "certificate": "public" }
+```
+
+`public_url`: an absolute `https` URL with a host, no user info and no fragment, at most 2048
+characters, or `null` to clear the override. `certificate`: `"public"` (default) or `"agent"`.
+Anything else is `400 validation_failed`. Returns the `GET` body. Takes effect on the next mint;
+live connections are untouched. Audited as `host.webtransport.update` (details: the new
+`public_url` and `certificate`).
+
+### The device probe
+
+`POST /v1/me/devices` `capabilities` (§Extended capability / certification record) gains three
+optional objects. The column is schema-free, so nothing else changes:
+
+```json
+"webtransport": { "available": true, "datagrams": true },
+"webcodecs": { "h264": true, "hevc": true, "av1": true, "opus_decode": true, "opus_encode": true },
+"webgpu": { "available": true, "features": ["subgroups", "shader-f16"] }
+```
+
+`webcodecs` keys use the catalog codec spelling, like `codecs`; a key is `true` only when the
+client proved `isConfigSupported` for the configuration it would use. `webgpu` is stored for the
+presenter and for PyroWave and decides nothing in this amendment. A native client reports the
+same keys (`native-client.md` additive superset).
+
 ## Warm Steam — parked sessions *(Amendment 39, #759)*
 
 > *(Amendment 39, #759, approved in principle by the operator 2026-10-18; text reviewed before
@@ -4663,6 +4888,11 @@ bearer is `403`, before any host lookup, per §Authorization) and both return th
 > authorization decision reads them. A capability an engine mode lacks is reported by the host's
 > readiness checks (`readiness`), never inferred by a client from these fields.
 
+> **Amendment 54 (accreleus/quasar#1026), additive.** A host's WebTransport endpoint, as its agent
+> reports it, and the admin override that puts an edge proxy in front of it, have their own
+> sub-resource, `GET`/`PATCH /v1/admin/hosts/{id}/webtransport` (§Transport — WebRTC and
+> WebTransport, "WebTransport endpoint"). The host body does not change.
+
 ### `POST /v1/hosts/{id}/drain` — cordon a host
 RH05 owner-scoped semantics supersede the single-status rules below; see
 "Active admission reasons on the existing Host response".
@@ -4945,6 +5175,8 @@ certification record**. The extended (and entirely optional/best-effort) fields:
   decode/presentation pass-fail and basic playback metrics. In AS10-08 it is the
   **shape only** (populated empty / where trivially available); the harness that
   fills it from historical playback is AS10-10.
+- *(Amendment 54, accreleus/quasar#1026)* `webtransport`, `webcodecs` and `webgpu`: what the
+  WebTransport path needs (§Transport — WebRTC and WebTransport, "The device probe").
 - *(Amendment 49, #845)* `timezone` and `language`: the browser's zone and preferred language,
   read at launch (§Region and Input settings, "The device record").
 

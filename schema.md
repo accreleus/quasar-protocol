@@ -941,6 +941,7 @@ well as codec. Fall-through happens **at launch only**, never mid-session.
 | `description` | `TEXT` NOT NULL DEFAULT `''` | operator-facing note shown in the admin list and editor. |
 | `visibility` | `TEXT` NOT NULL DEFAULT `'user'` | `CHECK (visibility IN ('user','debug','internal'))`. Same semantics as the pre-UI-P4 `stream_profiles.visibility`, migrated from it. Debug/internal launch profiles are never returned by `GET /v1/me/profiles`. |
 | `sort_order` | `INT` NOT NULL DEFAULT `0` | catalog order, highest quality first. Migrated from the parent row's `sort_order`. |
+| `transport` | `TEXT` NOT NULL DEFAULT `'webrtc'` | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* `CHECK (transport IN ('webrtc','webtransport_opt_in','webtransport'))`. Whether this profile's sessions may use WebTransport: never, when the launch asks, or unless the launch asks for WebRTC (`control-api.md` §Transport). Every existing row reads `webrtc`. |
 | `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | maintained by the shared `set_updated_at()` trigger. |
 
 **Referenced by** `apps.default_profile_id`, `stream_profile_policy.global_default_profile_id` and
@@ -1034,6 +1035,12 @@ capacity (CPU/mem) lives here; GPU capacity is per-row in `gpus`.
 | `engine` | `TEXT` NULL | *(amendment 17, RH07 #393, additive)* the **container engine** the host's agent drives, as reported on `register` (`agent-api.md` "Engine facts"): `docker`, `podman`, or another token matching `^[a-z][a-z0-9-]{0,31}$`, stored exactly as sent; the control plane stores NULL for anything else. `CHECK (engine IS NULL OR engine ~ '^[a-z][a-z0-9-]{0,31}$')`. Same wholesale-replace rule as `source_commit`. Informational only: nothing is decided on it. |
 | `engine_version` | `TEXT` NULL | *(amendment 17, additive)* the engine's own product version, opaque, 1–64 printable ASCII characters, stored exactly as sent and never parsed; NULL for anything else. `CHECK (engine_version IS NULL OR engine_version ~ '^[!-~]{1,64}$')`. Same wholesale-replace rule. Informational only. |
 | `engine_mode` | `TEXT` NULL | *(amendment 17, additive)* `CHECK (engine_mode IS NULL OR engine_mode IN ('rootful','rootless'))`. Whether that engine runs as root on its host. Any other reported value is stored NULL. Same wholesale-replace rule. Informational only: no admission, scheduling or release decision reads it. Not the storage code's "rootless" (a host with no storage root). |
+| `transports` | `JSONB` NULL | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* the agent's last-reported `capacity.transports` (`agent-api.md`), e.g. `["webrtc","webtransport"]`. **Replaced wholesale on every `capacity`; absent ⇒ NULL**, read as `["webrtc"]`. |
+| `wt_port` | `INT` NULL | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* the reported WebTransport listener port (`capacity.webtransport.port`); `CHECK (wt_port IS NULL OR wt_port BETWEEN 1 AND 65535)`. Same wholesale rule. |
+| `wt_addresses` | `JSONB` NULL | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* the reported `capacity.webtransport.addresses`, an array of IP address strings, best first. Same wholesale rule. |
+| `wt_certificates` | `JSONB` NULL | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* the reported `capacity.webtransport.certificates`: an array of at most two `{sha256, not_before, not_after}`, current first. Same wholesale rule. The control plane sends the client the `sha256` of each entry not yet expired. |
+| `wt_public_url` | `TEXT` NULL | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* the admin's WebTransport endpoint override (`PATCH /v1/admin/hosts/{id}/webtransport`): an absolute `https` URL, at most 2048 characters, validated by the API. NULL = none. Written only by the admin; a `capacity` report never touches it. |
+| `wt_public_certificate` | `TEXT` NOT NULL DEFAULT `'public'` | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* `CHECK (wt_public_certificate IN ('public','agent'))`. With an override, whether the URL presents a publicly trusted certificate (`public`: no hashes sent) or the agent's own (`agent`: hashes sent). Ignored while `wt_public_url` is NULL. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
 ### Host status state machine (P3-01)
@@ -1162,6 +1169,9 @@ signaling (P1-D).
 | `launch_progress` | `JSONB` NULL | *(Amendment 39, #759, migration 0105)* the agent's last accepted `session_state.launch_progress` (`agent-api.md`), exactly `{"step":"shaders","percent":<integer 0–100>}`; validated by the control plane, not by a CHECK. Written only while the session is `running` with `state_detail = 'app booting'`, and cleared (`NULL`) when the detail leaves `app booting`. Served as `Session.launch_progress`. |
 | `adopt_session_id` | `UUID` NULL | *(Amendment 39, #759, migration 0105)* the session whose runtime this one adopts: the parked id on a claim's play row, the ended play id on a parked row made by a park on exit. Partial unique index `sessions_one_adopter`: at most one row adopts a runtime. No foreign key. The managed-home hold stays on that id until this row's first non-terminal agent report, or passes to this row on that id's cleanup proof while this row is live (`control-api.md` §Warm Steam, "Claim"). `NULL` on every other row. Not served. |
 | `shared_home_app_id` | `UUID` NULL → `apps(id)` **ON DELETE SET NULL** | *(Amendment 53, #1001, migration 0110, signed off 2026-10-31.)* the Steam app whose home this session also mounts; `NULL` = none. Written once by the placement transaction, under the per-user lock. A swap does not change it; only the FK sets it to `NULL` when the Steam app is deleted, which is refused while the session is live. **Every storage-keyed in-use guard counts it**: a live session holds `parent_app_id ?? id` of its app **and** this app's home (the single-writer launch and swap guard, whose self-exclusion on a swap never covers this home; the home-tombstone guard; claim release; the GC claim cleanup; app delete). Partial index `sessions_shared_home_live_idx ON sessions (user_id, shared_home_app_id) WHERE shared_home_app_id IS NOT NULL AND state NOT IN ('stopped','failed')`. |
+| `transport` | `TEXT` NOT NULL DEFAULT `'webrtc'` | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* `CHECK (transport IN ('webrtc','webtransport'))`. The transport the stream plan chose at launch (`control-api.md` §Transport), sent as `session_assign.transport`. Written once, by the launch; a swap keeps it. Every earlier row reads `webrtc`. Served as `Session.transport`. |
+| `transport_reason` | `TEXT` NULL | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* why a wanted WebTransport was not chosen (`profile_disallows`, `host_no_endpoint`, `device_no_webtransport`, `device_no_webcodecs`; an open string), written with `transport`. NULL when WebTransport was chosen or never wanted. Served as `Session.transport_reason`. |
+| `transport_fallback_reason` | `TEXT` NULL | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* the reason in the latest `transport.fallback` trace event the client posted while the session was non-terminal, `^[a-z0-9_]{1,64}$`, validated by the API. Observability only: nothing reads it to decide anything. Served as `Session.transport_fallback_reason`. |
 | **launch params** | | drive the P1-5 pipeline; default from `apps` then overridable per launch. |
 | `width` | `INT` NOT NULL | |
 | `height` | `INT` NOT NULL | |
@@ -1212,6 +1222,15 @@ CREATE INDEX session_tokens_session_created_idx
 Every token remains hashed, short-lived, and atomically single-use. Expired rows may be deleted by
 normal maintenance. The legacy three token columns on `sessions` are migrated into this table and
 then removed.
+
+*(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* The table gains
+`kind TEXT NOT NULL DEFAULT 'signaling' CHECK (kind IN ('signaling','transport'))`. A
+`transport` row is a transport token (`transport-webtransport.md`): `/v1/signal` redeems only
+`kind = 'signaling'` rows, and only a `kind = 'transport'` row's hash goes to the agent, which
+redeems nothing else
+(`agent-api.md` `session_assign.wt_token_hash`, `session_transport_token`). The agent, not this
+table, enforces its single use, so `consumed_at` stays NULL on a `transport` row. Every existing
+row is a signaling token, so the default needs no backfill.
 
 ## `admin_activity`
 
@@ -2558,6 +2577,7 @@ control-plane/migrations/
   0108_region_input.up.sql -- (Region and Input settings, amendment 49, #845, PURELY ADDITIVE in shape -- one new table, new instance_settings columns whose defaults make the singleton valid, no backfill. Number provisional, taken at landing.) CREATE TABLE user_region_input (user_id PK -> users ON DELETE CASCADE, timezone, language, region_format, keyboard_layout, keyboard_variant, match_cursor, mouse_sensitivity, raw_mouse, flip_scroll, nintendo_layout, all NULL, + updated_at and its set_updated_at trigger); ALTER TABLE instance_settings ADD default_timezone, default_language, default_region_format, default_keyboard_layout, default_keyboard_variant, default_match_cursor, default_mouse_sensitivity, default_raw_mouse, default_flip_scroll, default_nintendo_layout. The migration alone changes nothing a session sees. DOWN: drops the table and the columns; the loss is every user's settings and the install defaults. ROLLBACK, standing repo rule: once applied, never deploy a control-plane binary embedding only <= 0106 without running this down migration first.
   0109_recovery_hold_release.up.sql -- (recovery hold release, amendment 51, #656, ADDITIVE -- one widened CHECK and one nullable column; no data change, no backfill. Number provisional, taken at landing.) host_config_attempts: re-ADD the phase CHECK with 'released' added; ADD COLUMN release_requested_at TIMESTAMPTZ NULL. DOWN: refuses (RAISE EXCEPTION) while any attempt is 'released' or has a release_requested_at, because the agent may already hold `released` and an older control plane quarantines an agent journal that holds one; otherwise it drops the column and narrows the CHECK. ROLLBACK, standing repo rule: once applied, never deploy a control-plane binary embedding only <= 0108 without running this down migration first.
   0110_share_steam_library.up.sql -- (share the user's Steam library, amendment 53, #1001, ADDITIVE -- two new columns with defaults that make every existing row valid, one named CHECK, one partial index; no data change, no backfill.) ALTER TABLE apps ADD COLUMN share_steam_library BOOLEAN NOT NULL DEFAULT false, ADD CONSTRAINT apps_share_steam_library_ck CHECK (NOT share_steam_library OR (parent_app_id IS NULL AND library_provider = '')); ALTER TABLE sessions ADD COLUMN shared_home_app_id UUID NULL REFERENCES apps(id) ON DELETE SET NULL; CREATE INDEX sessions_shared_home_live_idx ON sessions (user_id, shared_home_app_id) WHERE shared_home_app_id IS NOT NULL AND state NOT IN ('stopped','failed'). DOWN: refuses (RAISE EXCEPTION) while a session with shared_home_app_id is live; otherwise it drops the index, both columns and the CHECK. ROLLBACK, standing repo rule: once applied, never deploy a control-plane binary embedding only <= 0109 without running this down migration first.
+  0111_webtransport.up.sql -- (WebTransport transport #2, amendment 54, accreleus/quasar#1026, ADDITIVE -- defaulted or nullable columns and their CHECKs; no data change, no backfill. Number provisional, taken at landing.) ALTER TABLE launch_profiles ADD COLUMN transport TEXT NOT NULL DEFAULT 'webrtc' CHECK (transport IN ('webrtc','webtransport_opt_in','webtransport')); ALTER TABLE hosts ADD COLUMN transports JSONB NULL, ADD COLUMN wt_port INT NULL CHECK (wt_port IS NULL OR wt_port BETWEEN 1 AND 65535), ADD COLUMN wt_addresses JSONB NULL, ADD COLUMN wt_certificates JSONB NULL, ADD COLUMN wt_public_url TEXT NULL, ADD COLUMN wt_public_certificate TEXT NOT NULL DEFAULT 'public' CHECK (wt_public_certificate IN ('public','agent')); ALTER TABLE sessions ADD COLUMN transport TEXT NOT NULL DEFAULT 'webrtc' CHECK (transport IN ('webrtc','webtransport')), ADD COLUMN transport_reason TEXT NULL, ADD COLUMN transport_fallback_reason TEXT NULL; ALTER TABLE session_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'signaling' CHECK (kind IN ('signaling','transport')). DOWN: refuses (RAISE EXCEPTION) while a live session has transport = 'webtransport'; otherwise it drops every column above. ROLLBACK, standing repo rule: once applied, never deploy a control-plane binary embedding only <= 0110 without running this down migration first.
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`
@@ -2575,6 +2595,18 @@ ON DELETE SET NULL` with `sessions_shared_home_live_idx`. No data change: every 
 shares nothing. The down refuses while a session with `shared_home_app_id` is live (without the
 column the single-writer guard stops counting it); after a refusal, end those sessions, run
 `migrate … force 110`, then the down again. It then drops the index, both columns and the CHECK.
+
+### 0111 — WebTransport, transport #2 *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)*
+
+Adds `launch_profiles.transport`, the six `hosts` columns `transports`, `wt_port`, `wt_addresses`,
+`wt_certificates`, `wt_public_url`, `wt_public_certificate`, the three `sessions` columns
+`transport`, `transport_reason`, `transport_fallback_reason`, and `session_tokens.kind`, each with
+its CHECK. No data change: every existing profile, host, session and token reads as WebRTC, and
+the reported host columns fill on the agent's next `capacity`. The number is provisional and is
+taken at landing, after a rebase on the integration branch. The down refuses while a live session
+has `transport = 'webtransport'` (an older binary would treat its transport tokens as signaling
+tokens); otherwise it drops the columns and CHECKs. After a refusal, end those sessions, run
+`migrate … force 111`, then the down again.
 
 
 ## Steam preparation persistence (2026-09-06, Quasar #145)

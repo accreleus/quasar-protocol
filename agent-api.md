@@ -298,6 +298,21 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > for agents with this amendment. An agent with this amendment may refuse a `dual_output`
 > assignment, or a `local_only` one whose `app` lacks `direct_display`, with `ack{ok:false}`.
 
+> **Amendment 54 — WebTransport, transport #2 (accreleus/quasar#1026; spec #1024), additive,
+> pre-approved by the owner 2026-11-06, independent Opus review before merge.** The wire contract
+> is `transport-webtransport.md`. This wire gains four things, and no existing message, field or
+> ack changes. **(1)** `capacity` gains `transports` and `webtransport`: the listener port, the
+> addresses the agent can see, and the certificates it may present, current and next
+> (§`capacity`). **(2)** `session_assign` gains `transport` and, for `"webtransport"`, the hash of
+> the first transport token (§`session_assign`). **(3)** A new control → node message,
+> `session_transport_token`, delivers each later token's hash, acked before the control plane
+> hands the token out (§`session_transport_token`). **(4)** The agent enforces one media client
+> per session across both transports, the last to authenticate winning, and tells a displaced
+> WebRTC client `error {code: "taken_over"}` through the relay (§Signaling relay). A session
+> assigned `"webtransport"` still accepts a WebRTC peer: that is the client's fallback.
+> **Compatibility:** an older agent sends neither field, so the control plane reads it as
+> WebRTC-only and never assigns it `"webtransport"` or sends it `session_transport_token`.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -827,6 +842,43 @@ report omits it stores NULL and inherits, and no keep-if-absent rule of its own 
 host-level `codecs` above is the union of this field over the GPUs with `encode_slots_total > 0`.
 The agent re-sends `capacity` whenever a codec probe changes a GPU's set, rather than waiting for
 the next periodic report. `codec_throughput` stays host-level.
+
+`transports` and `webtransport` *(amendment 54, accreleus/quasar#1026, optional, additive)* say
+which media transports the agent serves and where its WebTransport listener is
+(`transport-webtransport.md`).
+```json
+"transports": ["webrtc", "webtransport"],
+"webtransport": {
+  "port": 4433,
+  "addresses": ["192.0.2.10", "2001:db8::10"],
+  "protos": [1],
+  "certificates": [
+    { "sha256": "<base64 SHA-256 of the DER certificate>",
+      "not_before": "2026-11-06T00:00:00Z", "not_after": "2026-11-19T00:00:00Z" },
+    { "sha256": "<base64>",
+      "not_before": "2026-11-16T00:00:00Z", "not_after": "2026-11-29T00:00:00Z" }
+  ]
+}
+```
+- **`transports`** — a subset of `["webrtc", "webtransport"]`; `webrtc` is always listed.
+  Absent ⇒ `["webrtc"]`.
+- **`webtransport`** — present exactly when `transports` lists `"webtransport"`:
+  - **`port`** — the UDP port of the agent's QUIC listener, as configured (one port per host).
+  - **`addresses`** — the IP addresses the agent sees on its own interfaces, best first;
+    possibly empty (for example an agent on a bridged container network). Loopback and
+    link-local addresses are left out.
+  - **`protos`** — the `wt_proto` versions the agent speaks.
+  - **`certificates`** — every self-signed certificate the listener may present, current first:
+    at most two, two only during a rotation overlap (`transport-webtransport.md`
+    §Certificates). `sha256` is the base64 SHA-256 of the certificate's DER encoding, the value
+    `serverCertificateHashes` takes. `[]` when the agent presents an operator-supplied, publicly
+    trusted certificate.
+
+**Replaced wholesale, not keep-if-absent:** a report without them means this agent serves no
+WebTransport now, and the control plane stores that (`schema.md` `hosts.transports`,
+`wt_port`, `wt_addresses`, `wt_certificates`). The agent re-sends `capacity` when any of them
+changes, a certificate rotation included, and reports a certificate before its listener presents
+it.
 
 `encode_slots_total` is the concurrent encode-session cap (the NVENC/VCN limit — architecture
 §"Resource governance"). At N=1 this is one GPU with generous slots; the field is mandatory so
@@ -1799,6 +1851,24 @@ capability but does not by itself put ordinary browser sessions on a physical di
 > microphone state in its `session.effective_media` trace payload (`mic`:
 > `"off" | "negotiated" | "active"`). Additive; no existing field or shape changes.
 
+> *(amendment 54, accreleus/quasar#1026, additive)* `session_assign` may carry
+> **`transport`: `"webrtc" | "webtransport"`** (omitted ⇒ `"webrtc"`): the transport the
+> control plane's stream plan chose (`control-api.md` §Transport). With `"webtransport"` it also
+> carries **`wt_token_hash`** (lowercase hex SHA-256 of the transport token's UTF-8 bytes) and
+> **`wt_token_expires_at`** (RFC 3339), the first transport token, which the agent accepts in a
+> WebTransport `hello` (`transport-webtransport.md` §Authentication and tokens). The agent
+> keeps every unexpired token hash it is given for the session, accepts each once, and forgets
+> them when the session ends. It reads `wt_token_expires_at` on its own clock with an allowed
+> skew of 15 s.
+>
+> A `"webtransport"` session is the same session: the codec, `h264_profile`, ABR, the encoder
+> and the microphone grant are unchanged, and the agent **still accepts a WebRTC peer** for it
+> through §Signaling relay, which is the client's fallback. Only one client receives media at a
+> time (§Signaling relay, "One media client"). `local_only` ignores the field. The control plane
+> sends `"webtransport"` only to an agent whose `capacity.transports` lists it; an agent that
+> cannot serve it now (its listener is down) answers `ack{ok:true}` and the client falls back,
+> because the session itself is sound.
+
 > *(first-run-experience §S2, additive, 2026-08-09)* The `app` object may also carry an optional
 > **`network`: `"none" | "bridge"`** — the docker network mode for the app container.
 > This is a **per-app requirement, not a host setting**: app containers default to `--network
@@ -1964,6 +2034,19 @@ outside its Steam family (`control-api.md` §Warm Steam). Informational like the
 tears down the same way, and the app container gets its normal stop window, so a cloud sync in
 progress can finish. A `session_stop` for a play session that ended with `runtime_held` releases
 the held runtime at once (§`session_state`).
+
+### `session_transport_token` — a new transport token (amendment 54, accreleus/quasar#1026)
+```json
+{ "type": "session_transport_token", "id": "<command-id>", "session_id": "<uuid>",
+  "wt_token_hash": "<hex sha-256>", "wt_token_expires_at": "2026-11-06T12:01:00Z" }
+```
+Sent for each token minted by `POST /v1/sessions/{id}/transport-token` (`control-api.md`). The
+agent adds the hash to the session's accepted tokens, exactly like `session_assign`'s, and answers
+`ack{ok:true}`; it answers `ack{ok:false}` for a session it does not hold. **The control plane
+returns the token to the client only after the `ack{ok:true}`**, so a client never presents a
+token its agent has not been given. A swap, a display update or a takeover does not invalidate a
+token. An agent that never listed `"webtransport"` in `capacity.transports` is never sent this
+message.
 
 ### `session_swap_app` — swap the source app, transport stays live (P2-02)
 Tells the agent to swap a `running` session's **source container** behind its interpipe boundary
@@ -2684,6 +2767,18 @@ the encoder session. With ABR off, or an encoder that takes no live writes, noth
 Nothing in this envelope changes, and the control plane relays that offer like any other. The
 control plane forwards no frame from a signaling socket once a later attach has displaced it.
 
+*(Amendment 54, accreleus/quasar#1026.)* **One media client per session, across both
+transports.** The agent streams to one client at a time; the last one to authenticate wins, a
+WebRTC peer under amendment 27's rule or a WebTransport client by its token
+(`transport-webtransport.md` §Takeover). When a WebTransport client takes over from a WebRTC
+peer, the agent stops that peer's media and sends, in this envelope,
+`{ "type": "error", "code": "taken_over", "message": "…" }`; the control plane relays it to the
+client holding signaling and then closes that WebSocket with `4410` (`signaling.md`). When a
+WebRTC peer takes over from a WebTransport client, the agent closes the WebTransport client
+with `bye {reason: "taken_over"}` and close code `4410`. At most 6 takeovers of one session in any
+60 s, counted across both transports. A WebTransport session's media, input, ping and pong never
+traverse this relay.
+
 *(Amendment 39, #759, approved in principle by the operator 2026-10-18; text reviewed before
 landing.)* A play session on an adopted runtime sends its first viewer a fresh offer for each
 peer connection, unasked, under the play session's id (§`session_assign`, `adopt_session_id`).
@@ -2704,6 +2799,9 @@ changes.
   stopped before it started and that the agent does not list: an agent that advertises
   `terminal_home_cleanup_v1` answers `stopped` for an id it never recorded (§`register`),
   which releases the reservation. No message or field changes.
+- *(Amendment 54, accreleus/quasar#1026)* Transport tokens are not re-sent after an agent
+  reconnects: they live 60 s. A client whose `hello` is refused mints a fresh one, and its
+  `session_transport_token` reaches the reconnected agent.
 - If the agent connection is lost for longer than the heartbeat-miss threshold, the host goes
   `offline` and all its non-terminal sessions become `failed`. This is the multi-host failure
   model at N=1.
