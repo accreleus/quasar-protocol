@@ -2870,6 +2870,9 @@ unaffected by this feature.
 - *(Amendment 54, accreleus/quasar#1026)* A launch profile also carries **`transport`**
   (`webrtc` | `webtransport_opt_in` | `webtransport`, default `webrtc`): whether its sessions may
   use WebTransport (§Transport — WebRTC and WebTransport).
+- *(Amendment 55, accreleus/quasar#1050)* and **`pyrowave_allowed`** (default `false`) and
+  **`pyrowave_kbps`** (default `null`): whether its users may turn on Ultra-low latency (LAN),
+  and at what bitrate (§Ultra-low latency (LAN) — PyroWave).
 - **Order is preference.** The write shape takes an **ordered array of stream-profile ids**; the
   server assigns `position` from that order. A client does not send positions.
 - A stream profile may appear **at most once** in one launch profile (`400 validation_failed` on a
@@ -2882,6 +2885,8 @@ unaffected by this feature.
   - `floor_not_least_demanding` — the H.264 rung has a higher `min_offer_bandwidth_kbps` or
     `min_decode_height` than a rung above it, or requires a hardware encoder while a rung above it
     does not. A floor that is harder to satisfy than the rung above it is a misconfiguration.
+  - *(Amendment 55)* `pyrowave_needs_webtransport` — `pyrowave_allowed` is true while `transport`
+    is `webrtc`, so PyroWave can never be offered.
 - `DELETE /{id}` is **`409 conflict`** while the launch profile is referenced by any app
   (`apps.default_profile_id`), by the global policy
   (`stream_profile_policy.global_default_profile_id`), or by any user preference
@@ -4314,8 +4319,132 @@ optional objects. The column is schema-free, so nothing else changes:
 
 `webcodecs` keys use the catalog codec spelling, like `codecs`; a key is `true` only when the
 client proved `isConfigSupported` for the configuration it would use. `webgpu` is stored for the
-presenter and for PyroWave and decides nothing in this amendment. A native client reports the
+presenter and for PyroWave and decides nothing in this amendment. *(Amendment 55:
+`webgpu.available` gates PyroWave, §Ultra-low latency (LAN) — PyroWave.)* A native client reports the
 same keys (`native-client.md` additive superset).
+
+## Ultra-low latency (LAN) — PyroWave *(Amendment 55, accreleus/quasar#1050, pre-approved by the owner 2026-11-06)*
+
+> *Additive. Two launch-profile fields and one warning code, one optional launch-request field,
+> one session object, one owner endpoint, a new meaning for the existing `webgpu` device-probe key,
+> and migration 0112 (`schema.md`). No existing shape, status code or endpoint changes. The wire
+> contract is `codec-pyrowave.md`; the agent side is `agent-api.md` amendment 55. An independent
+> Opus review runs before merge.*
+
+**Ultra-low latency (LAN)** is the user-facing name for streaming a session in **PyroWave**, an
+intra-only wavelet codec decoded by the client in WebGPU, at about 200 Mbit/s and up. It is
+**WebTransport-only and LAN-only**, off everywhere until an admin allows it on a launch profile,
+and a user turns it on per device. PyroWave is not a rung: the rung walk (§Rung resolution,
+§Codec resolution) still resolves the session's **standard codec** (`stream.codec`,
+`h264 | h265 | av1`), which a WebRTC fallback and every step-down use. PyroWave is an overlay on
+that session. Automatic selection with no switch is not in this amendment.
+
+### The launch profile's `pyrowave_allowed` and `pyrowave_kbps`
+
+`LaunchProfile` and `LaunchProfileWrite` gain:
+
+| field | meaning |
+|---|---|
+| `pyrowave_allowed` | `false` (default): this profile's users never get PyroWave. `true`: they may turn it on, on a session whose transport is WebTransport. |
+| `pyrowave_kbps` | the PyroWave target bitrate, kbit/s, `50000 … 1000000`; `null` (default) = by the session's launch height: **200 000 up to 1080, 300 000 up to 1440, 400 000 above** (`codec-pyrowave.md` §Rate). |
+
+Both always serialized on the read. Optional on the write: absent on `POST` is the default, absent
+on `PATCH` leaves it unchanged; a wrong type or an out-of-range `pyrowave_kbps` is
+`400 validation_failed`. `pyrowave_allowed: true` with `transport: "webrtc"` is legal and draws
+the warning `pyrowave_needs_webtransport`. Upgrading changes nothing: every existing profile reads
+`false`. Admin-only, like the rest of the launch-profile write path.
+
+### `POST /v1/sessions` — `pyrowave`
+
+The request accepts an optional **`pyrowave`: boolean**, the user's remembered choice on this
+device ("Ultra-low latency (LAN)" on). Absent is `false`; any other type is
+`400 validation_failed`. It is a wish, never an error: a launch that asks for PyroWave on a
+session that cannot have it does not get it, and `session.pyrowave.reason` says why.
+
+**The grant** (a pure step of the stream plan, after the transport; it never changes the standard
+codec or the transport). PyroWave is **allowed** for the session when all of these hold; otherwise
+`reason` names the first that failed:
+
+| check | `reason` |
+|---|---|
+| the launch profile has `pyrowave_allowed` | `profile_disallows` |
+| the session's transport is `webtransport` (so never a console, parked or WebRTC session) | `not_webtransport` |
+| the placed GPU's codec set lists `pyrowave` (`agent-api.md` `capacity.gpus[].codecs`, inheriting the host's) | `host_no_pyrowave` |
+| the launching device's fresh probe has `webgpu.available` true | `device_no_webgpu` |
+
+A probe is fresh under the same rule as the codec clamp (§Codec resolution). `webgpu.features`
+(`subgroups`, `shader-f16`) decide nothing: the client picks its decoder path, and it has one that
+needs neither. The probe's `bandwidth_kbps` and `rtt_ms` are **not** inputs: they measure the
+client ↔ control plane path from a small sample. The link that matters, client ↔ host, is
+measured by the agent on the session's own WebTransport connection: a QUIC round trip of at most
+5 ms to start PyroWave, and a congestion estimate above the floor to keep it
+(`codec-pyrowave.md` §Link, §Rate). Placement does not look at PyroWave: a GPU without it is
+never avoided, it yields `host_no_pyrowave`. A swap keeps the grant. A claim of a parked session
+plans it like any launch.
+
+When allowed, the control plane sends the grant as `session_assign.pyrowave` (`agent-api.md`):
+`wanted` = the request's `pyrowave`, `target_kbps` = the profile's `pyrowave_kbps` or the height
+default, `floor_kbps` = half the target, `max_rtt_ms` = 5. The agent starts the session's
+WebTransport client in PyroWave when it is wanted and the link qualifies.
+
+### The session's `pyrowave`
+
+`Session` (every read) gains **`pyrowave`**, always serialized by a server implementing this
+amendment: `null` for every session before it, otherwise:
+
+```json
+"pyrowave": { "allowed": true, "reason": null, "wanted": true, "active": true, "used": true,
+              "target_kbps": 200000, "switch_reason": "launch" }
+```
+
+- **`allowed`** / **`reason`**: the grant above, written once at launch. `reason` is `null` when
+  allowed; an open string.
+- **`wanted`**: the user wants PyroWave now: the launch's request, then the latest accepted
+  toggle; cleared when the agent steps down for `rtt_too_high`, `congestion`,
+  `client_decode_error` or `encoder_error`.
+- **`active`**: the media client is receiving PyroWave now. **`used`**: it ever did, this
+  session.
+- **`target_kbps`**: the grant's target; `null` when not allowed.
+- **`switch_reason`**: the reason of the latest switch, on or off (`codec-pyrowave.md`
+  §Switching codec; an open string), `null` before the first. With `active: false` it is why
+  PyroWave is off, which the overlay shows next to the toggle.
+
+`wanted`, `active`, `used` and `switch_reason` follow the agent's `codec.switched` trace events
+(`agent-api.md`) and the toggle's acks. They are observability and UI state: nothing in
+scheduling, admission or the stream plan reads them back. The client shows the toggle when
+`allowed` is true, and the reason when it is not.
+
+`negotiated_codec` (§Codec decision) may read `pyrowave` when the client reports it is decoding
+PyroWave (`codec_mime_type` `video/pyrowave`). While `pyrowave.active` is true that is the
+expected value, not a mismatch with `stream.codec`.
+
+### `PATCH /v1/sessions/{id}/pyrowave` — turn Ultra-low latency (LAN) on or off (live)
+
+Owner-or-admin, the rule of `PATCH /v1/sessions/{id}/display`, and the same best-effort relay:
+the control plane validates, sends `session_pyrowave` (`agent-api.md`) to the assigned host, and
+answers once the agent acks. No session state transition accompanies it, and a rejection is a
+no-op.
+
+```json
+// request
+{ "active": true }
+// 202 — the agent applied it. Body is the current session, pyrowave updated.
+{ "session": { "...": "...", "pyrowave": { "allowed": true, "reason": null, "wanted": true,
+               "active": true, "used": true, "target_kbps": 200000, "switch_reason": "user" } } }
+```
+
+- `400 validation_failed`: `active` missing or not a boolean.
+- `404 not_found`: no such session, checked before ownership.
+- `403 forbidden`: neither owner nor admin.
+- `409 session_not_running`: the session's `state` is not `running`.
+- **`409 pyrowave_unavailable`** *(new code)*: `pyrowave.allowed` is false; `message` carries
+  `pyrowave.reason`. Only for `active: true`; `active: false` on such a session is a `202` no-op.
+- **`409 pyrowave_rejected`** *(new code)*: the agent refused (`not_on_webtransport`,
+  `client_no_decoder`, `rtt_too_high`, `encoder_error`; in `message`), or did not ack within the
+  normal command timeout. The session keeps its codec.
+
+The client remembers the user's choice per device and sends it at the next launch as `pyrowave`;
+the server keeps no per-user preference.
 
 ## Warm Steam — parked sessions *(Amendment 39, #759)*
 

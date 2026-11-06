@@ -1967,6 +1967,46 @@ paths:
             the stream, only returned when the request includes stream_width/stream_height. The
             session is left untouched in every case.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  /v1/sessions/{id}/pyrowave:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    patch:
+      tags: [sessions]
+      summary: Turn Ultra-low latency (LAN), i.e. PyroWave, on or off in a running session (owner or admin) (amendment 55).
+      description: >-
+        Amendment 55 (accreleus/quasar#1050). A best-effort relay to the assigned host's agent
+        (agent-api.md session_pyrowave), like PATCH /v1/sessions/{id}/display: no session-state
+        transition, and a rejection is a no-op (the session keeps its codec). The 202 is sent once
+        the agent acked; its body carries the updated session.pyrowave.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SessionPyroWaveUpdate" }
+      responses:
+        "202":
+          description: Applied. Body is the current session.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session]
+                properties:
+                  session: { $ref: "#/components/schemas/Session" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller is neither owner nor admin.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >-
+            session_not_running - the session's state is not running - or pyrowave_unavailable -
+            session.pyrowave.allowed is false (active true only; the message carries the reason) -
+            or pyrowave_rejected - the agent refused (not_on_webtransport, client_no_decoder,
+            rtt_too_high, encoder_error) or did not ack within the command timeout. The session is
+            left untouched in every case.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/sessions/{id}/verdict:
     parameters:
       - { $ref: "#/components/parameters/PathId" }
@@ -4404,6 +4444,35 @@ components:
       type: string
       description: "Multi-codec: the WIRE session video codec (h265 is HEVC). Resolved server-side at launch; the client answers the single codec the host offers. Distinct from CatalogCodec, which spells HEVC 'hevc'."
       enum: [h264, h265, av1]
+    HostCodec:
+      type: string
+      description: >-
+        A host or GPU codec set entry (agent-api.md capacity.codecs, capacity.gpus[].codecs): the
+        wire Codec vocabulary plus, since amendment 55 (accreleus/quasar#1050), pyrowave, listed
+        after a passing PyroWave codec probe. pyrowave is never a session's stream.codec and never
+        a rung's codec.
+      enum: [h264, h265, av1, pyrowave]
+    SessionPyroWave:
+      type: object
+      description: >-
+        Amendment 55 (accreleus/quasar#1050): a session's Ultra-low latency (LAN) / PyroWave
+        record. allowed and reason are the stream plan's grant, written once at launch; wanted,
+        active, used and switch_reason follow the agent's codec.switched trace events and the
+        toggle's acks. Observability and UI state: nothing decides on it.
+      required: [allowed, reason, wanted, active, used, target_kbps, switch_reason]
+      properties:
+        allowed: { type: boolean }
+        reason: { type: [string, "null"], description: "Why not allowed: profile_disallows, not_webtransport, host_no_pyrowave, device_no_webgpu (an open string); null when allowed." }
+        wanted: { type: boolean, description: "The user wants PyroWave now. Cleared by a step-down for rtt_too_high, congestion, client_decode_error or encoder_error." }
+        active: { type: boolean, description: "The media client is receiving PyroWave now." }
+        used: { type: boolean, description: "The media client received PyroWave at some point in this session." }
+        target_kbps: { type: [integer, "null"], description: "The PyroWave target bitrate granted; null when not allowed." }
+        switch_reason: { type: [string, "null"], description: "The reason of the latest switch on or off (launch, user, reconnect, rtt_too_high, client_no_decoder, congestion, client_decode_error, encoder_error, webrtc; an open string); null before the first." }
+    SessionPyroWaveUpdate:
+      type: object
+      required: [active]
+      properties:
+        active: { type: boolean, description: "Amendment 55: true turns Ultra-low latency (LAN) on, false turns it off." }
     CatalogCodec:
       type: string
       description: >-
@@ -4501,13 +4570,15 @@ components:
       properties:
         code:
           type: string
-          enum: [h264_floor_not_last, floor_not_least_demanding]
+          enum: [h264_floor_not_last, floor_not_least_demanding, pyrowave_needs_webtransport]
           description: >-
             h264_floor_not_last - every rung after the H.264 rung is unreachable, because H.264
             passes every clamp. floor_not_least_demanding - the H.264 rung has a higher
             min_offer_bandwidth_kbps or min_decode_height than a rung above it, or requires a
             hardware encoder while a rung above it does not; a floor harder to satisfy than the
-            rung above it is a misconfiguration.
+            rung above it is a misconfiguration. pyrowave_needs_webtransport (amendment 55) -
+            pyrowave_allowed is true on a launch profile whose transport is webrtc, so PyroWave
+            can never be offered.
         message: { type: string }
     SessionState:
       type: string
@@ -5486,6 +5557,11 @@ components:
         transport_fallback_reason:
           type: [string, "null"]
           description: "Amendment 54: the reason in the latest transport.fallback trace event the client posted, else null. Observability only. Absent from an older server."
+        pyrowave:
+          oneOf:
+            - { $ref: "#/components/schemas/SessionPyroWave" }
+            - { type: "null" }
+          description: "Amendment 55: the session's Ultra-low latency (LAN) / PyroWave record. Always serialized by a server implementing the amendment; null for every earlier session; absent from an older server."
         created_at: { type: string, format: date-time }
         started_at: { type: [string, "null"], format: date-time }
         ended_at: { type: [string, "null"], format: date-time }
@@ -5571,6 +5647,7 @@ components:
         client_type: { type: string, enum: [browser, native], description: "Absent ⇒ browser." }
         mic: { type: boolean, description: "Microphone capture request (2026-08-02). Absent ⇒ false. Granted only when instance setting mic_capture_enabled is on; an ungranted request is not an error — the session stream body reports the granted state." }
         transport: { $ref: "#/components/schemas/TransportPreference" }
+        pyrowave: { type: boolean, description: "Amendment 55: the user's remembered Ultra-low latency (LAN) choice on this device. Absent = false. A wish, never an error: Session.pyrowave says whether it was allowed and why not." }
         stream:
           type: object
           description: "Admin/debug/back-compat override; beats profile_id field-by-field."
@@ -6055,7 +6132,7 @@ components:
         # "never reported" and "reported h264 only" need different operator advice.
         codecs:
           type: [array, "null"]
-          items: { $ref: "#/components/schemas/Codec" }
+          items: { $ref: "#/components/schemas/HostCodec" }
         pending_restart: { type: boolean }
         restart_triggered: { type: boolean }
     HostRestartRequest:
@@ -8230,7 +8307,7 @@ components:
         # Amendment 12 (#296, additive, admin-gated read): the GPU codec set.
         codecs:
           type: [array, "null"]
-          items: { $ref: "#/components/schemas/Codec" }
+          items: { $ref: "#/components/schemas/HostCodec" }
           description: >-
             Amendment 12 (#296), additive. ALWAYS SERIALIZED. The wire codecs this GPU can
             encode (agent-api.md capacity.gpus[].codecs, schema.md gpus.codecs), as the launch
@@ -8414,6 +8491,8 @@ components:
         transport:
           allOf: [ { $ref: "#/components/schemas/LaunchProfileTransport" } ]
           description: "Amendment 54. Always serialized by a server implementing the amendment; absent from an older one, read as webrtc."
+        pyrowave_allowed: { type: boolean, description: "Amendment 55: whether this profile's users may turn on Ultra-low latency (LAN) (PyroWave) on a WebTransport session. Always serialized by a server implementing the amendment; absent from an older one, read as false." }
+        pyrowave_kbps: { type: [integer, "null"], minimum: 50000, maximum: 1000000, description: "Amendment 55: the PyroWave target bitrate, kbit/s; null = by launch height (200000 up to 1080, 300000 up to 1440, 400000 above)." }
         used_by: { $ref: "#/components/schemas/LaunchProfileUsedBy" }
         warnings:
           type: array
@@ -8438,6 +8517,8 @@ components:
         transport:
           allOf: [ { $ref: "#/components/schemas/LaunchProfileTransport" } ]
           description: "Amendment 54. Absent on POST = webrtc; absent on PATCH = unchanged."
+        pyrowave_allowed: { type: boolean, description: "Amendment 55. Absent on POST = false; absent on PATCH = unchanged. True with transport webrtc draws the warning pyrowave_needs_webtransport." }
+        pyrowave_kbps: { type: [integer, "null"], minimum: 50000, maximum: 1000000, description: "Amendment 55. Absent on POST = null (by launch height); absent on PATCH = unchanged; out of range = 400 validation_failed." }
         rungs:
           type: array
           minItems: 1
