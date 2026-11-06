@@ -3268,11 +3268,17 @@ paths:
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
-        content: { application/json: { schema: { $ref: "#/components/schemas/CompatToolDefault" } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/CompatToolDefaultWrite" } } }
       responses:
         "200":
           description: The default now in force.
-          content: { application/json: { schema: { $ref: "#/components/schemas/CompatToolDefault" } } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [default_tool_id]
+                properties:
+                  default_tool_id: { type: [string, "null"], format: uuid }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -4682,8 +4688,9 @@ components:
       required: [enabled]
       properties:
         enabled: { type: boolean }
-    CompatToolDefault:
+    CompatToolDefaultWrite:
       type: object
+      additionalProperties: false
       required: [tool_id]
       properties:
         tool_id: { type: [string, "null"], format: uuid, description: "null = Steam's own default." }

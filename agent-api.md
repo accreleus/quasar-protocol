@@ -1965,7 +1965,7 @@ capability but does not by itself put ordinary browser sessions on a physical di
 > ```
 > - **Sent only to a connection that advertised `compat_tools_v1`**, only for a Steam-family app,
 >   never for a template preparation run. `entries` may be empty and holds at most 1001 entries;
->   appid `"0"` (the fleet default) at most once and never `forced`.
+>   each appid appears at most once, and appid `"0"` (the fleet default) is never `forced`.
 > - **The mount.** The agent bind-mounts its own tools directory **read-only** at
 >   `/opt/quasar/compatibilitytools` in the app container. The source is agent-owned and outside
 >   the managed-home root, so it is not an `app.mounts` entry, is not subject to
@@ -1986,7 +1986,7 @@ capability but does not by itself put ordinary browser sessions on a physical di
 > - **Adoption.** A `play` session that adopts a parked runtime (`adopt_session_id`) keeps the
 >   mount and environment the parked session started with; the control plane only lets a claim
 >   adopt when that is still correct (`control-api.md` §Compatibility tools, "Hot Loading").
-> - While any live session on the host has the mount, the agent defers removing a tool
+> - While any live non-parked session on the host has the mount, the agent defers removing a tool
 >   (`in_use`); a tool being installed is staged outside the mounted directory and appears in it
 >   by one atomic rename.
 > - Absent ⇒ no mount and neither key is touched: byte-identical to an agent without the

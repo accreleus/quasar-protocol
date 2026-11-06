@@ -3696,7 +3696,9 @@ library").
 *(Amendment 56, accreleus/quasar#1066.)* `reason` is also `compat_tool_missing` on
 `503 no_host_available` when the only reason no online host qualified is that none has the GE
 compatibility tool the launched game is mapped to (§Compatibility tools, "Placement"). Every
-enabled tool installs on every host, so it clears without an admin once a host catches up.
+enabled tool installs on every host, so it clears without an admin once a host has installed it.
+If that host's install failed, it clears only after the host's agent reconnects or an admin presses
+Run now for that host.
 
 ### `GET /v1/sessions/{id}` — poll lifecycle
 ```json
@@ -4522,8 +4524,10 @@ environment value, so no other character, and no `.` or `-` first, is ever accep
 - `hosts`: per-host install state counts over the hosts in scope (§Per-host install state); `null`
   for a Valve build. `mappings`: how many per-game mappings name the tool.
 
-The **recommended list** and the Valve builds are **code-owned**: the control plane reconciles
-them into the catalogue at every boot, the way it reconciles job identities. A new entry is
+The **recommended list** and the Valve builds are **code-owned**. Each recommended entry ships in
+the Quasar release with its tag, asset, `size_bytes`, SHA-512 and `steam_name`, so `name_mismatch`
+(T6) applies from its first install. The control plane reconciles them into the catalogue at every
+boot, the way it reconciles job identities. A new entry is
 inserted disabled (a Valve build enabled). The reconcile never deletes a row and never changes
 `enabled`; it sets `recommended` from the list. A recommended entry whose tag already exists as a
 `tag` row with the **same** SHA-512 marks that row `recommended`; with a different SHA-512 the row
@@ -4617,7 +4621,7 @@ first that holds:
 | `removing` | an open `remove` run for the tool on the host |
 | `installing` | an open `install` run for the tool on the host |
 | `installed` | the host's latest capacity report lists the tool's SHA-512 |
-| `failed` | the latest terminal run for the tool on the host failed (`reason` = its `summary.reason`) |
+| `failed` | the tool is marked `name_conflict` (`reason` `name_conflict`), or it is held back by a failed run on the host (§Install job, "The first difference"; `reason` = that run's `summary.reason`) |
 | `waiting` | the tool is enabled and none of the above (`reason` = a deferred run's `summary.reason`, else `null`) |
 
 An installed tool that is disabled reads `installed` until its removal runs. The catalogue's
@@ -4627,22 +4631,43 @@ An installed tool that is disabled reads `installed` until its removal runs. The
 
 A code-owned job on the existing framework (§Background jobs): `plane: "agent"`,
 `scope: "host"`, `schedule_kind: "event"`, `managed: true`. Its claim, report, deadline,
-single-flight, reaper and deferral ladder are the framework's, unchanged, and `agent-api.md` is
-unchanged by it. It is enabled by default; disabling it (the operator's kill switch) stops installs
-and removals and changes nothing on disk.
+single-flight, reaper and deferral ladder are the framework's, unchanged, **with one exception:
+what a deferred run retries** (below). `agent-api.md` is unchanged by it. It is enabled by
+default; disabling it (the operator's kill switch) stops installs and removals and changes nothing
+on disk.
 
 **Desired state.** For each host in scope whose current connection advertised `compat_tools_v1`:
-every enabled GE tool installed, every other GE tool this agent installed absent. **The
-reconciler** compares that with the host's latest `capacity.compat_tools` and, when they differ
-and the host has no open run of this job, materializes **one** run for the first difference:
-removals first (they free disk), then installs in catalogue order. It runs when a tool is enabled
-or disabled, when a host's report changes its installed set, when the host's agent connects, and
-when a run of this job on that host ends. A `failed` run is not retried for the same host and
-SHA-512 until the host's agent reconnects, the tool is enabled again, or an admin presses Run now
-for that host (`POST /v1/admin/jobs/compat_tools.converge/run` with `host_id`, which materializes
-the next difference, the failed one included). A `deferred` run retries on the framework's ladder.
+every enabled GE tool not marked `name_conflict` installed, every other GE tool this agent
+installed absent.
+
+**The first difference.** The reconciler compares that with the host's latest
+`capacity.compat_tools` and orders the differences:
+1. removals, except one whose latest run on this host was deferred `in_use`;
+2. installs, in catalogue order, **except** one held back by a `failed` run: the tool's latest
+   run on this host failed, and since then the host's agent has not reconnected, the tool has not
+   been enabled again, and no admin has pressed Run now for this host;
+3. the removals left out of 1.
+
+The first entry is the **first difference**. One failed tool therefore never stalls later
+installs on that host, and a removal waiting on a session never blocks an install.
+
+**When a run is materialized.** When the host has no open run of this job and a first difference
+exists, the reconciler materializes **one** run for it. It runs when a tool is enabled or
+disabled, when a host's report changes its installed set, when the host's agent connects, and
+when a run of this job on that host ends. Run now (`POST /v1/admin/jobs/compat_tools.converge/run`
+with `host_id`) releases that host's failed holds and materializes or pulls forward its run.
 An offline host catches up when it connects; a reinstalled host reports nothing installed and
 receives every enabled tool.
+
+**The exception: a deferred run never retries verbatim.** When a run is reported `deferred`, the
+framework's retry row is scheduled as usual: at the ladder's time, with `attempt` carried over.
+But its `params` are **not** a copy of the deferred run's. The control plane fills them **when it
+hands the row to the agent** (`GET /v1/agent/jobs/pending`) with the host's **current** first
+difference, recomputed from desired state. If there is none at that moment, the row is closed
+`skipped` and not handed out. A desired-state change (a tool enabled or disabled) pulls a pending
+row of this job forward to now, keeping its `attempt`, as Run now does. So a retry never removes a
+tool that was re-enabled meanwhile, a deferred removal never blocks the install after it, and a
+deferred install never blocks the removal that would free its disk.
 
 **Params** (one action per run, built by the reconciler; an admin never supplies them):
 
@@ -4655,18 +4680,20 @@ receives every enabled tool.
 
 A `remove` for an installed tool no catalogue row matches carries `tool_id: null`.
 No URL, host or path is ever a param (T1). `asset` is `x86_64` or `plain` (T1). `sha512` is the
-fleet desired state's value (T4). `expected_name` is the tool's `steam_name`, `null` while none is
-known. The `install` runner follows §Trust rules. `deadline_secs` is 3600.
+fleet desired state's value (T4). `expected_name` is the tool's `steam_name`: always set for a
+recommended entry, `null` for a tag until the first install reports one. The `install` runner
+follows §Trust rules. `deadline_secs` is 3600.
 
 **Report.** `succeeded` with `summary`
 `{ "action", "tool_id", "name", "sha512", "bytes", "already_installed": bool }`;
-`deferred` or `failed` with `summary.reason` and `error` text. Reasons (an open string; these are
-the ones this amendment defines):
+`deferred` or `failed` with `summary.reason` and `error` text. A `checksum_mismatch` summary also
+carries `expected_sha512` and `actual_sha512`, so both digests are visible in Fleet ▸ Jobs.
+Reasons (an open string; these are the ones this amendment defines):
 
 | reason | outcome |
 |---|---|
 | `insufficient_disk` | `deferred` — free space below the T7 requirement before download |
-| `in_use` | `deferred` — a `remove` while a live session on the host mounts the tools directory |
+| `in_use` | `deferred` — a `remove` while a live, **non-parked** session on the host mounts the tools directory |
 | `invalid_params` | `failed` — params outside T1–T3; nothing fetched |
 | `download_failed`, `redirect_refused`, `size_mismatch` | `failed` — T2–T3 |
 | `checksum_mismatch` | `failed` — T4 |
@@ -4674,11 +4701,14 @@ the ones this amendment defines):
 | `vdf_invalid`, `name_reserved`, `name_mismatch`, `name_conflict` | `failed` — T6 |
 | `io_error` | `failed` |
 
-On a `succeeded` install whose tool has `steam_name` `null`, the control plane stores the reported
-`name` (it must pass the grammar, be unique in the catalogue and not be a reserved name; otherwise
-the run is recorded `failed`, `name_conflict`, and the host is asked to remove it). The agent sends
-a fresh `capacity` after every install or removal, so the per-host state does not wait for the
-periodic report.
+**A reported name that conflicts.** On a `succeeded` install of a tag whose `steam_name` is
+`null`, the control plane stores the reported `name` when it passes the grammar, is not reserved
+(T6) and no other catalogue row holds it. Otherwise it marks the tool `name_conflict`
+(`schema.md` `compat_tools.name_conflict`): the tool leaves desired state, so a host that installed
+it removes it; the tool reads `failed` with reason `name_conflict` on every host; and nothing
+retries it, so there is no reinstall loop. Only an admin clears the mark, by disabling the tool
+and enabling it again. The agent sends a fresh `capacity` after every install or removal, so the
+per-host state does not wait for the periodic report.
 
 ### Trust rules (normative)
 
@@ -4692,8 +4722,9 @@ adds a tag; the agent applies T1–T8 to every install, whatever the control pla
   two fixed asset names applies, never a URL, host or path. The agent builds the only URLs it
   fetches from that tag: `https://github.com/GloriousEggroll/proton-ge-custom/releases/download/<tag>/<asset>`,
   `<asset>` being `<tag>-x86_64.tar.gz` (`asset: "x86_64"`) or `<tag>.tar.gz`
-  (`asset: "plain"`, releases before GE-Proton 11), with the tag in the grammar
-  `^GE-Proton[0-9]{1,3}-[0-9]{1,4}$` re-checked by the agent.
+  (`asset: "plain"`, releases before GE-Proton 11). The **asset stem** is the asset name without
+  `.tar.gz`; the checksum file is `<asset stem>.sha512sum`. The agent re-checks the tag
+  against `^GE-Proton[0-9]{1,3}-[0-9]{1,4}$`.
 - **T2 — HTTPS every hop; redirects only to GitHub's asset hosts.** Every request and every
   redirect hop is `https` with certificate verification, on port 443, never plain HTTP. No
   credential is sent, and none is forwarded across a redirect. github.com answers each release-asset
@@ -4737,10 +4768,10 @@ adds a tag; the agent applies T1–T8 to every install, whatever the control pla
   **Hardlinks, character and block devices, FIFOs, sockets and every other type are refused.**
   Caps: at most **4 GiB unpacked** and **200 000 entries**, counted while extracting; past either
   the run fails `archive_too_large`. Setuid and setgid bits (and sticky) are cleared, extended
-  attributes dropped, owner and group are the agent's whatever the archive says, and after
-  extraction the tree is made read-only (directories `0555`; files `0444`, or `0555` when
-  executable). The finished tree enters the tools directory by **one atomic rename** (T6), so a
-  half-installed tool is never visible. The temporary directory is removed on every outcome.
+  attributes dropped, and owner and group are the agent's whatever the archive says. The finished
+  tree enters the tools directory by **one atomic rename** (T6), so a half-installed tool is never
+  visible, and only **after** that rename is it made read-only (directories `0555`; files `0444`,
+  or `0555` when executable). The temporary directory is removed on every outcome.
 - **T6 — the Steam name.** Every Steam name matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`; `.` and
   `..` are refused (the grammar cannot match them, and the agent checks them explicitly, because
   the name becomes a directory name). The top-level directory holds `compatibilitytool.vdf` (at
@@ -4761,10 +4792,13 @@ adds a tag; the agent applies T1–T8 to every install, whatever the control pla
   download. Tools run only inside a user's session container, from a read-only mount
   (`agent-api.md` §`session_assign` `compat_tools`), with the session's own privileges.
 
-**Removal.** A `remove` run is `deferred` (`in_use`) while any live session on the host (a parked
-one included) has the tools directory mounted. Otherwise the agent renames the tool's directory
-out of the tools directory, then deletes it, and reports `succeeded`. It removes only a directory
-it installed, identified by `name` and SHA-512.
+**Removal.** A `remove` run is `deferred` (`in_use`) while any live **non-parked** session on the
+host has the tools directory mounted. A parked session does not hold it back: it runs no game, and
+when a removal succeeds the control plane supersedes the parked sessions on that host
+(`parked_superseded`), so none keeps a registered tool whose directory is gone. Otherwise the
+agent renames the tool's directory out of the tools directory, restores write permission on the
+tree (it is read-only, T5), deletes it, and reports `succeeded`. It removes only a directory it
+installed, identified by `name` and SHA-512.
 
 **Relation to the Steam preparation policy.** `agent-api.md` §Steam preparation source policy
 says a policy "never accepts arbitrary executable commands, host paths or credentials". That rule
@@ -4785,7 +4819,9 @@ report lists that tool as installed. This is a candidate filter beside the codec
 it is in the totals probe: when it is the only reason no online host qualifies, the launch is
 `503 no_host_available` with `reason: "compat_tool_missing"` and a `message` naming the tool.
 When a host with the tool exists but is full, the answer is `503 capacity_exhausted` as usual. A
-home that pins the launch to one host (§RH05) waits for that host to install the tool. A Valve
+launch pinned to one host by its home (§RH05) gets `503 no_host_available` with
+`compat_tool_missing` until that host has installed the tool; after a `failed` install there, the
+error clears only when that host's agent reconnects or an admin presses Run now for it. A Valve
 tool never constrains placement. A launch of the Steam parent app itself (or a parked start)
 names no game and has no tool constraint.
 
@@ -4807,9 +4843,16 @@ it writes each entry into `config.vdf`
 titles" slot). A **forced** entry replaces whatever is there. An unforced entry is written only
 when the home has no entry for that appid, or the existing entry is exactly what Quasar last wrote
 there; any other entry is the user's own choice and is kept. An entry Quasar last wrote whose
-appid is no longer sent is removed, unless the user has since changed it. The wrapper keeps the
-record of what it wrote inside the home, and it writes no name it cannot see in the mounted tools
-directory unless the name is a Valve name. Prefixes (`steamapps/compatdata`) stay in the home
+appid is no longer sent is removed, unless the user has since changed it. The wrapper writes no
+name it cannot see in the mounted tools directory unless the name is a Valve name.
+
+**The wrapper's record of its writes** lives in the user's home, so it survives image upgrades and
+travels with the home: `~/.local/share/quasar/compat-tool-fills`. UTF-8 text, one
+`<appid>=<name>` line per entry Quasar wrote and still owns (the `QUASAR_COMPAT_TOOLS` token
+grammar, without `!`), each appid at most once. It is rewritten whole after `config.vdf`, through a
+temporary file and a rename. A line that does not parse is ignored. A missing or unreadable record
+means Quasar owns nothing, so every existing entry counts as the user's own choice: the safe
+reading, at the cost of not updating an earlier fill. Prefixes (`steamapps/compatdata`) stay in the home
 whichever tool runs.
 
 ### Hot Loading
@@ -4840,8 +4883,8 @@ admin write writes one `admin_activity` row, actor the admin:
 | `compat_tool.default.set` | `instance` | `tool_id`, `previous_tool_id`, and `tag`/`sha512` of each GE tool named |
 | `compat_tool.mapping.set`, `compat_tool.mapping.clear` | type `compat_tool_mapping`, id `steam:<appid>` | `tool_id`, `forced`, the previous values, and `tag`/`sha512` of each GE tool named |
 
-Each terminal report of `compat_tools.converge` writes `compat_tool.install` or
-`compat_tool.remove`. The target is the host. The actor is the admin whose Run now queued the run,
+Each `succeeded` or `failed` report of `compat_tools.converge` writes `compat_tool.install` or
+`compat_tool.remove`; a deferral is not audited (it shows in Fleet ▸ Jobs). The target is the host. The actor is the admin whose Run now queued the run,
 or else the admin whose latest enable or disable of the tool made the change desired, or `null`
 (the system) when there is neither. Details: `tag`, `sha512`, `host_id`, `name`, `state`, `reason`,
 `run_id`. A Valve tool has no SHA-512 or hosts; its rows carry `steam_name`. `host_ids` holds at
@@ -8070,7 +8113,8 @@ untrustworthy.
 
 > *(Amendment 56, accreleus/quasar#1066: a code-owned host-scoped agent job,
 > `compat_tools.converge`, installs and removes compatibility tools; its params, report and trust
-> rules are §Compatibility tools. Nothing in the framework changes for it.)*
+> rules are §Compatibility tools. Nothing in the framework changes for it except one rule for
+> this job alone: a deferred run's retry carries freshly computed params, never a copy.)*
 
 ### Schedule and window semantics
 
