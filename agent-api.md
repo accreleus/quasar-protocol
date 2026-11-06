@@ -3032,7 +3032,8 @@ arbitrary executable commands, host paths or credentials.
 separate, narrow path admits executable content outside an image: GE-Proton release assets
 installed by the `compat_tools.converge` job under the trust rules T1–T8 (`control-api.md`
 §Compatibility tools), held in the agent-owned tools directory and mounted read-only into
-Steam-family sessions. It carries no command, host path or credential from the control plane,
+Steam-family sessions. It carries no URL, command, host path or credential from the control plane
+(only a release tag and a SHA-512 the control plane recorded),
 never reaches a template or a managed home, and admits nothing else.
 
 On one connection, lower revisions are ignored and identical snapshots are

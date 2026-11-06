@@ -4515,7 +4515,8 @@ environment value, so no other character, and no `.` or `-` first, is ever accep
 - `steam_name`: `null` only for a GE tag no host has installed yet (the name is learned from the
   first verified install). `display_name`: the Valve label (`Proton Experimental`, `Proton 11`),
   else `steam_name`, else `tag`.
-- `asset`: `null` for a Valve build. `url` is always
+- `asset`: `null` for a Valve build. `url` is derived for display and never sent to an agent
+  (T1); it is always
   `https://github.com/GloriousEggroll/proton-ge-custom/releases/download/<tag>/<asset.name>`,
   and `asset.name` is `<tag>-x86_64.tar.gz` or, for releases before GE-Proton 11, `<tag>.tar.gz`.
 - `hosts`: per-host install state counts over the hosts in scope (§Per-host install state); `null`
@@ -4646,16 +4647,16 @@ receives every enabled tool.
 **Params** (one action per run, built by the reconciler; an admin never supplies them):
 
 ```json
-{ "action": "install", "tool_id": "6f1c…", "tag": "GE-Proton11-12",
-  "url": "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton11-12/GE-Proton11-12-x86_64.tar.gz",
+{ "action": "install", "tool_id": "6f1c…", "tag": "GE-Proton11-12", "asset": "x86_64",
   "size_bytes": 566859228, "sha512": "<128 lowercase hex>",
   "expected_name": "GE-Proton11-12-x86_64" }
 { "action": "remove", "tool_id": "6f1c…", "name": "GE-Proton11-12-x86_64", "sha512": "<128 hex>" }
 ```
 
 A `remove` for an installed tool no catalogue row matches carries `tool_id: null`.
-`expected_name` is the tool's `steam_name`, `null` while none is known. The `install` runner
-follows §Trust rules. `deadline_secs` is 3600.
+No URL, host or path is ever a param (T1). `asset` is `x86_64` or `plain` (T1). `sha512` is the
+fleet desired state's value (T4). `expected_name` is the tool's `steam_name`, `null` while none is
+known. The `install` runner follows §Trust rules. `deadline_secs` is 3600.
 
 **Report.** `succeeded` with `summary`
 `{ "action", "tool_id", "name", "sha512", "bytes", "already_installed": bool }`;
@@ -4664,7 +4665,7 @@ the ones this amendment defines):
 
 | reason | outcome |
 |---|---|
-| `insufficient_disk` | `deferred` — free space below the T7 floor before download |
+| `insufficient_disk` | `deferred` — free space below the T7 requirement before download |
 | `in_use` | `deferred` — a `remove` while a live session on the host mounts the tools directory |
 | `invalid_params` | `failed` — params outside T1–T3; nothing fetched |
 | `download_failed`, `redirect_refused`, `size_mismatch` | `failed` — T2–T3 |
@@ -4685,57 +4686,77 @@ GE-Proton is executable code from outside Quasar's images. These rules are what 
 implementation that cannot meet one refuses the install. The control plane applies T1–T4 when it
 adds a tag; the agent applies T1–T8 to every install, whatever the control plane checked.
 
-- **T1 — fixed origin.** Only release assets of `GloriousEggroll/proton-ge-custom`. The asset URL is
-  exactly `https://github.com/GloriousEggroll/proton-ge-custom/releases/download/<tag>/<asset>`
-  with `<tag>` in the tag grammar and `<asset>` either `<tag>-x86_64.tar.gz` or `<tag>.tar.gz`;
-  the checksum file is `<asset stem>.sha512sum` beside it. Release metadata comes from GitHub's
-  API for that repository. No other URL, repository, mirror, or compression format is fetched.
-- **T2 — HTTPS, and redirects only to GitHub's asset hosts.** Every request is `https` with
-  certificate verification, never plain HTTP, and carries no credential. The download URLs (the
-  asset and its `.sha512sum`) are the github.com release-asset URLs of T1. github.com answers each
-  with a redirect to its own release-asset host, so redirects are followed, but **only** to an
-  `https` URL whose host is exactly one of this allowlist: `github.com`,
+- **T1 — source.** The project is pinned to `GloriousEggroll/proton-ge-custom`; no other
+  repository, fork, mirror or compression format is ever fetched. **The wire carries only the
+  tag, never a URL:** no admin route takes one, and the job params carry the tag and which of the
+  two fixed asset names applies, never a URL, host or path. The agent builds the only URLs it
+  fetches from that tag: `https://github.com/GloriousEggroll/proton-ge-custom/releases/download/<tag>/<asset>`,
+  `<asset>` being `<tag>-x86_64.tar.gz` (`asset: "x86_64"`) or `<tag>.tar.gz`
+  (`asset: "plain"`, releases before GE-Proton 11), with the tag in the grammar
+  `^GE-Proton[0-9]{1,3}-[0-9]{1,4}$` re-checked by the agent.
+- **T2 — HTTPS every hop; redirects only to GitHub's asset hosts.** Every request and every
+  redirect hop is `https` with certificate verification, on port 443, never plain HTTP. No
+  credential is sent, and none is forwarded across a redirect. github.com answers each release-asset
+  request (the asset and its `.sha512sum`) with a redirect to its own asset host, so redirects are
+  followed, but **only** to a URL whose host is exactly one of this allowlist: `github.com`,
   `release-assets.githubusercontent.com` (where GitHub sends release assets at this amendment) and
   `objects.githubusercontent.com` (where it sent them before). No other host, no subdomain or
-  suffix match, no port other than 443, at most 5 redirects; anything else is `redirect_refused`
-  and nothing is kept. Every hop's resolved address must be publicly routable (loopback, private,
-  link-local, CGNAT, multicast and unspecified addresses are refused), the guard the image-digest
-  resolver's SSRF containment applies. The control plane reads release metadata only from
+  suffix match, at most 5 redirects; anything else is `redirect_refused` and nothing is kept.
+  Every hop's resolved address must be publicly routable (loopback, private, link-local, CGNAT,
+  multicast and unspecified addresses are refused), the guard the image-digest resolver's SSRF
+  containment applies. The control plane reads release metadata only from
   `https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/tags/<tag>` and follows
   no redirect there. Changing either list is a contract amendment. **The allowlist is containment,
   not proof:** the SHA-512 (T4) is what proves the bytes, whichever allowed host served them.
-- **T3 — size cap.** The asset is at most 2 GiB (2 147 483 648 bytes) and the checksum file at most
-  4 KiB. The agent reads at most `size_bytes` + 1 bytes and fails `size_mismatch` unless it read
-  exactly `size_bytes`.
-- **T4 — SHA-512.** The checksum file is one line in GNU `sha512sum` format: 128 lowercase hex,
-  two spaces (or space and `*`), the asset's own file name, optional trailing newline; any other
-  content or another file name is `checksum_malformed`. A recommended entry's SHA-512 is pinned in
-  the Quasar release and no checksum file is fetched for it. The agent hashes the download as it
-  writes it to staging and compares with `params.sha512` **before** reading the archive; a mismatch
-  deletes the staging file. Nothing from an unverified download is ever extracted or kept.
-- **T5 — safe extraction.** A gzip tar only, extracted by the agent itself without following
-  links, into a staging directory on the same filesystem as the tools directory and **outside**
-  it. Refused (`unsafe_archive`) unless every entry is under one top-level directory, has a
-  relative path with no `..` component and no NUL, and is a directory, regular file, symlink whose
-  target is relative and resolves inside the top-level directory, or hardlink to an earlier
-  regular file entry. No device, FIFO or socket; no entry below an extracted symlink. Owner and
-  group are the agent's, setuid, setgid and sticky bits and extended attributes are dropped, and
-  after extraction the whole tree is made read-only (directories `0555`; files `0444`, or `0555`
-  when executable). More than 8 GiB unpacked or 200 000 entries is `archive_too_large`. Staging is
-  removed on every failure.
-- **T6 — the Steam name.** The top-level directory holds `compatibilitytool.vdf` (at most 64 KiB)
-  with exactly one key under `compatibilitytools` / `compat_tools`, whose `install_path` is `.`,
-  `from_oslist` is `windows` and `to_oslist` is `linux`; else `vdf_invalid`. That key is the
-  tool's Steam name. It must pass the grammar and must not be **reserved** (start with `proton_`,
-  `steamlinuxruntime` or `legacysteamruntime`) or `name_reserved`; must equal `expected_name` when
-  that is set or `name_mismatch`; and must not be an existing directory in the tools directory
-  holding a different SHA-512, or `name_conflict`. The agent then renames the staged tree into the
-  tools directory as `<name>` in one atomic rename, so a half-installed tool is never visible.
-  An install of a SHA-512 already installed under that name succeeds at once with
-  `already_installed: true`.
-- **T7 — disk.** Before downloading, free space on the tools filesystem must be at least
-  5 × `size_bytes` + 1 GiB, or the run is `deferred` (`insufficient_disk`) with nothing fetched.
-  Extraction stops (`io_error`, staging removed) if free space falls below 1 GiB.
+- **T3 — download caps.** The asset is at most 2 GiB (2 147 483 648 bytes); the checksum file at
+  most 4 KiB, and the control plane stops reading it there. The agent reads at most
+  `size_bytes` + 1 bytes and fails `size_mismatch` unless it read exactly `size_bytes`.
+- **T4 — checksum provenance.** The SHA-512 an agent verifies against always comes from the
+  control plane's fleet desired state (`compat_tools.asset_sha512`), so every host verifies the
+  same value and installs identical bytes. Its source is one of two:
+  - a **recommended-list** entry: the SHA-512 ships in the Quasar release; no checksum file is
+    fetched;
+  - an **arbitrary tag**: the **control plane** fetches `<asset stem>.sha512sum` **once**, when the
+    tag is added (T1–T3 apply), checks that it is exactly one line in GNU `sha512sum` format
+    (128 lowercase hex, two spaces or a space and `*`, a file name, an optional trailing newline)
+    and that the file name in it equals the asset's, then records that SHA-512. Anything else is
+    `422 compat_tool_unverifiable` (`checksum_malformed`) and nothing is stored. Agents never fetch
+    a checksum file.
+
+  The agent hashes the download as it writes it into its temporary directory and compares with
+  `params.sha512` **before** reading the archive; a mismatch (`checksum_mismatch`) deletes it.
+  Nothing from an unverified download is ever extracted or kept.
+- **T5 — extraction.** The agent extracts the verified gzip tar itself, without following links,
+  into a temporary directory on the same filesystem as the tools directory and **outside** it.
+  It is refused (`unsafe_archive`) unless every entry:
+  - lies under one top-level directory, with a relative path that has no `..` component, does
+    not start with `/`, and holds no NUL;
+  - is a **regular file**, a **directory**, or a **symlink** whose target is relative and resolves
+    inside the tool's directory, and no entry lies below an extracted symlink.
+
+  **Hardlinks, character and block devices, FIFOs, sockets and every other type are refused.**
+  Caps: at most **4 GiB unpacked** and **200 000 entries**, counted while extracting; past either
+  the run fails `archive_too_large`. Setuid and setgid bits (and sticky) are cleared, extended
+  attributes dropped, owner and group are the agent's whatever the archive says, and after
+  extraction the tree is made read-only (directories `0555`; files `0444`, or `0555` when
+  executable). The finished tree enters the tools directory by **one atomic rename** (T6), so a
+  half-installed tool is never visible. The temporary directory is removed on every outcome.
+- **T6 — the Steam name.** Every Steam name matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`; `.` and
+  `..` are refused (the grammar cannot match them, and the agent checks them explicitly, because
+  the name becomes a directory name). The top-level directory holds `compatibilitytool.vdf` (at
+  most 64 KiB) with exactly one key under `compatibilitytools` / `compat_tools`, whose
+  `install_path` is `.`, `from_oslist` is `windows` and `to_oslist` is `linux`; else
+  `vdf_invalid`. That key is the tool's Steam name, validated with the grammar (`vdf_invalid`
+  when it fails). It is refused (`name_reserved`) when it collides with a Valve name: it starts
+  with `proton_` (also `steamlinuxruntime` or `legacysteamruntime`). It must equal
+  `expected_name` when that is set (`name_mismatch`), and must not be an existing directory in the
+  tools directory holding a different SHA-512 (`name_conflict`). The agent then renames the tree
+  into the tools directory as `<name>`. An install of a SHA-512 already installed under that name
+  succeeds at once with `already_installed: true`.
+- **T7 — disk, against the unpacked cap.** Before downloading, free space on the tools filesystem
+  must be at least `size_bytes` + 4 GiB (the T5 unpacked cap) + 1 GiB reserve, or the run is
+  `deferred` (`insufficient_disk`) with nothing fetched. Extraction also stops (`io_error`,
+  temporary directory removed) if free space falls below the 1 GiB reserve.
 - **T8 — never executed by the agent.** The agent never runs, sources or loads any file from a
   download. Tools run only inside a user's session container, from a read-only mount
   (`agent-api.md` §`session_assign` `compat_tools`), with the session's own privileges.
@@ -4809,14 +4830,24 @@ any other failed check.
 
 ### Audit
 
-Each accepted admin write writes one `admin_activity` row: `compat_tool.add` (target the tool;
-details `tag`, `asset`, `sha512`), `compat_tool.enable`, `compat_tool.disable`,
-`compat_tool.default.set` (target `instance`; details `tool_id`, `previous_tool_id`),
-`compat_tool.mapping.set` (target type `compat_tool_mapping`, id `steam:<appid>`; details `tool_id`, `forced`, the previous
-values), `compat_tool.mapping.clear` (details the removed values). Each terminal report of
-`compat_tools.converge` writes `compat_tool.install` or `compat_tool.remove` with a null actor
-(the system), target the host, details `tool_id`, `name`, `state`, `reason`, `run_id`. Tool names
-are stamped into `details` so a row stays readable after a tool is gone (§Audit-log names).
+Every row names its **actor, the tool's tag and SHA-512, and the target hosts**. Each accepted
+admin write writes one `admin_activity` row, actor the admin:
+
+| action | target | details |
+|---|---|---|
+| `compat_tool.add` | the tool | `tag`, `asset`, `sha512`, `source`, `host_ids: []` (nothing is desired yet) |
+| `compat_tool.enable`, `compat_tool.disable` | the tool | `tag`, `sha512`, `host_ids`: the hosts in scope that will install or remove it |
+| `compat_tool.default.set` | `instance` | `tool_id`, `previous_tool_id`, and `tag`/`sha512` of each GE tool named |
+| `compat_tool.mapping.set`, `compat_tool.mapping.clear` | type `compat_tool_mapping`, id `steam:<appid>` | `tool_id`, `forced`, the previous values, and `tag`/`sha512` of each GE tool named |
+
+Each terminal report of `compat_tools.converge` writes `compat_tool.install` or
+`compat_tool.remove`. The target is the host. The actor is the admin whose Run now queued the run,
+or else the admin whose latest enable or disable of the tool made the change desired, or `null`
+(the system) when there is neither. Details: `tag`, `sha512`, `host_id`, `name`, `state`, `reason`,
+`run_id`. A Valve tool has no SHA-512 or hosts; its rows carry `steam_name`. `host_ids` holds at
+most 100 ids, with `host_ids_truncated: true` past that, to stay inside the 4096-byte details
+bound. Tags and names are stamped into `details`, so a row stays readable after a tool is gone
+(§Audit-log names).
 
 ## Warm Steam — parked sessions *(Amendment 39, #759)*
 

@@ -3229,8 +3229,10 @@ paths:
       summary: Add a GE-Proton release by tag, pinned to its release checksum (amendment 56).
       description: >-
         Amendment 56. Resolves the release on github.com (GloriousEggroll/proton-ge-custom only),
-        picks <tag>-x86_64.tar.gz else <tag>.tar.gz, checks <asset stem>.sha512sum under trust
-        rules T1-T4 and stores the tool disabled with the pinned SHA-512. Nothing installs until
+        picks <tag>-x86_64.tar.gz else <tag>.tar.gz, fetches <asset stem>.sha512sum once (4 KiB
+        cap), checks its format and that the file name in it is the asset's (trust rules T1-T4),
+        and stores the tool disabled with that SHA-512 as fleet desired state; agents verify
+        against it and never fetch a checksum. Nothing installs until
         it is enabled. Audited as compat_tool.add.
       x-required-role: admin
       security: [ { bearerAuth: [] } ]
@@ -4650,7 +4652,7 @@ components:
       required: [name, url, size_bytes, sha512]
       properties:
         name: { type: string, description: "<tag>-x86_64.tar.gz, or <tag>.tar.gz before GE-Proton 11." }
-        url: { type: string, format: uri, description: "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/<tag>/<name>" }
+        url: { type: string, format: uri, description: "Derived for display: https://github.com/GloriousEggroll/proton-ge-custom/releases/download/<tag>/<name>. Never sent to an agent: the job carries only the tag (trust rule T1)." }
         size_bytes: { type: integer, minimum: 1, maximum: 2147483648 }
         sha512: { type: string, pattern: "^[0-9a-f]{128}$" }
     CompatToolHostCounts:
