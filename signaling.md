@@ -210,6 +210,22 @@ check holds for earlier builds.)*
 > treats an `error` with no `code`, or a `code` it does not know, as before. `message` is for a
 > person and is not part of the rule. The control plane relays the message unchanged.
 
+### WebTransport sessions (amendment 54, accreleus/quasar#1026) *(Pre-approved by the owner 2026-11-06.)*
+
+> **Amendment 54 — the second transport. Additive: one `code` value on the existing `error`
+> message; no new message, field or close code.**
+> - **Bypassed, not changed.** A session whose transport is WebTransport
+>   (`transport-webtransport.md`) needs no SDP, ICE or DataChannel while that transport carries
+>   it. The launch response still carries this protocol's coordinates for every session, and a
+>   client whose WebTransport connect fails falls back to this protocol unchanged.
+> - **One media client across both transports.** When a WebTransport client takes over a
+>   session from a WebRTC peer, the host sends the client holding signaling
+>   `{ "type": "error", "code": "taken_over", "message": "…" }`, and the control plane closes
+>   that WebSocket with `4410` after relaying it. The client treats it as `4410`: it does not
+>   mint a token or reconnect. A client that does not know the `code` still gets `4410`.
+> - **Tokens do not cross.** `/v1/signal` refuses a WebTransport transport token with `4401`,
+>   like any token it did not mint for signaling.
+
 ## Phase 0 simplifications (revisit later)
 - No authentication on the WebSocket. Phase 1 puts signaling behind the control plane with an authenticated, single-use session token in the connect URL.
 - One client per host process. Multi-session is the node agent's job (Phase 1+).

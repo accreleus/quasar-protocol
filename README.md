@@ -8,6 +8,12 @@ Phase 0 uses plain JSON for everything to stay debuggable. A compact binary inpu
 - `signaling.md` — WebRTC signaling handshake (WebSocket, browser <-> host). **Extended by P1-D** with the authenticated, control-plane-relayed layer (same message shapes).
 - `input.md` — input events (DataChannel, browser -> host) + clock-sync for latency measurement
 
+## Later contracts
+- `transport-webtransport.md` — media transport #2 (EXPERIMENTAL, amendment 54): media and input
+  as QUIC datagrams over WebTransport, decoded by the client. WebRTC (`signaling.md`) stays the
+  default and the guaranteed fallback.
+- `native-client.md` — native-client capability, metrics and certification report (AS10-12).
+
 ## Phase 1 contracts (P1-A..D)
 The four interface contracts that let the control plane, node agent, and web client be built in
 parallel on cheaper tiers. They are mutually consistent: the schema shapes the APIs, the APIs

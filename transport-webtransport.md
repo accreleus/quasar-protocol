@@ -1,0 +1,443 @@
+# WebTransport media transport (transport #2, EXPERIMENTAL, FROZEN)
+
+*(Amendment 54, accreleus/quasar#1026, spec accreleus/quasar#1024, pre-approved by the owner
+2026-11-06; independent Opus review before merge.)*
+
+The wire contract for the second implementation of the transport slot: media and input as QUIC
+datagrams over WebTransport, decoded by the client itself (WebCodecs in a browser). WebRTC
+(`signaling.md`) stays the default and the guaranteed floor: every session that may use this
+transport also gets WebRTC signaling coordinates, and a client that cannot connect here, or loses
+the stream, falls back to WebRTC.
+
+**Frozen** like every document here: the node agent, the web client and a future native client
+implement against it, so a change needs Opus and the owner's sign-off. The protocol carries its
+own version, `wt_proto` (§Hello), so a correction is a new version rather than an edit.
+
+This document replaces the unmerged draft of accreleus/quasar-protocol#12 (`wt_proto` 0, never
+implemented). The first version anything implements is **`wt_proto` 1**.
+
+Co-defined with `agent-api.md` (the endpoint report, the token hash, the takeover rule),
+`control-api.md` (the launch response, the token endpoint, the transport choice, the host endpoint
+override) and `schema.md` (migration 0111).
+
+## Relationship to the invariants
+
+- **Invariant 1 (control plane / node agent split) and invariant 6 (the client talks only to the
+  control plane).** The API and all control traffic stay on the control plane. The **media
+  transport** may connect to the agent, or to an edge in front of it, with a short-lived token the
+  control plane mints; the agent never authorizes anything on its own. WebRTC media already flows
+  browser↔agent over ICE today; this transport makes the address explicit. The quasar-side ADR
+  0010 (accreleus/quasar#1027) rewords `CLAUDE.md` invariant 6 to say exactly that: **media may
+  connect to the agent with a control-plane-minted token; API and control never.**
+- **Invariant 3 (transport is an interface).** This is transport #2. Nothing upstream of the
+  encoded-frame boundary appears here: the codec, the encoder, the ABR ladder and the compositor
+  are the session's, identical on both transports, so a fallback never re-encodes or renegotiates
+  a codec.
+- **`input.md` is reused verbatim** (§Input). The input format is not forked per transport.
+
+## Endpoint and URL
+
+The client gets one **opaque** `https` URL from the control plane
+(`control-api.md` `transport_options.webtransport.url`) and opens a WebTransport session to it with
+datagrams enabled. It never builds, parses or rewrites the URL.
+
+The control plane picks the URL per host (`control-api.md` §WebTransport endpoint):
+
+- **Direct.** The agent's own QUIC listener: `https://<address>:<port>/wt`, from the agent's
+  `capacity.webtransport` report (`agent-api.md`). The agent presents a self-signed certificate and
+  the client pins it with `serverCertificateHashes` (§Certificates).
+- **Edge.** An admin-set public URL for the host, e.g. a reverse proxy with a publicly trusted
+  certificate in front of the agent's listener. The client trusts the certificate normally and gets
+  no hashes. How the edge reaches the agent, and how it trusts the agent's certificate, is the
+  operator's and is outside this contract.
+
+A future Quasar relay (the WebTransport counterpart of TURN) is one more URL source: it needs no
+change here, because the URL is opaque and the session is named by the token, not the URL.
+
+The agent accepts a WebTransport session at any path on its listener. **The path is not routing
+and not authorization**: the token in `hello` names the session. One listener serves every session
+on the host.
+
+## Certificates
+
+In direct mode the agent's listener presents a certificate the agent made itself, under the
+browser rules for `serverCertificateHashes`:
+
+- ECDSA with the P-256 curve; X.509 v3;
+- a validity period (`notAfter` − `notBefore`) of **at most 14 days**; the agent SHOULD use 13
+  days, with `notBefore` up to one hour before it was made, to absorb clock skew.
+
+**Rotation, with an overlap.** The agent reports every certificate it may present, current first,
+as `capacity.webtransport.certificates` (`agent-api.md`), each with its SHA-256 hash and validity.
+
+1. When the current certificate has **72 hours or less** left, the agent makes the next one and
+   reports both.
+2. When the current one has **24 hours or less** left, the agent presents the next one on new
+   connections. Live connections keep theirs.
+3. Once the old one has expired the agent stops reporting it.
+
+The agent re-sends `capacity` whenever that list changes. The control plane sends the client the
+hash of every reported certificate that has not expired (at most two, during the overlap), so a
+client connecting just before or just after the switch accepts either one. An agent restart may
+make a new certificate at once; it is reported before the listener accepts connections with it.
+
+An agent configured to present an operator-supplied, publicly trusted certificate reports
+`certificates: []`, and the control plane then sends no hashes.
+
+## Authentication and tokens
+
+The only credential is the single-use **transport token**:
+
+- Minted by the control plane at launch and by `POST /v1/sessions/{id}/transport-token`
+  (`control-api.md`); plaintext exactly once, in that response; stored hashed (`schema.md`
+  `session_tokens`, `kind = 'webtransport'`); TTL 60 s, the `signaling.token` policy.
+- Delivered to the agent as a hash: lowercase hex SHA-256 of the token's UTF-8 bytes, the form the
+  control plane stores. It rides `session_assign` at launch and `session_transport_token` for a new
+  mint (`agent-api.md`). The agent validates locally: no control-plane round trip on the connect
+  path.
+- Presented in `hello`, **never in the URL**.
+- **Single use.** A `hello` that the agent accepts consumes the token. A `hello` refused with
+  `session_not_ready` does not, so the client retries with the same token inside its TTL.
+- A transport token is never a signaling token, and a signaling token is never a transport token:
+  the control plane's `/v1/signal` refuses a `webtransport` token, and the agent knows only
+  transport-token hashes.
+
+**Reconnect** (a reload, a lost connection): the client mints a fresh token from
+`POST /v1/sessions/{id}/transport-token` and connects again; the new connection takes over the old
+one (§Takeover).
+
+## Takeover
+
+One media client per session, across both transports. The last client to authenticate wins, as on
+WebRTC (`signaling.md` "Attach is explicit takeover", amendment 27):
+
+- **WebTransport takes over WebTransport.** On a `hello` with a valid token while another client is
+  connected, the agent accepts the new one, sends the old one `bye {reason: "taken_over"}` and
+  closes it with code `4410`. The displaced client MUST NOT mint a token or reconnect; it shows
+  "session taken over elsewhere", as for signaling close `4410`.
+- **WebTransport takes over WebRTC.** The agent stops sending media to the WebRTC peer and sends
+  the client that holds signaling `{ "type": "error", "code": "taken_over" }` through the relay; the
+  control plane then closes that signaling WebSocket with `4410` (`signaling.md`, amendment 54).
+- **WebRTC takes over WebTransport.** A new WebRTC peer that the host accepts under amendment 27
+  displaces the WebTransport client the same way: `bye {reason: "taken_over"}`, close `4410`.
+- **Bound.** At most 6 takeovers of a session in any 60 s, counted across both transports. Past
+  that the agent refuses a new `hello` with `error {code: "takeover_rate_limited"}` and closes
+  it; the connected client keeps streaming.
+
+## Channels
+
+Two QUIC primitives:
+
+1. **One bidirectional control stream**, opened by the client as soon as the WebTransport session
+   is up. Reliable and ordered. Each message is a u32 little-endian byte length, then that many
+   bytes of UTF-8 JSON, one object discriminated by `type`. A receiver ignores a `type` it does not
+   know, and fields it does not know.
+2. **Datagrams**, unreliable and unordered: media, FEC, input and microphone. Binary. The first
+   byte is the channel:
+
+   | id | channel | direction |
+   |---|---|---|
+   | `0x01` | video | agent → client |
+   | `0x02` | audio | agent → client |
+   | `0x03` | input | client → agent |
+   | `0x04` | FEC repair | agent → client |
+   | `0x05` | microphone | client → agent |
+
+   A receiver drops a datagram on a channel it does not know.
+
+Every multi-byte binary field is little-endian. Every datagram fits the connection's current
+maximum datagram size; there is no fixed payload budget.
+
+**Clocks.** Media timestamps are 90 kHz (video) and 48 kHz (audio), as on RTP. `capture_us` is the
+agent's wall clock (Unix epoch, microseconds) when the frame or audio packet was captured; the
+client maps it to its own clock with the control-stream `ping`/`pong` offset (§Ping and pong), which
+is what the deep glass-to-glass trace needs.
+
+**`pkt_seq`.** Every agent → client datagram (video, audio, FEC) carries a u32 `pkt_seq`, one
+counter for the whole connection, +1 per datagram sent, retransmissions included. It is what
+receiver feedback reports on (§Feedback). It wraps.
+
+## Control stream
+
+### Hello (client → agent, the first message)
+
+```json
+{ "type": "hello", "wt_proto": 1, "token": "<transport token>",
+  "session_id": "<uuid>", "client": "browser", "fec": ["xor"] }
+```
+
+- `client`: `"browser"` or `"native"`, informational (the `client_type` vocabulary of
+  `control-api.md`).
+- `session_id`: a cross-check; a token for another session is `auth_failed`.
+- `fec`: the FEC schemes the client can decode (§FEC). Absent or `[]`: the agent sends no FEC.
+
+The agent replies `hello_ack`, or `error` then closes:
+
+| `error.code` | meaning | client |
+|---|---|---|
+| `auth_failed` | token unknown, expired, consumed, or not this session's (close `4401`) | mint a fresh token once; then fall back |
+| `session_not_ready` | the agent does not hold this session's assignment, or the token's hash, yet | retry the same token after 250 ms, inside its TTL |
+| `session_ended` | the session is stopping or ended (close `4404`) | end; do not reconnect |
+| `unsupported_version` | the agent speaks no `wt_proto` the client offered | fall back to WebRTC |
+| `takeover_rate_limited` | §Takeover | fall back or retry later |
+| `internal` | anything else | fall back to WebRTC |
+
+`code` is an open string: a client treats an unknown `code` as `internal`.
+
+### Hello ack (agent → client)
+
+```json
+{ "type": "hello_ack", "wt_proto": 1, "from_frame_seq": 0,
+  "video": { "codec": "h264", "description_b64": "<avcC>",
+             "width": 1920, "height": 1080, "fps": 60,
+             "color_space": { "primaries": "bt709", "transfer": "bt709",
+                              "matrix": "bt709", "full_range": false } },
+  "audio": { "codec": "opus", "channels": 2, "sample_rate": 48000, "ptime_ms": 10 },
+  "mic":   { "codec": "opus", "channels": 1, "sample_rate": 48000, "ptime_ms": 10 },
+  "fec": "xor",
+  "retransmit_window_ms": 250 }
+```
+
+- `video.codec` is the session's codec in the wire vocabulary `h264 | h265 | av1`, resolved at
+  launch exactly as for WebRTC. This transport never renegotiates it.
+- `description_b64`: the decoder configuration record, base64: `avcC` for H.264, `hvcC` for HEVC,
+  `av1C` (optional) for AV1. It is what `VideoDecoder.configure({description})` takes.
+- `color_space`: the `VideoColorSpaceInit` the encoder signals (`bt709` or `smpte170m` for
+  BT.601). Optional; when absent the client uses what the bitstream signals.
+- `mic`: present only when the session was granted a microphone (`session_assign.stream.mic`);
+  `null` otherwise, and the agent drops channel `0x05`.
+- `fec`: the scheme the agent will send, one of the client's `hello.fec`, or `null`.
+- `retransmit_window_ms`: how long the agent keeps video datagrams for retransmission (§NACK).
+
+**A new description.** When the encoder's configuration changes (an external resize, an encoder
+restart), the agent sends `hello_ack` again with the new `video` and `from_frame_seq`: the first
+frame that uses it, which is a keyframe. Because the control stream and datagrams are not ordered
+against each other, the client applies the new configuration at that `frame_seq`, not on receipt,
+and holds frames from `from_frame_seq` on until it has the message. A re-sent `hello_ack` repeats
+every field.
+
+**Version.** The client sends the highest `wt_proto` it speaks; the agent answers with the highest
+it speaks that is not higher. A client that cannot use the answer sends `bye` and falls back.
+
+### Keyframe request (client → agent)
+
+```json
+{ "type": "keyframe_request", "reason": "startup" | "loss" | "late" | "decode_error" }
+```
+
+The agent forces an IDR through the same path PLI uses. It MAY coalesce requests: at least one IDR
+follows one or more requests, as soon as the encoder allows, and the agent SHOULD produce it within
+one frame interval.
+
+### NACK (client → agent), and nack_miss (agent → client)
+
+```json
+{ "type": "nack", "frame_seq": 4711, "frags": [[3, 5], [9, 9]] }
+{ "type": "nack_miss", "frame_seq": 4711, "frags": [[9, 9]] }
+```
+
+`frags` are inclusive `frag_index` ranges of one frame. The agent resends each fragment it still
+holds as a new datagram: same header and payload, a new `pkt_seq`, flag `retransmit` set. It
+answers `nack_miss` for the ones it no longer holds. §Loss recovery says when the client sends
+these.
+
+### Feedback (client → agent)
+
+Receiver feedback for congestion control, sent every 50 ms (20–100 ms) while datagrams arrive.
+
+```json
+{ "type": "feedback", "seq": 812,
+  "first_pkt_seq": 120400, "count": 310,
+  "ref_us": 7340219000,
+  "arrivals_b64": "<count × u16>",
+  "recv_kbps": 14200, "lost": 1, "interval_ms": 50 }
+```
+
+- `seq`: per-connection feedback counter, +1 per message.
+- `first_pkt_seq`, `count`: the `pkt_seq` range this message reports, without gaps between
+  consecutive messages (a range may be reported again; the agent uses the latest).
+- `ref_us`: the client's monotonic clock, microseconds, that arrival offsets count from.
+- `arrivals_b64`: base64 of `count` u16 values, one per `pkt_seq` in order: the arrival time in
+  units of 50 µs after `ref_us`, or `0xFFFF` for not received (yet).
+- `recv_kbps`, `lost`, `interval_ms`: the receive rate, datagrams lost, and the length of the
+  interval the message covers, for the agent's logs and metrics.
+
+The agent keeps the send time of every `pkt_seq` and estimates the available rate from the delay
+and loss pattern, together with the QUIC connection's own congestion state. The estimate feeds the
+session's existing ABR (bitrate, then rung, `smooth` mode); there is no second bitrate controller.
+An agent may ignore `feedback`, and a client may omit it; the stream then follows QUIC congestion
+control alone.
+
+### Input on the control stream (client → agent, optional)
+
+```json
+{ "type": "input", "event": { "t": "k", "code": 30, "pressed": false } }
+```
+
+`event` is one `input.md` event, verbatim. A client MAY send any event this way instead of as a
+datagram, for example a key or button release it cannot afford to lose. The agent applies both
+paths to the same input stream, in arrival order.
+
+### Ping and pong (both directions)
+
+Liveness, round-trip time and the clock offset. Either side sends `ping`; the other answers `pong`
+at once.
+
+```json
+{ "type": "ping", "id": 17, "tc": 123456.7 }                                   // client → agent
+{ "type": "pong", "id": 17, "tc": 123456.7, "ts": 998877.1, "tw": 1762400000123.4 } // agent → client
+{ "type": "ping", "id": 4, "ts": 998880.0, "tw": 1762400003001.2 }              // agent → client
+{ "type": "pong", "id": 4, "ts": 998880.0, "tw": 1762400003001.2, "tc": 123459.9 } // client → agent
+```
+
+`tc` is the client's monotonic clock in ms, `ts` the agent's monotonic clock in ms (both as in
+`input.md` §Clock sync), and `tw` the agent's wall clock in Unix ms at the instant of `ts`, which
+maps `capture_us`. A `pong` echoes the `ping`'s fields and adds its own clock. The client pings once
+a second; the round trip is the RTT it shows. **`ping` and `pong` never travel on the input channel
+on this transport** (unlike the WebRTC DataChannel), so `pong` has a return path.
+
+### Bye and error (either direction)
+
+```json
+{ "type": "bye", "reason": "client_closed" | "taken_over" | "session_ended" }
+{ "type": "error", "code": "auth_failed", "message": "…" }
+```
+
+`bye` then closing the WebTransport session is a clean teardown. `reason` and `code` are open
+strings; `message` is for a person. WebTransport close codes mirror the signaling close codes:
+
+| code | meaning |
+|---|---|
+| `0` | normal close |
+| `4401` | token refused |
+| `4404` | session ended or stopping |
+| `4410` | taken over by another client (terminal for this client: do not reconnect) |
+
+The session's lifecycle is the control plane's and the agent's, as for WebRTC. The agent treats a
+closed connection, or 10 s with nothing received on the control stream, as the client gone, and
+applies the same rule as a lost WebRTC peer (the session ends when the host's idle window passes
+with no client).
+
+## Video (`0x01`, agent → client)
+
+An encoded access unit, split into fragments that each fit one datagram.
+
+```
+offset size field
+0      u8   channel     0x01
+1      u32  pkt_seq
+5      u8   flags       bit0 keyframe, bit1 discardable, bit2 retransmit; others 0
+6      u16  frame_seq   per-session access-unit counter, +1 per unit in encode order, wraps
+8      u16  frag_index  0-based
+10     u16  frag_count  ≥ 1
+12     u32  ts_90khz
+16     u64  capture_us
+24     ...  payload
+```
+
+- The payload is the access unit in the form `EncodedVideoChunk` takes: 4-byte length-prefixed NAL
+  units for H.264 and HEVC (no Annex-B start codes), the low-overhead OBU format for AV1 (each OBU
+  with its size field, no temporal delimiter). Fragments are byte ranges of it, in order.
+- Every fragment of a frame carries the same `frame_seq`, `flags` (apart from `retransmit`),
+  `frag_count`, `ts_90khz` and `capture_us`.
+- `discardable`: nothing later references this frame, so losing it never needs a keyframe.
+
+## Audio (`0x02`, agent → client)
+
+One Opus packet per datagram, 10 ms (`hello_ack.audio`).
+
+```
+0      u8   channel     0x02
+1      u32  pkt_seq
+5      u16  packet_seq  +1 per audio packet, wraps
+7      u32  ts_48khz
+11     u64  capture_us
+19     ...  Opus packet
+```
+
+Audio is never retransmitted; a lost packet is concealed (Opus PLC or silence). `capture_us` on
+both channels is what keeps audio and video in sync.
+
+## Input (`0x03`, client → agent)
+
+```
+0      u8   channel     0x03
+1      ...  one input.md event: UTF-8 JSON, verbatim
+```
+
+One event per datagram, every `input.md` event except `ping` and `pong` (§Ping and pong). A lost
+datagram is lost; a client that cannot afford that for an event sends it on the control stream
+(§Input on the control stream).
+
+## Microphone (`0x05`, client → agent)
+
+One Opus packet per datagram, 10 ms, mono, 48 kHz (`hello_ack.mic`), only when the session was
+granted a microphone.
+
+```
+0      u8   channel     0x05
+1      u16  packet_seq  +1 per packet, wraps
+3      u32  ts_48khz
+7      ...  Opus packet
+```
+
+The agent plays it into the session's microphone sink exactly as it plays the WebRTC microphone
+track (`agent-api.md` `session_assign.stream.mic`). Never retransmitted.
+
+## Loss recovery
+
+**Agent.** It keeps every video datagram it sent for at least `retransmit_window_ms` (at least
+250 ms, and at least twice the smoothed RTT, within a memory bound it chooses) and answers `nack`
+from that buffer.
+
+**Client.**
+
+1. **Detect.** A fragment is missing when a later fragment of the same frame, or a fragment of a
+   later frame, has arrived and it has not.
+2. **NACK.** Send one `nack` per frame as soon as fragments are missing (ranges may be batched),
+   and at most one repeat per fragment, after one RTT without it.
+3. **Late.** A frame is late when it cannot complete before the client needs it: a `nack_miss`
+   covers one of its fragments, its repeat NACK went unanswered for one more RTT, or it is still
+   incomplete when the client would present it. The client drops a late frame. If it was not
+   `discardable` the client sends `keyframe_request {reason: "late"}` and drops every frame until
+   the next keyframe.
+4. **FEC first.** When the frame's FEC (§FEC) can rebuild the missing fragment, the client does
+   that and sends no NACK for it.
+
+`keyframe_request {reason: "loss"}` remains for a client that does no NACK at all.
+
+## FEC (`0x04`, agent → client)
+
+Specified now so a client and agent can be built against it; the agent need not send it, and in
+0.6 it is the last, cuttable unit. The agent sends FEC only when `hello_ack.fec` names a scheme.
+
+**Scheme `xor`.** One repair datagram protects up to 48 fragments of one frame: fragments
+`first_frag + i × stride` for `i` in `0 … count − 1`. Its payload is the XOR of those fragments'
+payloads, each padded with zeros to the longest; it rebuilds any **one** of them that is missing.
+`stride` 1 protects a run of fragments, a larger `stride` interleaves groups against a burst. The
+agent chooses `count`, `stride` and how many repair datagrams to send from the loss it sees in
+feedback.
+
+```
+0      u8   channel     0x04
+1      u32  pkt_seq
+5      u8   scheme      0x01 = xor
+6      u16  frame_seq
+8      u16  first_frag
+10     u8   count       2 … 48
+11     u8   stride      ≥ 1
+12     u16  length_xor  XOR of the protected payloads' lengths
+14     ...  repair payload
+```
+
+To rebuild fragment `k` when it alone of its group is missing: its payload is the repair payload
+XOR every other protected payload (zero-padded), truncated to `length_xor` XOR every other
+protected length; its header is a sibling fragment's with `frag_index = k`. A group with two or
+more missing is left to NACK. Repair datagrams are never retransmitted.
+
+## Versioning
+
+- `wt_proto` is an increasing integer; this document is version 1.
+- Inside a version, growth is additive only: new control-stream `type`s, new fields, new datagram
+  channels and new FEC schemes, each ignored by a receiver that does not know them. A change to a
+  binary header above needs a new `wt_proto`.
