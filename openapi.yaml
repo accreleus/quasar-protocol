@@ -4466,7 +4466,7 @@ components:
         wanted: { type: boolean, description: "The user wants PyroWave now. Cleared by a step-down for rtt_too_high, congestion, client_decode_error or encoder_error." }
         active: { type: boolean, description: "The media client is receiving PyroWave now." }
         used: { type: boolean, description: "The media client received PyroWave at some point in this session." }
-        target_kbps: { type: [integer, "null"], description: "The PyroWave target bitrate granted; null when not allowed." }
+        target_kbps: { type: [integer, "null"], description: "The PyroWave target bitrate granted: min(height_default * fps / 60, pyrowave_kbps ?? 1000000); null when not allowed." }
         switch_reason: { type: [string, "null"], description: "The reason of the latest switch on or off (launch, user, reconnect, rtt_too_high, client_no_decoder, congestion, client_decode_error, encoder_error, webrtc; an open string); null before the first." }
     SessionPyroWaveUpdate:
       type: object
@@ -8492,7 +8492,7 @@ components:
           allOf: [ { $ref: "#/components/schemas/LaunchProfileTransport" } ]
           description: "Amendment 54. Always serialized by a server implementing the amendment; absent from an older one, read as webrtc."
         pyrowave_allowed: { type: boolean, description: "Amendment 55: whether this profile's users may turn on Ultra-low latency (LAN) (PyroWave) on a WebTransport session. Always serialized by a server implementing the amendment; absent from an older one, read as false." }
-        pyrowave_kbps: { type: [integer, "null"], minimum: 50000, maximum: 1000000, description: "Amendment 55: the PyroWave target bitrate, kbit/s; null = by launch height (200000 up to 1080, 300000 up to 1440, 400000 above)." }
+        pyrowave_kbps: { type: [integer, "null"], minimum: 50000, maximum: 1000000, description: "Amendment 55: the MAXIMUM PyroWave bitrate, kbit/s - a cap, not a fixed target. A session's target is min(height_default * fps / 60, pyrowave_kbps ?? 1000000), height_default 200000 / 300000 / 400000 for an encoded stream height at launch up to 1080 / up to 1440 / above. null = no cap below 1000000." }
         used_by: { $ref: "#/components/schemas/LaunchProfileUsedBy" }
         warnings:
           type: array
@@ -8518,7 +8518,7 @@ components:
           allOf: [ { $ref: "#/components/schemas/LaunchProfileTransport" } ]
           description: "Amendment 54. Absent on POST = webrtc; absent on PATCH = unchanged."
         pyrowave_allowed: { type: boolean, description: "Amendment 55. Absent on POST = false; absent on PATCH = unchanged. True with transport webrtc draws the warning pyrowave_needs_webtransport." }
-        pyrowave_kbps: { type: [integer, "null"], minimum: 50000, maximum: 1000000, description: "Amendment 55. Absent on POST = null (by launch height); absent on PATCH = unchanged; out of range = 400 validation_failed." }
+        pyrowave_kbps: { type: [integer, "null"], minimum: 50000, maximum: 1000000, description: "Amendment 55: the maximum PyroWave bitrate (a cap). Absent on POST = null (no cap below 1000000); absent on PATCH = unchanged; out of range = 400 validation_failed." }
         rungs:
           type: array
           minItems: 1

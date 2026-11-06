@@ -2872,7 +2872,7 @@ unaffected by this feature.
   use WebTransport (§Transport — WebRTC and WebTransport).
 - *(Amendment 55, accreleus/quasar#1050)* and **`pyrowave_allowed`** (default `false`) and
   **`pyrowave_kbps`** (default `null`): whether its users may turn on Ultra-low latency (LAN),
-  and at what bitrate (§Ultra-low latency (LAN) — PyroWave).
+  and the most bitrate it may use (§Ultra-low latency (LAN) — PyroWave).
 - **Order is preference.** The write shape takes an **ordered array of stream-profile ids**; the
   server assigns `position` from that order. A client does not send positions.
 - A stream profile may appear **at most once** in one launch profile (`400 validation_failed` on a
@@ -4346,7 +4346,7 @@ that session. Automatic selection with no switch is not in this amendment.
 | field | meaning |
 |---|---|
 | `pyrowave_allowed` | `false` (default): this profile's users never get PyroWave. `true`: they may turn it on, on a session whose transport is WebTransport. |
-| `pyrowave_kbps` | the PyroWave target bitrate, kbit/s, `50000 … 1000000`; `null` (default) = by the session's launch height: **200 000 up to 1080, 300 000 up to 1440, 400 000 above** (`codec-pyrowave.md` §Rate). |
+| `pyrowave_kbps` | the **maximum** PyroWave bitrate, kbit/s, `50000 … 1000000`, a cap on the default, not a fixed target; `null` (default) = no cap below 1 000 000. The session's target is `min(height_default × fps / 60, pyrowave_kbps ?? 1 000 000)`, with `height_default` **200 000 up to 1080, 300 000 up to 1440, 400 000 above** by the session's encoded stream height at launch (`codec-pyrowave.md` §Rate). |
 
 Both always serialized on the read. Optional on the write: absent on `POST` is the default, absent
 on `PATCH` leaves it unchanged; a wrong type or an out-of-range `pyrowave_kbps` is
@@ -4383,8 +4383,11 @@ never avoided, it yields `host_no_pyrowave`. A swap keeps the grant. A claim of 
 plans it like any launch.
 
 When allowed, the control plane sends the grant as `session_assign.pyrowave` (`agent-api.md`):
-`wanted` = the request's `pyrowave`, `target_kbps` = the profile's `pyrowave_kbps` or the height
-default, `floor_kbps` = half the target, `max_rtt_ms` = 5. The agent starts the session's
+`wanted` = the request's `pyrowave`; `target_kbps` = `min(height_default × fps / 60,
+pyrowave_kbps ?? 1 000 000)`, where `height_default` is 200 000, 300 000 or 400 000 kbit/s for an
+encoded stream height at launch (`stream.height` as resolved: the rung's or a `stream.*`
+override's, never the display or render size) up to 1080, up to 1440, or above, and `fps` is the
+session's launch fps; `floor_kbps` = half the target; `max_rtt_ms` = 5. The agent starts the session's
 WebTransport client in PyroWave when it is wanted and the link qualifies.
 
 ### The session's `pyrowave`

@@ -111,8 +111,22 @@ For a PyroWave configuration, `video` is:
   `total_blocks` and `code` zero, `frame_rate_num` = `fps`, `frame_rate_den` = 1,
   `reference_bit_depth` 8, `header_version` 1. It lets the client build its decoder before any
   datagram arrives. Its width, height and chroma must equal every SOF of the configuration.
-- `color_space` is **required** for PyroWave and agrees with the header's usability fields
-  (primaries, transfer, YCbCr transform and range).
+- `color_space` is **required** for PyroWave and agrees with the header's usability fields:
+
+  | `color_space` | PyroWave header |
+  |---|---|
+  | `primaries: "bt709"` | `color_primaries = SRGB` (0) |
+  | `transfer: "bt709"` | `transfer_function = SRGB` (0), the bitstream spec's SDR curve |
+  | `matrix: "bt709"` | `ycbcr_transform = BT709` (0) |
+  | `full_range: true` / `false` | `ycbcr_range = FULL` (0) / `LIMITED` (1) |
+
+  PyroWave has no BT.601 matrix, so `smpte170m` is never used for it: the agent converts the
+  compositor's RGB to YCbCr with BT.709 for every PyroWave configuration, whatever the standard
+  codec signals. Only `full_range` may differ between configurations. HDR (BT.2020, PQ) is a
+  later amendment.
+- `retransmit_window_ms` is present, as in every `hello_ack` (a re-sent one repeats every field),
+  and keeps the standard codec's value: it applies only to standard-codec frames. PyroWave frames
+  are never retransmitted (§Loss).
 - `width`, `height`, `fps` as for any codec.
 
 `hello_ack` also gains one optional top-level field, **`codec_switch_reason`**: present on a
@@ -200,7 +214,8 @@ end_block)`, so a receiver knows exactly which blocks a lost datagram took with 
 
 - The ranges of a frame's datagrams, in `frag_index` order, are contiguous and partition
   `[0, N)`: datagram 0 starts at 0, each datagram's `first_block` is the previous one's
-  `end_block`, and the last one ends at `N`.
+  `end_block`, and the last one ends at `N`. The one empty range is a datagram 0 that holds only
+  the SOF because block 0 is oversized: it carries `[0, 0)`.
 - A `kind = 0` datagram's range covers the blocks it carries **and the zero blocks** (never sent)
   between them and up to the next datagram's first block. Every block it carries has an index in
   its range.
@@ -216,11 +231,19 @@ A block index is then, for a decoded frame:
 
 ### Receiving
 
-- **Validation.** The client drops a datagram whose `kind` it does not know, whose range is empty
-  or ends past `N`, whose packets overrun the payload, or that carries a block with an index
-  outside its range. It drops an oversized block whose parts disagree on `part_count` or range, or
-  whose reassembled length is not its header's `payload_words × 4`. A dropped datagram counts as
-  lost: its range is concealed.
+- **Validation.** The client drops a datagram:
+  - whose `kind` it does not know;
+  - whose range is empty or ends past `N`, **except** `frag_index` 0 holding only the SOF, whose
+    range is `[0, 0)` when block 0 is itself oversized and goes in the next datagrams;
+  - whose packets overrun the payload, or that carries a block whose `payload_words` is below 2;
+  - that carries a block with an index outside its range;
+  - of `kind = 1` with `part_index` ≥ `part_count`, or whose range does not start at its own
+    block's index (in the part with `part_index` 0, the header's `block_index`).
+
+  It drops an oversized block whose parts disagree on `part_count`, range or
+  `frag_index − part_index` (the parts of one block are one consecutive run), or whose reassembled
+  length is not its header's `payload_words × 4`. A dropped datagram counts as lost: its range is
+  concealed (a dropped part: its block).
 - **Ignored bitstream fields.** The client orders frames by `frame_seq` and ignores the bitstream's
   3-bit `sequence`. `total_blocks` in the SOF is informational; `frag_count` says when a frame is
   complete. The SOF itself may be lost: the configuration comes from `hello_ack`.
@@ -254,21 +277,43 @@ PyroWave uses **no NACK and no keyframe request**:
 PyroWave's rate control is exact per frame: the agent gives the encoder a byte budget for each
 frame (`maximum_bitstream_size`), and the frame lands within it.
 
-- **Target.** `session_assign.pyrowave.target_kbps`: the launch profile's PyroWave bitrate, or
-  when it has none, by the session's launch height: **200 000 kbit/s up to 1080, 300 000 up to
-  1440, 400 000 above** (B00: 45.9 dB at 1080p/200, 45.7 dB at 1440p/300, 42.7 dB at 4K/400 on
-  worst-case content).
+- **Target.** `session_assign.pyrowave.target_kbps`, computed once at launch by the control
+  plane:
+
+  ```
+  target_kbps = min(height_default × fps / 60, pyrowave_kbps ?? 1 000 000)
+  height_default = 200 000 if launch height ≤ 1080, 300 000 if ≤ 1440, else 400 000   (kbit/s)
+  ```
+
+  *Launch height* is the session's **encoded** stream height at launch (`stream.height` as the
+  launch resolved it: the rung's, or a `stream.*` override's), not the client's display or the
+  render size; `fps` is the session's launch fps. The default is a per-frame budget taken at a 60 fps reference (B00: 45.9 dB at
+  1080p/200, 45.7 dB at 1440p/300, 42.7 dB at 4K/400 on worst-case content), so the per-frame
+  quality holds at any frame rate. The launch profile's `pyrowave_kbps` is a **maximum**, not a
+  fixed target: it caps the default, and `null` caps it at 1 000 000.
 - **Clamp.** Each frame's budget is `min(target, estimate) / fps`, where *estimate* is the
   available-rate estimate of `transport-webtransport.md` §Feedback (from `feedback`, and the QUIC
   connection's congestion state when the client sends none), less the agent's datagram overhead.
   While PyroWave is active the session's ABR governor and its resolution/fps ladder do not act;
   they resume from the estimate after a switch back. A live `stream_width`/`stream_height`
-  change (`agent-api.md` `session_display_update`) still applies: it is a new configuration.
+  change (`agent-api.md` `session_display_update`) still applies: it is a new configuration, and
+  the target is unchanged.
+- **Seeding.** When PyroWave starts on a connection and at every switch on, the agent **seeds its
+  estimate at `target_kbps`**, whatever the estimate was under the standard codec (a 20 Mbit/s
+  H.264 stream says nothing about a 200 Mbit/s link). From there the estimate only **falls** on
+  loss or delay signals (`feedback`, or QUIC's congestion state); it never rises above the target.
+- **One controller per codec.** `transport-webtransport.md` §Feedback says the estimate feeds the
+  session's ABR and there is no second bitrate controller. For a PyroWave session that rule is
+  overridden: while PyroWave is active its per-session rate controller (this section) is the one
+  that acts, and the ABR governor is idle. For the standard codec, and on every session without
+  PyroWave, amendment 54's rule stands unchanged.
 - **Pacing.** The agent SHOULD pace a frame's datagrams over no more than half a frame interval
   (a 1080p/200 frame is about 380 datagrams), not burst them.
 - **Step-down.** When the estimate stays below **`floor_kbps`** (`session_assign.pyrowave`, half
   the target) for **1 s**, the agent switches to the standard codec, reason `congestion`
-  (§Switching codec).
+  (§Switching codec). The 1 s timer starts no earlier than the **first `feedback` received after
+  the switch on** (for a client that sends no `feedback`: 1 s after the switch on), so a switch
+  on is judged on what the link does at PyroWave's rate, never on the estimate it replaced.
 
 ## Link
 
@@ -318,7 +363,8 @@ PyroWave-eligible.
 | `webrtc` | off | the media client is now a WebRTC peer (a fallback or a takeover), which cannot carry PyroWave; the agent encodes the standard codec for it |
 
 **Wanting PyroWave.** The agent keeps a per-session *wanted* flag: `session_assign.pyrowave.wanted`
-at launch, then the latest `session_pyrowave.active`. A switch off for `rtt_too_high`,
+at launch, then the `active` of the latest `session_pyrowave` the agent answered `ack{ok:true}`;
+a rejected one leaves it unchanged. A switch off for `rtt_too_high`,
 `congestion`, `client_decode_error` or `encoder_error` **clears** it, so the session does not flap
 back on; only the user turns it on again. `webrtc` does not clear it: a client that comes back on
 WebTransport gets PyroWave again (reason `reconnect`).

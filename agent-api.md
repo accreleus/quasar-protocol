@@ -1489,7 +1489,7 @@ copy leaves a stale or absent record that reads as the opposite of what happened
 
 | `event` | when | payload |
 |---|---|---|
-| `caps.negotiated` | every time the encode branch (re)negotiates | `trigger` (`"launch"` \| `"rung_step"` \| `"scale_rebuild"` \| `"encoder_restart"` \| `"source_swap"`), `encoder_factory` (string\|null), `codec` (`"h264"`\|`"h265"`\|`"av1"`\|null), `profile` (string\|null — the LIVE value), `level` (string\|null), `encoder_sink_caps` / `encoder_src_caps` / `payloader_src_caps` (string\|null), `size` (`{w,h,fps}`) |
+| `caps.negotiated` | every time the encode branch (re)negotiates | `trigger` (`"launch"` \| `"rung_step"` \| `"scale_rebuild"` \| `"encoder_restart"` \| `"source_swap"` \| `"codec_switch"` *(amendment 55: a switch between PyroWave and the standard codec, paired with a `codec.switched` event)*), `encoder_factory` (string\|null), `codec` (`"h264"`\|`"h265"`\|`"av1"`\|null), `profile` (string\|null — the LIVE value), `level` (string\|null), `encoder_sink_caps` / `encoder_src_caps` / `payloader_src_caps` (string\|null), `size` (`{w,h,fps}`) |
 | `sdp.answer_applied` | after a remote **answer** applied successfully | `pc` (`"video"`\|`"audio"`), `m_lines` (array of `{mid, kind, codec, port, direction, rejected}`), `rejected_count` (int), `ice_ufrag_changed` (bool, optional) |
 | `encoder.stall` | encoder output silence ≥ the host's stall threshold while input keeps arriving, and again on recovery | `phase` (`"detected"`\|`"recovered"`), `reason` (`"no_output"`\|`"input_starved"`\|`"negotiation"`), `since_ms` (int, on `detected`), `stalled_ms` (int, on `recovered`) |
 | `host.xid` | the NVIDIA kernel driver recorded an Xid fault | `code` (int), `pci` (string\|null), `pid` (int\|null), `name` (string\|null), `text` (string, ≤256 chars), `ts_unix_ms` (int) |
@@ -1909,7 +1909,9 @@ capability but does not by itself put ordinary browser sessions on a physical di
 > - **`wanted`**: the launch asked for PyroWave. The agent's per-session *wanted* flag starts here
 >   (`codec-pyrowave.md` §Switching codec).
 > - **`target_kbps`**, **`floor_kbps`**, **`max_rtt_ms`**: the rate target, the step-down floor
->   and the round-trip gate (`codec-pyrowave.md` §Rate, §Link).
+>   and the round-trip gate (`codec-pyrowave.md` §Rate, §Link). The agent seeds its rate estimate
+>   at `target_kbps` at every switch on, and starts the floor timer no earlier than the first
+>   `feedback` after it (§Rate, "Seeding", "Step-down").
 > - `stream.codec` is still the session's **standard codec**, never `pyrowave`; `stream.bitrate_kbps`
 >   and `abr_floor_kbps` are the standard codec's. A WebRTC peer always gets the standard codec.
 > - Resources are unchanged: one encode slot. The agent runs one encoder at a time for the
@@ -2099,9 +2101,9 @@ message.
 { "type": "session_pyrowave", "id": "<command-id>", "session_id": "<uuid>", "active": true }
 ```
 The user's "Ultra-low latency (LAN)" toggle, relayed by `PATCH /v1/sessions/{id}/pyrowave`
-(`control-api.md`). The agent sets the session's *wanted* flag to `active` and, when the media
-client is a WebTransport client, switches codec (reason `user`, `codec-pyrowave.md` §Switching
-codec). **Ack semantics are `session_display_update`'s**: a rejection is a no-op and never changes
+(`control-api.md`). When it accepts the command (`ack{ok:true}`), the agent has set the session's
+*wanted* flag to `active` and, when the media client is a WebTransport client, switched codec
+(reason `user`, `codec-pyrowave.md` §Switching codec). A rejected command sets nothing. **Ack semantics are `session_display_update`'s**: a rejection is a no-op and never changes
 session state.
 
 - `ack{ok:true}`: applied. For `active: true` the client is now receiving PyroWave; for
@@ -2109,9 +2111,10 @@ session state.
 - `ack{ok:false, error: "pyrowave_rejected: <reason>"}` for `active: true` when the session has no
   `session_assign.pyrowave` (`not_granted`), the media client is not a WebTransport client
   (`not_on_webtransport`), its `hello` did not offer PyroWave (`client_no_decoder`), the round
-  trip fails `max_rtt_ms` (`rtt_too_high`), or the encoder did not start (`encoder_error`). The
-  session keeps its codec and its *wanted* flag. `active: false` is never rejected for a session
-  the agent holds.
+  trip fails `max_rtt_ms` (`rtt_too_high`), or the encoder did not start (`encoder_error`). On
+  every rejection, `not_on_webtransport` included, the session keeps its codec and its *wanted*
+  flag unchanged: *wanted* is set only by an `ack{ok:true}`. `active: false` is never rejected for
+  a session the agent holds (with a WebRTC media client it only clears *wanted*).
 
 The control plane sends it only for a `running` session it granted PyroWave, so an agent that
 never listed `pyrowave` is never sent it.
