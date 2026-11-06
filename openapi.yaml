@@ -2424,6 +2424,8 @@ paths:
                     Amendment 39. Each heartbeat, and a park on exit, sets a parked session's
                     deadline to now plus this many minutes. Absent = unchanged; outside 1-60 is
                     400 validation_failed.
+                compat_tools_max_enabled: { type: integer, minimum: 1, maximum: 32, description: "Amendment 56 (accreleus/quasar#1066). How many GE compatibility tools may be enabled at once. Default 8. Absent = unchanged; outside 1-32 is 400 validation_failed." }
+                compat_tools_disk_reserve_gib: { type: integer, minimum: 1, maximum: 1024, description: "Amendment 56. Free GiB a tool install must leave on a host beyond the asset and the 4 GiB unpacked cap (trust rule T7). Default 10. Absent = unchanged." }
                 default_timezone: { type: string, description: "Amendment 49 (#845). As RegionSettings.timezone. Default UTC. Absent = unchanged." }
                 default_language: { type: string, pattern: "^[a-z]{2,3}-[A-Z]{2}$", description: "Amendment 49. Default en-US. Absent = unchanged." }
                 default_region_format: { type: [string, "null"], pattern: "^[a-z]{2,3}-[A-Z]{2}$", description: "Amendment 49. null = the same as the language (the default). Absent = unchanged." }
@@ -3207,6 +3209,244 @@ paths:
         "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/ConfigCatalogResponse" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  # ─── compatibility tools (amendment 56) ─────────────────────────────────
+  /v1/admin/compat-tools:
+    get:
+      tags: [admin]
+      summary: The compatibility-tool catalogue and the fleet default (amendment 56).
+      description: >-
+        Amendment 56 (accreleus/quasar#1066). Valve Proton builds (mapped, never installed by
+        Quasar), the shipped recommended GE-Proton list and admin-added GE-Proton tags, each with
+        per-host install counts. control-api.md §Compatibility tools.
+      x-required-role: admin
+      security: [ { bearerAuth: [] } ]
+      responses:
+        "200":
+          description: The catalogue.
+          content: { application/json: { schema: { $ref: "#/components/schemas/CompatToolList" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [admin]
+      summary: Add a GE-Proton release by tag, pinned to its release checksum (amendment 56).
+      description: >-
+        Amendment 56. Resolves the release on github.com (GloriousEggroll/proton-ge-custom only),
+        picks <tag>-x86_64.tar.gz else <tag>.tar.gz, fetches <asset stem>.sha512sum once (4 KiB
+        cap), checks its format and that the file name in it is the asset's (trust rules T1-T4),
+        and stores the tool disabled with that SHA-512 as fleet desired state; agents verify
+        against it and never fetch a checksum. Nothing installs until
+        it is enabled. Audited as compat_tool.add.
+      x-required-role: admin
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CompatToolAdd" } } }
+      responses:
+        "201":
+          description: Added, disabled.
+          content: { application/json: { schema: { $ref: "#/components/schemas/CompatTool" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: compat_tool_exists - a tool with this tag exists.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "422":
+          description: >-
+            compat_tool_unverifiable - the message names release_not_found, asset_not_found,
+            checksum_missing, checksum_malformed or asset_too_large. Nothing is stored.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "503":
+          description: upstream_unavailable - github.com unreachable, 5xx or rate-limited; retryable, nothing stored.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  /v1/admin/compat-tools/default:
+    put:
+      tags: [admin]
+      summary: Set or clear the fleet default compatibility tool (amendment 56).
+      description: >-
+        Amendment 56. null = Steam's own default. A change supersedes every parked Steam
+        (parked_superseded). Audited as compat_tool.default.set.
+      x-required-role: admin
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CompatToolDefaultWrite" } } }
+      responses:
+        "200":
+          description: The default now in force.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [default_tool_id]
+                properties:
+                  default_tool_id: { type: [string, "null"], format: uuid }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: compat_tool_disabled - the tool is not usable (disabled, or marked name_conflict or pin_conflict).
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  /v1/admin/compat-tools/mappings:
+    get:
+      tags: [admin]
+      summary: The per-game compatibility-tool mappings (amendment 56).
+      x-required-role: admin
+      security: [ { bearerAuth: [] } ]
+      responses:
+        "200":
+          description: Every mapping, by provider then appid.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/CompatToolMapping" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/compat-tools/mappings/steam/{external_id}:
+    parameters:
+      - { $ref: "#/components/parameters/PathExternalId" }
+    put:
+      tags: [admin]
+      summary: Set the tool mapping for one Steam game, fleet-wide (amendment 56).
+      description: >-
+        Amendment 56. Keyed by Steam appid, never by an app or a user's tile. Unforced: written
+        into a home only where the user has no choice of their own; forced: overwrites it. A
+        change supersedes every parked Steam (parked_superseded). Audited as
+        compat_tool.mapping.set.
+      x-required-role: admin
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CompatToolMappingWrite" } } }
+      responses:
+        "200":
+          description: The mapping now in force.
+          content: { application/json: { schema: { $ref: "#/components/schemas/CompatToolMapping" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: compat_tool_disabled - the tool is not usable (disabled or marked); conflict - 1000 mappings exist and this appid is not one.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+    delete:
+      tags: [admin]
+      summary: Clear the tool mapping for one Steam game (amendment 56).
+      description: >-
+        Amendment 56. The game falls back to the fleet default, else Steam's own choice. 204 also
+        when none existed (not audited then). Audited as compat_tool.mapping.clear.
+      x-required-role: admin
+      security: [ { bearerAuth: [] } ]
+      responses:
+        "204": { description: Cleared. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/compat-tools/{id}:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    patch:
+      tags: [admin]
+      summary: Enable or disable a compatibility tool (amendment 56).
+      description: >-
+        Amendment 56. Enabling a GE tool installs it on every host (compat_tools.converge);
+        disabling removes it from every host. A repeat of the current value is a no-op. Audited
+        as compat_tool.enable / compat_tool.disable.
+      x-required-role: admin
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CompatToolPatch" } } }
+      responses:
+        "200":
+          description: The tool.
+          content: { application/json: { schema: { $ref: "#/components/schemas/CompatTool" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >-
+            compat_tool_in_use - disabling a tool a mapping names or that is the fleet default;
+            compat_tool_limit - enabling past instance_settings.compat_tools_max_enabled;
+            compat_tool_pin_conflict - enabling a tool marked pin_conflict.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+    delete:
+      tags: [admin]
+      summary: Delete a GE tag row that was never enabled (amendment 56).
+      description: >-
+        Amendment 56. One conditional statement deletes a disabled GE row that was never enabled
+        and is not on the shipped list, or a disabled pin_conflict row that no mapping, default,
+        host install or live session references; the latter inserts the shipped entry in the same
+        transaction. Audited as compat_tool.delete.
+      x-required-role: admin
+      security: [ { bearerAuth: [] } ]
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: conflict - the statement deleted nothing (a Valve row, an enabled row, a row once enabled and not in pin_conflict, or one still mapped, installed or mounted).
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  /v1/admin/compat-tools/{id}/force-remove:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [admin]
+      summary: Emergency pull of a GE tool - clear its mappings and default, disable it, stop the sessions that mount it (amendment 56).
+      description: >-
+        Amendment 56. One transaction deletes every mapping naming the tool, clears the fleet
+        default if it is the tool, disables it (bypassing compat_tool_in_use) and supersedes every
+        parked session; after commit every live session whose compat_tool_names holds the tool's
+        Steam name is stopped as an admin DELETE /v1/sessions/{id} would. The row is locked FOR
+        UPDATE, so it serializes with launches holding its share lock; the stop step is recorded
+        (force_remove_pending_at) and re-run at startup and every 60 s; it targets only sessions
+        created at or before that time and clears when none of those remain live; a repeat on a disabled tool stops any remaining holders. Audited as
+        compat_tool.force_remove.
+      x-required-role: admin
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, properties: {} }
+      responses:
+        "200":
+          description: Pulled.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tool, mappings_cleared, default_cleared, sessions_stopped]
+                properties:
+                  tool: { $ref: "#/components/schemas/CompatTool" }
+                  mappings_cleared: { type: integer, minimum: 0 }
+                  default_cleared: { type: boolean }
+                  sessions_stopped: { type: integer, minimum: 0 }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: conflict - a Valve build (Quasar installs none).
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  /v1/admin/hosts/{id}/compat-tools:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    get:
+      tags: [admin, hosts]
+      summary: Compatibility tools on one host - installed, installing, failed - and its free space (amendment 56).
+      x-required-role: admin
+      security: [ { bearerAuth: [] } ]
+      responses:
+        "200":
+          description: The host's tools.
+          content: { application/json: { schema: { $ref: "#/components/schemas/HostCompatTools" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /v1/admin/hosts/{id}/settings:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     get:
@@ -4378,7 +4618,7 @@ components:
         Retry-After:
           description: "delta-seconds; MAY accompany capacity_exhausted (control-api.md §Admission control, (4)); 2 on a refused warm-Steam claim (amendment 39)."
           schema: { type: integer, minimum: 0 }
-      description: "no_host_available / capacity_exhausted / host_not_ready (amendment 11: a failing evidence-based readiness check is the only reason no host qualified) — well-formed but cannot be placed now (retryable). Amendment 12 (#296): an explicit stream.codec is a codec constraint applied at placement; when a GPU that can encode it exists but none is free the answer is capacity_exhausted, and when no online usable GPU can encode it the answer is no_host_available, both with a message naming the codec. No new code. Amendment 40 (#602): no_host_available MAY carry error.reason home_host_unavailable (the caller's home is on a host that is offline or no longer enrolled); a client does not auto-retry it."
+      description: "no_host_available / capacity_exhausted / host_not_ready (amendment 11: a failing evidence-based readiness check is the only reason no host qualified) — well-formed but cannot be placed now (retryable). Amendment 12 (#296): an explicit stream.codec is a codec constraint applied at placement; when a GPU that can encode it exists but none is free the answer is capacity_exhausted, and when no online usable GPU can encode it the answer is no_host_available, both with a message naming the codec. No new code. Amendment 40 (#602): no_host_available MAY carry error.reason home_host_unavailable (the caller's home is on a host that is offline or no longer enrolled); a client does not auto-retry it. Amendment 56 (accreleus/quasar#1066): no_host_available MAY carry error.reason compat_tool_missing (no online host has the GE compatibility tool the launched game's per-game mapping names; the fleet default never causes it; it clears as hosts install it)."
       content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
 
   schemas:
@@ -4444,6 +4684,122 @@ components:
       type: string
       description: "Multi-codec: the WIRE session video codec (h265 is HEVC). Resolved server-side at launch; the client answers the single codec the host offers. Distinct from CatalogCodec, which spells HEVC 'hevc'."
       enum: [h264, h265, av1]
+    CompatToolSteamName:
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      description: "Amendment 56: the name Steam registers a compatibility tool under (a GE tool's is read from its verified compatibilitytool.vdf). A directory name on hosts and a token in QUASAR_COMPAT_TOOLS."
+    CompatTool:
+      type: object
+      description: "Amendment 56 (accreleus/quasar#1066): one compatibility tool. control-api.md §Compatibility tools."
+      required: [id, kind, family, source, tag, steam_name, display_name, recommended, enabled, asset, hosts, mappings, is_default, name_conflict, pin_conflict, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [proton] }
+        family: { type: string, enum: [valve, ge] }
+        source: { type: string, enum: [steam, recommended, tag] }
+        tag: { type: [string, "null"], pattern: "^GE-Proton[0-9]{1,3}-[0-9]{1,4}$", description: "The GE-Proton release tag; null for a Valve build." }
+        steam_name:
+          oneOf:
+            - { $ref: "#/components/schemas/CompatToolSteamName" }
+            - { type: "null" }
+          description: "null only for a GE tag no host has installed yet."
+        display_name: { type: string }
+        recommended: { type: boolean, description: "On this Quasar release's recommended list." }
+        enabled: { type: boolean, description: "For a GE tool: desired on every host." }
+        asset:
+          oneOf:
+            - { $ref: "#/components/schemas/CompatToolAsset" }
+            - { type: "null" }
+        hosts:
+          oneOf:
+            - { $ref: "#/components/schemas/CompatToolHostCounts" }
+            - { type: "null" }
+        mappings: { type: integer, minimum: 0, description: "Per-game mappings naming this tool." }
+        is_default: { type: boolean }
+        name_conflict: { type: boolean, description: "A host reported a Steam name for this tag that is reserved, fails the grammar or another tool holds; the tool is out of desired state until disabled and re-enabled." }
+        pin_conflict: { type: boolean, description: "The recommended list ships this tag with a different SHA-512; the tool is out of desired state and cannot be enabled." }
+        created_at: { type: string, format: date-time }
+    CompatToolAsset:
+      type: object
+      required: [name, url, size_bytes, sha512]
+      properties:
+        name: { type: string, description: "<tag>-x86_64.tar.gz, or <tag>.tar.gz before GE-Proton 11." }
+        url: { type: string, format: uri, description: "Derived for display: https://github.com/GloriousEggroll/proton-ge-custom/releases/download/<tag>/<name>. Never sent to an agent: the job carries only the tag (trust rule T1)." }
+        size_bytes: { type: integer, minimum: 1, maximum: 2147483648 }
+        sha512: { type: string, pattern: "^[0-9a-f]{128}$" }
+    CompatToolHostCounts:
+      type: object
+      required: [installed, installing, waiting, failed, unsupported]
+      properties:
+        installed: { type: integer, minimum: 0 }
+        installing: { type: integer, minimum: 0, description: "Installing or removing." }
+        waiting: { type: integer, minimum: 0 }
+        failed: { type: integer, minimum: 0 }
+        unsupported: { type: integer, minimum: 0 }
+    CompatToolList:
+      type: object
+      required: [items, default_tool_id]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/CompatTool" } }
+        default_tool_id: { type: [string, "null"], format: uuid }
+    CompatToolAdd:
+      type: object
+      additionalProperties: false
+      required: [tag]
+      properties:
+        tag: { type: string, pattern: "^GE-Proton[0-9]{1,3}-[0-9]{1,4}$" }
+    CompatToolPatch:
+      type: object
+      additionalProperties: false
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+    CompatToolDefaultWrite:
+      type: object
+      additionalProperties: false
+      required: [tool_id]
+      properties:
+        tool_id: { type: [string, "null"], format: uuid, description: "null = Steam's own default." }
+    CompatToolMappingWrite:
+      type: object
+      additionalProperties: false
+      required: [tool_id]
+      properties:
+        tool_id: { type: string, format: uuid }
+        forced: { type: boolean, description: "Absent = false. true overwrites the user's own choice in Steam." }
+    CompatToolMapping:
+      type: object
+      required: [provider, external_id, tool_id, forced, app_ids, updated_at]
+      properties:
+        provider: { type: string, enum: [steam] }
+        external_id: { type: string, pattern: "^[1-9][0-9]{0,9}$" }
+        tool_id: { type: string, format: uuid }
+        forced: { type: boolean }
+        app_ids: { type: array, items: { type: string, format: uuid }, description: "Apps that are this game (derived tiles); may be empty." }
+        updated_at: { type: string, format: date-time }
+    HostCompatTools:
+      type: object
+      required: [supported, free_bytes, reported_at, tools]
+      properties:
+        supported: { type: boolean, description: "The host's current agent connection advertised compat_tools_v1." }
+        free_bytes: { type: [integer, "null"], minimum: 0 }
+        reported_at: { type: [string, "null"], format: date-time }
+        tools:
+          type: array
+          items:
+            type: object
+            required: [tool_id, steam_name, tag, state, bytes, reason, run_id]
+            properties:
+              tool_id: { type: [string, "null"], format: uuid, description: "null for an installed tool no catalogue row matches (listed for removal)." }
+              steam_name:
+                oneOf:
+                  - { $ref: "#/components/schemas/CompatToolSteamName" }
+                  - { type: "null" }
+              tag: { type: string }
+              state: { type: string, enum: [unsupported, removing, installing, installed, failed, waiting] }
+              bytes: { type: [integer, "null"], minimum: 0 }
+              reason: { type: [string, "null"], description: "A failed or deferred run's summary.reason (an open string)." }
+              run_id: { type: [string, "null"], format: uuid }
     HostCodec:
       type: string
       description: >-
@@ -4627,7 +4983,9 @@ components:
             the caller's home for this app (Amendment 53: or it is pinned to the host of the
             caller's Steam home for a sharing launch) and that host is offline or no longer
             enrolled. Only an admin clears it, so a client does not spend its automatic retry on
-            it. Names no host. Amendment 53 (#1001), on 409 home_in_use:
+            it. Names no host. Amendment 56 (accreleus/quasar#1066), on 503 no_host_available:
+            compat_tool_missing (no online host has the GE compatibility tool the launched game's
+            per-game mapping names; never for the fleet default). Amendment 53 (#1001), on 409 home_in_use:
             steam_library_open_in_desktop (the holder mounts the Steam library as a shared home)
             or steam_game_running (the refused launch shares the library and a Steam session holds
             it); absent when the holder is already stopping. Open string: a client treats an
@@ -6570,6 +6928,8 @@ components:
               minimum: 1
               maximum: 60
               description: Amendment 39. Default 10.
+            compat_tools_max_enabled: { type: integer, minimum: 1, maximum: 32, description: "Amendment 56 (accreleus/quasar#1066). Default 8. Optional in the envelope so a pre-amendment server stays conformant." }
+            compat_tools_disk_reserve_gib: { type: integer, minimum: 1, maximum: 1024, description: "Amendment 56. Default 10." }
             default_timezone: { type: string, description: "Amendment 49 (#845). Default UTC. Optional in the envelope so a pre-amendment server stays conformant." }
             default_language: { type: string, description: "Amendment 49. Default en-US." }
             default_region_format: { type: [string, "null"], description: "Amendment 49. null = the same as the language." }

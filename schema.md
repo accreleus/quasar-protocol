@@ -717,6 +717,9 @@ A token is valid iff `revoked_at IS NULL AND expires_at > now()`.
 | `default_nintendo_layout` | `BOOLEAN` NOT NULL DEFAULT `false` | *(Amendment 49, #845, migration 0108)* |
 | `updated_by` | `UUID` NULL → `users(id)` ON DELETE SET NULL | last admin who changed it. |
 | `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
+| `compat_tool_default_id` | `UUID` NULL → `compat_tools(id)` **ON DELETE RESTRICT** | *(Amendment 56, accreleus/quasar#1066, migration 0113, pre-approved 2026-11-06.)* The fleet default compatibility tool, an enabled tool at write time; NULL (the default) = Steam's own default, as before. Sent to Steam-family sessions as appid `0` (`control-api.md` §Compatibility tools). |
+| `compat_tools_max_enabled` | `INT` NOT NULL DEFAULT `8` | *(Amendment 56, migration 0113.)* `CHECK (compat_tools_max_enabled BETWEEN 1 AND 32)`. How many GE tools may be enabled at once (`409 compat_tool_limit`). Lowering it below the current count refuses no existing tool; it only refuses new enables. |
+| `compat_tools_disk_reserve_gib` | `INT` NOT NULL DEFAULT `10` | *(Amendment 56, migration 0113.)* `CHECK (compat_tools_disk_reserve_gib BETWEEN 1 AND 1024)`. Free space, in GiB, an install must leave on a host's tools filesystem beyond the asset and the 4 GiB unpacked cap (trust rule T7); sent in the job params as `reserve_bytes`. |
 
 **Seeding.** On first boot the control plane inserts the singleton, taking `registration_mode`
 from the `REGISTRATION_MODE` env var **if set**, else `'closed'` — a one-time seed (idempotent,
@@ -1043,6 +1046,8 @@ capacity (CPU/mem) lives here; GPU capacity is per-row in `gpus`.
 | `wt_certificates` | `JSONB` NULL | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* the reported `capacity.webtransport.certificates`: an array of at most two `{sha256, not_before, not_after}`, current first. Same wholesale rule. The control plane sends the client the `sha256` of each entry not yet expired. |
 | `wt_public_url` | `TEXT` NULL | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* the admin's WebTransport endpoint override (`PATCH /v1/admin/hosts/{id}/webtransport`): an absolute `https` URL, at most 2048 characters, validated by the API. NULL = none. Written only by the admin; a `capacity` report never touches it. |
 | `wt_public_certificate` | `TEXT` NOT NULL DEFAULT `'public'` | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* `CHECK (wt_public_certificate IN ('public','agent'))`. With an override, whether the URL presents a publicly trusted certificate (`public`: no hashes sent) or the agent's own (`agent`: hashes sent). Ignored while `wt_public_url` is NULL. |
+| `compat_tools_free_bytes` | `BIGINT` NULL | *(Amendment 56, accreleus/quasar#1066, migration 0113, pre-approved 2026-11-06.)* free space on the agent's tools filesystem from the latest `capacity.compat_tools`; NULL = never reported (no `compat_tools_v1` agent yet). Kept when a report omits the field. |
+| `compat_tools_reported_at` | `TIMESTAMPTZ` NULL | *(Amendment 56, migration 0113.)* when `host_compat_tools` and the column above were last replaced. |
 | `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
 
 ### Host status state machine (P3-01)
@@ -1175,6 +1180,7 @@ signaling (P1-D).
 | `transport_reason` | `TEXT` NULL | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* why a wanted WebTransport was not chosen (`profile_disallows`, `host_no_endpoint`, `device_no_webtransport`, `device_no_webcodecs`; an open string), written with `transport`. NULL when WebTransport was chosen or never wanted. Served as `Session.transport_reason`. |
 | `transport_fallback_reason` | `TEXT` NULL | *(Amendment 54, accreleus/quasar#1026, migration 0111, pre-approved 2026-11-06.)* the reason in the latest `transport.fallback` trace event the client posted while the session was non-terminal, `^[a-z0-9_]{1,64}$`, validated by the API. Observability only: nothing reads it to decide anything. Served as `Session.transport_fallback_reason`. |
 | `pyrowave` | `JSONB` NULL | *(Amendment 55, accreleus/quasar#1050, migration 0112, pre-approved 2026-11-06.)* The session's PyroWave record, served as `Session.pyrowave` (shape: `control-api.md` §The session's `pyrowave`): `{allowed, reason, wanted, active, used, target_kbps, switch_reason}`. Written whole at launch by the stream plan (`allowed`, `reason`, `wanted`, `target_kbps`); `wanted`, `active`, `used` and `switch_reason` are then updated from the agent's `codec.switched` trace events and the toggle's acks while the session is non-terminal. NULL for every earlier row. **Observability and UI state only**: the agent holds the live state, and nothing in scheduling, admission or the stream plan reads this back. JSONB rather than columns for the reason `codec_decision` gives: read only whole, with its row, never queried by its contents. No `CHECK` on the shape. `codec` above never holds `pyrowave`: it stays the session's standard codec. |
+| `compat_tool_names` | `TEXT[]` NULL | *(Amendment 56, accreleus/quasar#1066, migration 0113, pre-approved 2026-11-06.)* The GE Steam names in `session_assign.compat_tools.mount`: the enabled tools installed on its host at assign, which the agent mounted. NULL when no `compat_tools` was sent. Read by the parked-session claim check and by `force-remove`'s stop step to find the sessions that mount a tool, through `sessions_compat_tool_names_live_idx` (`CREATE INDEX … ON sessions USING GIN (compat_tool_names) WHERE state NOT IN ('stopped','failed')`) (`control-api.md` §Compatibility tools). |
 | **launch params** | | drive the P1-5 pipeline; default from `apps` then overridable per launch. |
 | `width` | `INT` NOT NULL | |
 | `height` | `INT` NOT NULL | |
@@ -2148,6 +2154,79 @@ resurrection bug: this row makes the reconciler skip the appid, **and** the reco
 modifies an existing tile (`ON CONFLICT DO NOTHING`, not `DO UPDATE`), so `enabled = false` is
 never flipped back even if this row were somehow lost.
 
+## `compat_tools` (compatibility tools, amendment 56, accreleus/quasar#1066, migration 0113)
+> *New table; changes nothing existing. Pre-approved by the owner 2026-11-06. The catalogue of
+> compatibility tools (`control-api.md` §Compatibility tools). Valve builds and the recommended
+> list are code-owned rows reconciled at boot; `tag` rows are added by an admin. Rows are never
+> deleted in this amendment.*
+
+| column | type | notes |
+|---|---|---|
+| `id` | `UUID` PRIMARY KEY DEFAULT `gen_random_uuid()` | |
+| `kind` | `TEXT` NOT NULL DEFAULT `'proton'` | `CHECK (kind IN ('proton'))`. Provider-neutral: no column here names Steam except `steam_name`, the Steam binding's key. |
+| `family` | `TEXT` NOT NULL | `CHECK (family IN ('valve','ge'))`. |
+| `source` | `TEXT` NOT NULL | `CHECK (source IN ('steam','recommended','tag'))`. |
+| `tag` | `TEXT` NULL UNIQUE | `CHECK (tag IS NULL OR tag ~ '^GE-Proton[0-9]{1,3}-[0-9]{1,4}$')`. The GE release tag. |
+| `steam_name` | `TEXT` NULL UNIQUE | `CHECK (steam_name IS NULL OR steam_name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')`. The name Steam registers the tool under; a GE name must also start with `GE-Proton` (`compat_tools_shape`). For GE, read from the verified tarball's `compatibilitytool.vdf` by the first host to install it, **bound** then (a differing name from another host is refused); NULL until then. **This grammar is injection containment**: the value becomes a directory name on hosts and a token in `QUASAR_COMPAT_TOOLS`, so it is checked here, at the control plane, at the agent and in the Steam image's wrapper. |
+| `display_name` | `TEXT` NOT NULL | |
+| `recommended` | `BOOLEAN` NOT NULL DEFAULT `false` | on this Quasar release's recommended list; set by the boot reconcile. |
+| `name_conflict` | `BOOLEAN` NOT NULL DEFAULT `false` | set when a host reported a Steam name for this tag that fails the grammar, is reserved or another row holds (`control-api.md` §Install job). While true the tool is out of desired state and reads `failed` (`name_conflict`) on every host. Cleared only when an admin disables and re-enables the tool. Always `false` on a Valve row. |
+| `pin_conflict` | `BOOLEAN` NOT NULL DEFAULT `false` | set by the boot reconcile when the recommended list ships this tag with a different SHA-512 from the row's (`control-api.md` §The catalogue). While true the tool is out of desired state and enabling it is `409 compat_tool_pin_conflict`. Cleared when a later release ships the row's own SHA-512. Always `false` on a Valve row. |
+| `first_enabled_at` | `TIMESTAMPTZ` NULL | when the tool was first enabled; never cleared. `DELETE /v1/admin/compat-tools/{id}` is allowed while it is NULL, or for a disabled `pin_conflict` row nothing references (no mapping, not the default, no host install, no live session mounting it; `control-api.md` §Every state has an exit). |
+| `force_remove_pending_at` | `TIMESTAMPTZ` NULL | set by `force-remove`; while set, the control plane re-runs its stop step at startup and every 60 s. The stop step targets only sessions created at or before this time; it is cleared when none of those remain live. The crash-safe record of a pull in progress. |
+| `enabled` | `BOOLEAN` NOT NULL DEFAULT `false` | admin-owned; the reconcile never writes it (a new Valve row is inserted `true`). For GE, enabled = desired on every host. |
+| `asset_name` | `TEXT` NULL | `<tag>-x86_64.tar.gz` or `<tag>.tar.gz`. The URL is derived from `tag` and this, never stored. |
+| `asset_size_bytes` | `BIGINT` NULL | `CHECK (asset_size_bytes IS NULL OR asset_size_bytes BETWEEN 1 AND 2147483648)` (trust rule T3). |
+| `asset_sha512` | `TEXT` NULL UNIQUE | `CHECK (asset_sha512 IS NULL OR asset_sha512 ~ '^[0-9a-f]{128}$')`. Pinned in the release for `recommended`; from the release's `.sha512sum` at add time for `tag`. |
+| `created_by` | `UUID` NULL → `users(id)` **ON DELETE SET NULL** | the admin who added a `tag` row; NULL for code-owned rows. |
+| `created_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
+| `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | shared `set_updated_at()` trigger. |
+
+```sql
+CONSTRAINT compat_tools_shape CHECK (
+  (family = 'valve' AND source = 'steam' AND tag IS NULL AND asset_name IS NULL
+     AND asset_size_bytes IS NULL AND asset_sha512 IS NULL
+     AND steam_name IS NOT NULL AND steam_name ~ '^proton_(experimental|hotfix|[0-9]{1,3})$')
+  OR
+  (family = 'ge' AND source IN ('recommended','tag') AND tag IS NOT NULL
+     AND asset_name IN (tag || '-x86_64.tar.gz', tag || '.tar.gz')
+     AND asset_size_bytes IS NOT NULL AND asset_sha512 IS NOT NULL
+     AND (steam_name IS NULL OR (steam_name ~ '^GE-Proton'
+          AND lower(steam_name) !~ '^(proton_|steamlinuxruntime|legacysteamruntime)'))))
+```
+
+## `compat_tool_mappings` (amendment 56, accreleus/quasar#1066, migration 0113)
+> *New table. One row per game: the per-game tool mapping, fleet-wide, keyed by the provider's
+> game id, never by an app row or a user's tile.*
+
+| column | type | notes |
+|---|---|---|
+| `provider` | `TEXT` NOT NULL | `CHECK (provider IN ('steam'))`. Widened by a later provider's amendment. |
+| `external_id` | `TEXT` NOT NULL | `CHECK (external_id ~ '^[1-9][0-9]{0,9}$')`, the `apps_external_id_ck` regex: argument-injection containment, because the appid reaches `QUASAR_COMPAT_TOOLS` and `config.vdf`. Appid `0` (the fleet default's slot) is `instance_settings.compat_tool_default_id`, never a row. |
+| `tool_id` | `UUID` NOT NULL → `compat_tools(id)` **ON DELETE RESTRICT** | an enabled tool at write time; disabling a mapped tool is refused by the API. |
+| `forced` | `BOOLEAN` NOT NULL DEFAULT `false` | true: overwrite the user's own choice in Steam. |
+| `updated_by` | `UUID` NULL → `users(id)` **ON DELETE SET NULL** | |
+| `updated_at` | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` | |
+
+`PRIMARY KEY (provider, external_id)`: a mapping is set, replaced or cleared, never accumulated.
+`CREATE INDEX compat_tool_mappings_tool_idx ON compat_tool_mappings (tool_id)` for the in-use
+check. At most 1000 rows, enforced by the API.
+
+## `host_compat_tools` (amendment 56, accreleus/quasar#1066, migration 0113)
+> *New table. The GE tools a host reports installed (`agent-api.md` `capacity.compat_tools.tools`),
+> replaced wholesale for the host on each report that carries the field. Read by placement, the
+> session's tool list, the reconciler and the host card. Reporter truth, never desired state.*
+
+| column | type | notes |
+|---|---|---|
+| `host_id` | `UUID` NOT NULL → `hosts(id)` **ON DELETE CASCADE** | |
+| `name` | `TEXT` NOT NULL | `CHECK (name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')`. The Steam name and directory name. |
+| `tag` | `TEXT` NOT NULL | `CHECK (tag ~ '^GE-Proton[0-9]{1,3}-[0-9]{1,4}$')`, as reported. |
+| `sha512` | `TEXT` NOT NULL | `CHECK (sha512 ~ '^[0-9a-f]{128}$')`. Joined to `compat_tools.asset_sha512`; a row matching no catalogue row is listed on the host card for removal only. |
+| `bytes` | `BIGINT` NOT NULL | `CHECK (bytes >= 0)`. Unpacked size. |
+
+`PRIMARY KEY (host_id, name)`.
+
 ## `jobs` (background-jobs framework, 2026-08-12)
 > *Migration 0066. New table; changes nothing existing. The registry row for one piece of
 > background work. **Its columns are split by OWNERSHIP and the split is load-bearing:** identity
@@ -2582,6 +2661,7 @@ control-plane/migrations/
   0110_share_steam_library.up.sql -- (share the user's Steam library, amendment 53, #1001, ADDITIVE -- two new columns with defaults that make every existing row valid, one named CHECK, one partial index; no data change, no backfill.) ALTER TABLE apps ADD COLUMN share_steam_library BOOLEAN NOT NULL DEFAULT false, ADD CONSTRAINT apps_share_steam_library_ck CHECK (NOT share_steam_library OR (parent_app_id IS NULL AND library_provider = '')); ALTER TABLE sessions ADD COLUMN shared_home_app_id UUID NULL REFERENCES apps(id) ON DELETE SET NULL; CREATE INDEX sessions_shared_home_live_idx ON sessions (user_id, shared_home_app_id) WHERE shared_home_app_id IS NOT NULL AND state NOT IN ('stopped','failed'). DOWN: refuses (RAISE EXCEPTION) while a session with shared_home_app_id is live; otherwise it drops the index, both columns and the CHECK. ROLLBACK, standing repo rule: once applied, never deploy a control-plane binary embedding only <= 0109 without running this down migration first.
   0111_webtransport.up.sql -- (WebTransport transport #2, amendment 54, accreleus/quasar#1026, ADDITIVE -- defaulted or nullable columns and their CHECKs; no data change, no backfill. Number provisional, taken at landing.) ALTER TABLE launch_profiles ADD COLUMN transport TEXT NOT NULL DEFAULT 'webrtc' CHECK (transport IN ('webrtc','webtransport_opt_in','webtransport')); ALTER TABLE hosts ADD COLUMN transports JSONB NULL, ADD COLUMN wt_port INT NULL CHECK (wt_port IS NULL OR wt_port BETWEEN 1 AND 65535), ADD COLUMN wt_addresses JSONB NULL, ADD COLUMN wt_certificates JSONB NULL, ADD COLUMN wt_public_url TEXT NULL, ADD COLUMN wt_public_certificate TEXT NOT NULL DEFAULT 'public' CHECK (wt_public_certificate IN ('public','agent')); ALTER TABLE sessions ADD COLUMN transport TEXT NOT NULL DEFAULT 'webrtc' CHECK (transport IN ('webrtc','webtransport')), ADD COLUMN transport_reason TEXT NULL, ADD COLUMN transport_fallback_reason TEXT NULL; ALTER TABLE session_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'signaling' CHECK (kind IN ('signaling','transport')). DOWN: refuses (RAISE EXCEPTION) while a live session has transport = 'webtransport'; otherwise it drops every column above. ROLLBACK, standing repo rule: once applied, never deploy a control-plane binary embedding only <= 0110 without running this down migration first.
   0112_pyrowave.up.sql -- (PyroWave, Ultra-low latency (LAN), amendment 55, accreleus/quasar#1050, ADDITIVE -- defaulted or nullable columns and one CHECK; no data change, no backfill. Number provisional, taken at landing.) ALTER TABLE launch_profiles ADD COLUMN pyrowave_allowed BOOLEAN NOT NULL DEFAULT false, ADD COLUMN pyrowave_kbps INT NULL CHECK (pyrowave_kbps IS NULL OR pyrowave_kbps BETWEEN 50000 AND 1000000); ALTER TABLE sessions ADD COLUMN pyrowave JSONB NULL. DOWN: refuses (RAISE EXCEPTION) while a live session has pyrowave->>'allowed' = 'true'; otherwise it drops the three columns. ROLLBACK, standing repo rule: once applied, never deploy a control-plane binary embedding only <= 0111 without running this down migration first.
+  0113_compat_tools.up.sql -- (compatibility tools, amendment 56, accreleus/quasar#1066, ADDITIVE -- three new tables and nullable columns; no data change, no backfill. Number provisional, taken at landing.) CREATE TABLE compat_tools (... name_conflict BOOLEAN NOT NULL DEFAULT false, pin_conflict BOOLEAN NOT NULL DEFAULT false, first_enabled_at TIMESTAMPTZ NULL, force_remove_pending_at TIMESTAMPTZ NULL, compat_tools_shape CHECK ...); CREATE TABLE compat_tool_mappings (provider, external_id, tool_id REFERENCES compat_tools ON DELETE RESTRICT, forced, updated_by, updated_at, PRIMARY KEY (provider, external_id)); CREATE INDEX compat_tool_mappings_tool_idx; CREATE TABLE host_compat_tools (host_id REFERENCES hosts ON DELETE CASCADE, name, tag CHECK (tag grammar), sha512, bytes, PRIMARY KEY (host_id, name)); ALTER TABLE instance_settings ADD COLUMN compat_tool_default_id UUID NULL REFERENCES compat_tools(id) ON DELETE RESTRICT, ADD COLUMN compat_tools_max_enabled INT NOT NULL DEFAULT 8 CHECK (compat_tools_max_enabled BETWEEN 1 AND 32), ADD COLUMN compat_tools_disk_reserve_gib INT NOT NULL DEFAULT 10 CHECK (compat_tools_disk_reserve_gib BETWEEN 1 AND 1024); ALTER TABLE hosts ADD COLUMN compat_tools_free_bytes BIGINT NULL, ADD COLUMN compat_tools_reported_at TIMESTAMPTZ NULL; ALTER TABLE sessions ADD COLUMN compat_tool_names TEXT[] NULL; CREATE INDEX sessions_compat_tool_names_live_idx ON sessions USING GIN (compat_tool_names) WHERE state NOT IN ('stopped','failed'). No seeding: the Valve and recommended rows and the compat_tools.converge job row are code-owned and reconciled at boot. DOWN: drops the columns and the three tables. ROLLBACK, standing repo rule: once applied, never deploy a control-plane binary embedding only <= 0112 without running this down migration first.
 ```
 The golang-migrate CLI can target this path directly:
 `migrate -path control-plane/migrations -database "$DATABASE_URL" up`
@@ -2623,6 +2703,18 @@ while a live session was granted PyroWave (an older binary would neither relay i
 record its switches); otherwise it drops the three columns. After a refusal, end those sessions,
 run `migrate … force 112`, then the down again.
 
+
+### 0113 — compatibility tools *(Amendment 56, accreleus/quasar#1066, migration 0113, pre-approved 2026-11-06.)*
+
+Adds `compat_tools`, `compat_tool_mappings` and `host_compat_tools`,
+`instance_settings.compat_tool_default_id`, `compat_tools_max_enabled` and
+`compat_tools_disk_reserve_gib`, `hosts.compat_tools_free_bytes` and
+`compat_tools_reported_at`, and `sessions.compat_tool_names`. No data change and no seeding: the
+catalogue fills at the next boot's reconcile, every tool starts disabled except the Valve builds,
+the default is NULL and there are no mappings, so no session changes until an admin acts. The
+number is provisional and is taken at landing. The down drops everything above; it loses the
+catalogue, the mappings, the default and the install records. Tools already installed stay on
+each host's disk, unmounted and unused by an older control plane, until a newer one removes them.
 
 ## Steam preparation persistence (2026-09-06, Quasar #145)
 
