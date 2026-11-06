@@ -334,7 +334,7 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > **(1)** `register` may advertise `compat_tools_v1` (§`register`). **(2)** `capacity` gains
 > `compat_tools`, the tools installed on the host and the free space (§`capacity`).
 > **(3)** `session_assign` gains `compat_tools`, the effective mapping for a Steam-family session;
-> the agent mounts its tools directory read-only and sets two environment keys
+> the agent mounts each enabled tool read-only and sets two environment keys
 > (§`session_assign`). The install itself rides the existing jobs pull channel
 > (`compat_tools.converge`), so no message is added for it.
 > **Compatibility:** an older agent never advertises the capability, so it is sent no
@@ -897,8 +897,9 @@ that advertised `compat_tools_v1`. The GE tools it installed and the free space 
                "sha512": "<128 lowercase hex>", "bytes": 1717986918 } ]
 }
 ```
-`tools` lists every tool directory the agent installed and still holds (its own record, written
-at install, identifies it; any other directory in the tools directory is not listed). `name` is
+`tools` lists every tool in the agent's install record, which it keeps in its own state outside
+the tools directory (never inside a tool's tree, which the archive controls); any other directory
+in the tools directory is not listed. `name` is
 the directory name and Steam name, `sha512` the verified tarball's, `bytes` the unpacked size.
 `free_bytes` is the free space on the tools directory's filesystem. The control plane replaces the
 host's stored set wholesale on each report that carries the field, and keeps it on one that omits
@@ -1956,22 +1957,29 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >   session's one media client.
 
 > *(amendment 56, accreleus/quasar#1066, additive)* `session_assign` may carry **`compat_tools`**,
-> the effective compatibility-tool mapping for a Steam-family session (`control-api.md`
-> §Compatibility tools, "What the session receives"):
+> the tools to mount and the effective compatibility-tool mapping for a Steam-family session
+> (`control-api.md` §Compatibility tools, "What the session receives"):
 > ```json
-> "compat_tools": { "entries": [
->   { "appid": "0", "name": "proton_10", "forced": false },
->   { "appid": "1145360", "name": "GE-Proton11-12-x86_64", "forced": true } ] }
+> "compat_tools": {
+>   "mount": ["GE-Proton11-12-x86_64"],
+>   "entries": [
+>     { "appid": "0", "name": "proton_10", "forced": false },
+>     { "appid": "1145360", "name": "GE-Proton11-12-x86_64", "forced": true } ] }
 > ```
 > - **Sent only to a connection that advertised `compat_tools_v1`**, only for a Steam-family app,
->   never for a template preparation run. `entries` may be empty and holds at most 1001 entries;
->   each appid appears at most once, and appid `"0"` (the fleet default) is never `forced`.
-> - **The mount.** The agent bind-mounts its own tools directory **read-only** at
->   `/opt/quasar/compatibilitytools` in the app container. The source is agent-owned and outside
->   the managed-home root, so it is not an `app.mounts` entry, is not subject to
->   `QUASAR_APP_MOUNT_ALLOW`, and does not take part in finding the managed-home mount (a preset
+>   never for a template preparation run. `mount` holds at most 32 names; `entries` may be empty and
+>   holds at most 1001 entries; each appid appears at most once, and appid `"0"` (the fleet
+>   default) is never `forced`.
+> - **The mounts.** For each name in `mount` that its install record holds, the agent bind-mounts
+>   that one tool's directory **read-only, `nosuid,nodev`** at
+>   `/opt/quasar/compatibilitytools/<name>` in the app container, and nothing else from the tools
+>   directory: a tool not in `mount` (a disabled one still awaiting removal) is invisible to the
+>   session. A name its record does not hold is skipped and logged. The sources are agent-owned and
+>   outside the managed-home root, so they are not `app.mounts` entries, are not subject to
+>   `QUASAR_APP_MOUNT_ALLOW`, and do not take part in finding the managed-home mount (a preset
 >   mount under the home root fails that with `ambiguous managed-home mounts`,
->   accreleus/quasar#1064). The control plane never sends a host path.
+>   accreleus/quasar#1064). The control plane never sends a host path. The session keeps these
+>   mounts for its whole life.
 > - **The environment.** The agent sets two keys, replacing any value in `app.env`:
 >   `STEAM_EXTRA_COMPAT_TOOLS_PATHS=/opt/quasar/compatibilitytools`, and
 >   `QUASAR_COMPAT_TOOLS`, the entries as space-separated `<appid>=<name>` tokens, with `!`
@@ -1979,16 +1987,16 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >   are none). The Steam image's launch wrapper consumes `QUASAR_COMPAT_TOOLS`.
 > - **Validation.** The agent re-checks every entry: `appid` is `0` or matches
 >   `^[1-9][0-9]{0,9}$`, `name` matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, and a name is either
->   a Valve name (`^proton_(experimental|hotfix|[0-9]{1,3})$`) or a tool directory it installed
->   and still holds. It drops an entry that fails and logs it; it never fails the assignment for
->   it. If the tools directory is unusable it mounts nothing, removes
->   `STEAM_EXTRA_COMPAT_TOOLS_PATHS`, and keeps only the Valve entries.
+>   a Valve name (`^proton_(experimental|hotfix|[0-9]{1,3})$`) or a tool it actually mounted for
+>   this session. It drops an entry that fails and logs it; it never fails the assignment for it.
+>   If no tool could be mounted it removes `STEAM_EXTRA_COMPAT_TOOLS_PATHS` and keeps only the
+>   Valve entries.
 > - **Adoption.** A `play` session that adopts a parked runtime (`adopt_session_id`) keeps the
->   mount and environment the parked session started with; the control plane only lets a claim
+>   mounts and environment the parked session started with; the control plane only lets a claim
 >   adopt when that is still correct (`control-api.md` §Compatibility tools, "Hot Loading").
-> - While any live non-parked session on the host has the mount, the agent defers removing a tool
->   (`in_use`); a tool being installed is staged outside the mounted directory and appears in it
->   by one atomic rename.
+> - While any live non-parked session on the host has a tool mounted, the agent defers removing
+>   that tool (`in_use`); a tool being installed is staged outside the tools directory and appears
+>   in it by one atomic rename.
 > - Absent ⇒ no mount and neither key is touched: byte-identical to an agent without the
 >   amendment.
 

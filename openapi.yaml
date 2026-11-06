@@ -2424,6 +2424,8 @@ paths:
                     Amendment 39. Each heartbeat, and a park on exit, sets a parked session's
                     deadline to now plus this many minutes. Absent = unchanged; outside 1-60 is
                     400 validation_failed.
+                compat_tools_max_enabled: { type: integer, minimum: 1, maximum: 32, description: "Amendment 56 (accreleus/quasar#1066). How many GE compatibility tools may be enabled at once. Default 8. Absent = unchanged; outside 1-32 is 400 validation_failed." }
+                compat_tools_disk_reserve_gib: { type: integer, minimum: 1, maximum: 1024, description: "Amendment 56. Free GiB a tool install must leave on a host beyond the asset and the 4 GiB unpacked cap (trust rule T7). Default 10. Absent = unchanged." }
                 default_timezone: { type: string, description: "Amendment 49 (#845). As RegionSettings.timezone. Default UTC. Absent = unchanged." }
                 default_language: { type: string, pattern: "^[a-z]{2,3}-[A-Z]{2}$", description: "Amendment 49. Default en-US. Absent = unchanged." }
                 default_region_format: { type: [string, "null"], pattern: "^[a-z]{2,3}-[A-Z]{2}$", description: "Amendment 49. null = the same as the language (the default). Absent = unchanged." }
@@ -3367,7 +3369,62 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: compat_tool_in_use - disabling a tool a mapping names or that is the fleet default.
+          description: >-
+            compat_tool_in_use - disabling a tool a mapping names or that is the fleet default;
+            compat_tool_limit - enabling past instance_settings.compat_tools_max_enabled;
+            compat_tool_pin_conflict - enabling a tool marked pin_conflict.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+    delete:
+      tags: [admin]
+      summary: Delete a GE tag row that was never enabled (amendment 56).
+      description: Amendment 56. Only a source tag row whose first_enabled_at is null. Audited as compat_tool.delete.
+      x-required-role: admin
+      security: [ { bearerAuth: [] } ]
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: conflict - a Valve or recommended row, or a tag that was ever enabled.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  /v1/admin/compat-tools/{id}/force-remove:
+    parameters: [ { $ref: "#/components/parameters/PathId" } ]
+    post:
+      tags: [admin]
+      summary: Emergency pull of a GE tool - clear its mappings and default, disable it, stop the sessions that mount it (amendment 56).
+      description: >-
+        Amendment 56. One transaction deletes every mapping naming the tool, clears the fleet
+        default if it is the tool, disables it (bypassing compat_tool_in_use) and supersedes every
+        parked session; after commit every live session whose compat_tool_names holds the tool's
+        Steam name is stopped as an admin DELETE /v1/sessions/{id} would. Audited as
+        compat_tool.force_remove.
+      x-required-role: admin
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, properties: {} }
+      responses:
+        "200":
+          description: Pulled.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tool, mappings_cleared, default_cleared, sessions_stopped]
+                properties:
+                  tool: { $ref: "#/components/schemas/CompatTool" }
+                  mappings_cleared: { type: integer, minimum: 0 }
+                  default_cleared: { type: boolean }
+                  sessions_stopped: { type: integer, minimum: 0 }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: conflict - a Valve build (Quasar installs none).
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/admin/hosts/{id}/compat-tools:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
@@ -4554,7 +4611,7 @@ components:
         Retry-After:
           description: "delta-seconds; MAY accompany capacity_exhausted (control-api.md §Admission control, (4)); 2 on a refused warm-Steam claim (amendment 39)."
           schema: { type: integer, minimum: 0 }
-      description: "no_host_available / capacity_exhausted / host_not_ready (amendment 11: a failing evidence-based readiness check is the only reason no host qualified) — well-formed but cannot be placed now (retryable). Amendment 12 (#296): an explicit stream.codec is a codec constraint applied at placement; when a GPU that can encode it exists but none is free the answer is capacity_exhausted, and when no online usable GPU can encode it the answer is no_host_available, both with a message naming the codec. No new code. Amendment 40 (#602): no_host_available MAY carry error.reason home_host_unavailable (the caller's home is on a host that is offline or no longer enrolled); a client does not auto-retry it. Amendment 56 (accreleus/quasar#1066): no_host_available MAY carry error.reason compat_tool_missing (no online host has the GE compatibility tool the launched game is mapped to; it clears as hosts install it)."
+      description: "no_host_available / capacity_exhausted / host_not_ready (amendment 11: a failing evidence-based readiness check is the only reason no host qualified) — well-formed but cannot be placed now (retryable). Amendment 12 (#296): an explicit stream.codec is a codec constraint applied at placement; when a GPU that can encode it exists but none is free the answer is capacity_exhausted, and when no online usable GPU can encode it the answer is no_host_available, both with a message naming the codec. No new code. Amendment 40 (#602): no_host_available MAY carry error.reason home_host_unavailable (the caller's home is on a host that is offline or no longer enrolled); a client does not auto-retry it. Amendment 56 (accreleus/quasar#1066): no_host_available MAY carry error.reason compat_tool_missing (no online host has the GE compatibility tool the launched game's per-game mapping names; the fleet default never causes it; it clears as hosts install it)."
       content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
 
   schemas:
@@ -4627,7 +4684,7 @@ components:
     CompatTool:
       type: object
       description: "Amendment 56 (accreleus/quasar#1066): one compatibility tool. control-api.md §Compatibility tools."
-      required: [id, kind, family, source, tag, steam_name, display_name, recommended, enabled, asset, hosts, mappings, is_default, created_at]
+      required: [id, kind, family, source, tag, steam_name, display_name, recommended, enabled, asset, hosts, mappings, is_default, name_conflict, pin_conflict, created_at]
       properties:
         id: { type: string, format: uuid }
         kind: { type: string, enum: [proton] }
@@ -4652,6 +4709,8 @@ components:
             - { type: "null" }
         mappings: { type: integer, minimum: 0, description: "Per-game mappings naming this tool." }
         is_default: { type: boolean }
+        name_conflict: { type: boolean, description: "A host reported a Steam name for this tag that is reserved, fails the grammar or another tool holds; the tool is out of desired state until disabled and re-enabled." }
+        pin_conflict: { type: boolean, description: "The recommended list ships this tag with a different SHA-512; the tool is out of desired state and cannot be enabled." }
         created_at: { type: string, format: date-time }
     CompatToolAsset:
       type: object
@@ -4918,8 +4977,8 @@ components:
             caller's Steam home for a sharing launch) and that host is offline or no longer
             enrolled. Only an admin clears it, so a client does not spend its automatic retry on
             it. Names no host. Amendment 56 (accreleus/quasar#1066), on 503 no_host_available:
-            compat_tool_missing (no online host has the GE compatibility tool the launched game is
-            mapped to). Amendment 53 (#1001), on 409 home_in_use:
+            compat_tool_missing (no online host has the GE compatibility tool the launched game's
+            per-game mapping names; never for the fleet default). Amendment 53 (#1001), on 409 home_in_use:
             steam_library_open_in_desktop (the holder mounts the Steam library as a shared home)
             or steam_game_running (the refused launch shares the library and a Steam session holds
             it); absent when the holder is already stopping. Open string: a client treats an
@@ -6862,6 +6921,8 @@ components:
               minimum: 1
               maximum: 60
               description: Amendment 39. Default 10.
+            compat_tools_max_enabled: { type: integer, minimum: 1, maximum: 32, description: "Amendment 56 (accreleus/quasar#1066). Default 8. Optional in the envelope so a pre-amendment server stays conformant." }
+            compat_tools_disk_reserve_gib: { type: integer, minimum: 1, maximum: 1024, description: "Amendment 56. Default 10." }
             default_timezone: { type: string, description: "Amendment 49 (#845). Default UTC. Optional in the envelope so a pre-amendment server stays conformant." }
             default_language: { type: string, description: "Amendment 49. Default en-US." }
             default_region_format: { type: [string, "null"], description: "Amendment 49. null = the same as the language." }
