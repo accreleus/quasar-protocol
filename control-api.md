@@ -1111,6 +1111,11 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `GET /v1/admin/apps/{id}/library/rules` | **admin** | *(Phase 4)* the operator-written layer-2 rules on this provider app. Same `{id}` rule: `400` for a real non-provider app, `404` for a missing one |
 | `PUT /v1/admin/apps/{id}/library/rules/{external_id}` | **admin** | *(Phase 4)* **Ignore and un-ignore, one route, two directions** — `rule:"ignore"` suppresses fleet-wide (rule row + disable the tile + revoke its provider entitlements, in one transaction), `rule:"allow"` outranks the built-in denylist. The primary key is the idempotency key, so a repeat is a replace. Audited as `app.library.rule.set` |
 | `DELETE /v1/admin/apps/{id}/library/rules/{external_id}` | **admin** | *(Phase 4)* drop a rule, returning the appid to whatever the built-in denylist says about it. Re-enables and disables nothing by itself — the next scan applies the ladder afresh. Audited as `app.library.rule.delete` |
+| `GET` / `POST /v1/admin/compat-tools` | **admin** | *(Amendment 56, accreleus/quasar#1066)* the compatibility-tool catalogue with the fleet default / add a GE-Proton release by tag, pinned to its release checksum (§Compatibility tools) |
+| `PATCH /v1/admin/compat-tools/{id}` | **admin** | *(Amendment 56)* enable (install on every host) or disable (remove from every host) a tool — refuse-if-in-use (`409 compat_tool_in_use`) |
+| `PUT /v1/admin/compat-tools/default` | **admin** | *(Amendment 56)* set or clear the fleet default tool |
+| `GET /v1/admin/compat-tools/mappings`, `PUT` / `DELETE /v1/admin/compat-tools/mappings/steam/{external_id}` | **admin** | *(Amendment 56)* the per-game tool mappings, keyed by Steam appid, with `forced` |
+| `GET /v1/admin/hosts/{id}/compat-tools` | **admin** | *(Amendment 56)* the tools installed, installing or failed on one host, and its free space |
 | `GET /v1/admin/runtime-presets`, `GET /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* read the shared runtime presets, each with its `used_by` app list |
 | `POST /v1/admin/runtime-presets` | **admin** | *(UI-P3)* create a runtime preset |
 | `PATCH /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* edit a runtime preset — takes effect on the **next launch** of every app using it, with no app edit |
@@ -3688,6 +3693,11 @@ already `stopping`, and on every other `home_in_use`. `home_host_unavailable` al
 sharing launch pinned to the host of the caller's Steam home (§Storage, "A shared Steam
 library").
 
+*(Amendment 56, accreleus/quasar#1066.)* `reason` is also `compat_tool_missing` on
+`503 no_host_available` when the only reason no online host qualified is that none has the GE
+compatibility tool the launched game is mapped to (§Compatibility tools, "Placement"). Every
+enabled tool installs on every host, so it clears without an admin once a host catches up.
+
 ### `GET /v1/sessions/{id}` — poll lifecycle
 ```json
 // 200
@@ -4449,6 +4459,356 @@ no-op.
 The client remembers the user's choice per device and sends it at the next launch as `pyrowave`;
 the server keeps no per-user preference.
 
+## Compatibility tools *(Amendment 56, accreleus/quasar#1066, pre-approved by the owner 2026-11-06)*
+
+> *Additive and admin-gated. Eight admin routes, one host-scoped agent job
+> (`compat_tools.converge`) on the existing jobs framework, one new `reason` value on
+> `503 no_host_available`, a sixth claim check for a parked Steam, and migration 0113
+> (`schema.md`). The agent side is `agent-api.md` amendment 56: a `register` capability, a
+> `capacity` field and a `session_assign` field. No existing shape, status code or endpoint
+> changes. Spec accreleus/quasar#1063; measured inputs accreleus/quasar#1064. An independent Opus
+> review runs before merge.*
+
+A **compatibility tool** is a host resource that lets a library provider run a Windows game: in
+this amendment always a Proton build (`kind: "proton"`). It is **provider-neutral**: the tool
+knows nothing of Steam, and each provider binds it its own way. The Steam provider binds it
+through Steam's per-game `CompatToolMapping` (below). A later provider (an umu-based launcher)
+binds the same installed directory through its own variable (`PROTONPATH`); nothing here assumes
+Steam except that binding.
+
+Two **families**:
+
+- **`valve`**: Valve's own Proton builds (`proton_experimental`, `proton_hotfix`,
+  `proton_<major>`). Each home's Steam downloads them itself, so Quasar never installs one; it
+  only maps to them. The library denylist that hides them from game tiles is unchanged.
+- **`ge`**: GE-Proton releases from `GloriousEggroll/proton-ge-custom` on github.com. Quasar
+  installs an **enabled** GE tool on **every host**, as fleet-wide desired state, under the trust
+  rules below. Two sources: the **recommended list** shipped with each Quasar release (each entry
+  pinned by SHA-512), and any other release **tag** an admin adds, pinned at add time to the
+  SHA-512 in that release's own checksum file.
+
+A tool's **Steam name** is the name Steam registers it under. For a Valve build it is the fixed
+name above. For a GE build it is the key in the tarball's `compatibilitytool.vdf`, read by the
+agent from the verified tarball, never derived from the tag (GE-Proton 11 registers
+`GE-Proton11-12` as `GE-Proton11-12-x86_64`). Grammar, for every Steam name:
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. It is a directory name on the host and a token in an
+environment value, so no other character, and no `.` or `-` first, is ever accepted.
+
+### The catalogue
+
+`CompatTool`:
+
+```json
+{ "id": "6f1c…", "kind": "proton", "family": "ge", "source": "recommended",
+  "tag": "GE-Proton11-12", "steam_name": "GE-Proton11-12-x86_64",
+  "display_name": "GE-Proton11-12-x86_64", "recommended": true, "enabled": true,
+  "asset": { "name": "GE-Proton11-12-x86_64.tar.gz",
+             "url": "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton11-12/GE-Proton11-12-x86_64.tar.gz",
+             "size_bytes": 566859228, "sha512": "2e3744…3e" },
+  "hosts": { "installed": 2, "installing": 0, "waiting": 1, "failed": 0, "unsupported": 0 },
+  "mappings": 3, "is_default": false, "created_at": "…" }
+```
+
+- `source`: `steam` (a Valve build), `recommended` (from the shipped list), `tag` (added by an
+  admin). `recommended` says whether the tool is on the list this Quasar release ships; a tool can
+  have `source: "recommended"` and `recommended: false` after a later release drops it.
+- `steam_name`: `null` only for a GE tag no host has installed yet (the name is learned from the
+  first verified install). `display_name`: the Valve label (`Proton Experimental`, `Proton 11`),
+  else `steam_name`, else `tag`.
+- `asset`: `null` for a Valve build. `url` is always
+  `https://github.com/GloriousEggroll/proton-ge-custom/releases/download/<tag>/<asset.name>`,
+  and `asset.name` is `<tag>-x86_64.tar.gz` or, for releases before GE-Proton 11, `<tag>.tar.gz`.
+- `hosts`: per-host install state counts over the hosts in scope (§Per-host install state); `null`
+  for a Valve build. `mappings`: how many per-game mappings name the tool.
+
+The **recommended list** and the Valve builds are **code-owned**: the control plane reconciles
+them into the catalogue at every boot, the way it reconciles job identities. A new entry is
+inserted disabled (a Valve build enabled). The reconcile never deletes a row and never changes
+`enabled`; it sets `recommended` from the list. A recommended entry whose tag already exists as a
+`tag` row with the **same** SHA-512 marks that row `recommended`; with a different SHA-512 the row
+is left as it is and the conflict is logged, never silently re-pinned.
+
+### Admin routes
+
+All admin-only (§Authorization: `401`, then `426`, then `403` before any lookup). Every accepted
+write is audited (§Audit).
+
+**`GET /v1/admin/compat-tools`** → `200 { "items": [CompatTool…], "default_tool_id": "<uuid|null>" }`.
+Valve builds first (Experimental, Hotfix, then numbered newest first), then GE tools, newest tag
+first.
+
+**`POST /v1/admin/compat-tools`** — add a GE-Proton release by tag. Body `{ "tag": "GE-Proton11-12" }`.
+The tag must match `^GE-Proton[0-9]{1,3}-[0-9]{1,4}$`. The control plane resolves the release
+(github.com release metadata), picks the asset (`<tag>-x86_64.tar.gz`, else `<tag>.tar.gz`),
+downloads `<asset stem>.sha512sum` and checks it under the trust rules (§Trust rules, T1–T4), then
+stores the row **disabled** with `source: "tag"` and the pinned SHA-512 and size. Nothing is
+installed until the tool is enabled. `201 { CompatTool }`.
+
+| condition | status | code |
+|---|---|---|
+| body malformed, unknown key, or tag outside the grammar | `400` | `validation_failed` |
+| a tool with this tag exists (any source) | `409` | `compat_tool_exists` |
+| the release, a usable asset or its checksum file is missing, or the checksum file is malformed, names another file, or the asset exceeds the size cap | `422` | `compat_tool_unverifiable` (`message` names which: `release_not_found`, `asset_not_found`, `checksum_missing`, `checksum_malformed`, `asset_too_large`) |
+| github.com unreachable or answered 5xx / rate-limited | `503` | `upstream_unavailable` (retryable; nothing stored) |
+
+**`PATCH /v1/admin/compat-tools/{id}`** — `{ "enabled": bool }`, the only writable field. `200 { CompatTool }`.
+Enabling a GE tool makes it desired on every host (§Install job). Disabling makes it undesired, and
+each host removes it. A repeat of the current value is a `200` no-op and is not audited.
+
+| condition | status | code |
+|---|---|---|
+| malformed body, unknown key, wrong type | `400` | `validation_failed` |
+| no such tool | `404` | `not_found` |
+| disabling a tool that a per-game mapping names or that is the fleet default | `409` | `compat_tool_in_use` (`message` gives the count of mappings and whether it is the default) |
+
+**`PUT /v1/admin/compat-tools/default`** — `{ "tool_id": "<uuid>|null" }`. Sets or clears the
+**fleet default**. `null` (the install default) means Steam's own default applies, as before this
+amendment. `200 { "default_tool_id": … }`. `400` malformed; `404 not_found` unknown tool;
+`409 compat_tool_disabled` a disabled tool.
+
+**`GET /v1/admin/compat-tools/mappings`** → `200 { "items": [CompatToolMapping…] }`, ordered by
+`provider`, then `external_id` numerically:
+
+```json
+{ "provider": "steam", "external_id": "1145360", "tool_id": "6f1c…", "forced": true,
+  "app_ids": ["8b11…"], "updated_at": "…" }
+```
+
+`app_ids` lists the apps whose `(external_source, external_id)` is this game (the derived tiles,
+§Derived tiles), for the app editor; it may be empty (a mapping can precede discovery).
+
+**`PUT /v1/admin/compat-tools/mappings/steam/{external_id}`** — `{ "tool_id": "<uuid>", "forced": bool }`
+(`forced` optional, default `false`). Sets the **tool mapping** for one Steam game, fleet-wide:
+it applies to every user's tile of that game. The key is the Steam appid, never an app id or a
+user's tile. `external_id` matches `^[1-9][0-9]{0,9}$` (the `apps_external_id_ck` regex; appid
+`0` is the fleet default's slot and is not writable here). The primary key makes this a replace,
+never an accumulation. `200 { CompatToolMapping }`. `400` malformed appid or body;
+`404 not_found` unknown tool; `409 compat_tool_disabled` a disabled tool; `409 conflict` the table
+already holds 1000 mappings and this appid is not one of them.
+
+**`DELETE /v1/admin/compat-tools/mappings/steam/{external_id}`** — clears the mapping: the game
+falls back to the fleet default, else to Steam's own choice. `204`, also when none existed (not
+audited then). `400` malformed appid.
+
+**`GET /v1/admin/hosts/{id}/compat-tools`** — the host card. `404 not_found` unknown host.
+
+```json
+{ "supported": true, "free_bytes": 182536110080, "reported_at": "…",
+  "tools": [ { "tool_id": "6f1c…", "steam_name": "GE-Proton11-12-x86_64", "tag": "GE-Proton11-12",
+               "state": "installed", "bytes": 1717986918, "reason": null, "run_id": null } ] }
+```
+
+One entry per GE tool that is enabled, or installed on that host, or has an open run there, plus
+any installed tool no catalogue row matches (`tool_id` `null`, listed until it is removed).
+`supported`: the host's current agent connection advertised `compat_tools_v1` (`agent-api.md`
+§`register`); when false, `free_bytes` is `null` and every enabled tool reads `unsupported`.
+`bytes` is the installed size (`null` unless installed). `run_id` is the open or latest run of
+`compat_tools.converge` for this tool on this host (Fleet ▸ Jobs).
+
+### Per-host install state
+
+A host is **in scope** while it is enrolled. For each GE tool and host in scope, `state` is the
+first that holds:
+
+| state | when |
+|---|---|
+| `unsupported` | the host's current (or last) agent connection did not advertise `compat_tools_v1` |
+| `removing` | an open `remove` run for the tool on the host |
+| `installing` | an open `install` run for the tool on the host |
+| `installed` | the host's latest capacity report lists the tool's SHA-512 |
+| `failed` | the latest terminal run for the tool on the host failed (`reason` = its `summary.reason`) |
+| `waiting` | the tool is enabled and none of the above (`reason` = a deferred run's `summary.reason`, else `null`) |
+
+An installed tool that is disabled reads `installed` until its removal runs. The catalogue's
+`hosts` counts `installing` and `removing` together as `installing`.
+
+### Install job — `compat_tools.converge`
+
+A code-owned job on the existing framework (§Background jobs): `plane: "agent"`,
+`scope: "host"`, `schedule_kind: "event"`, `managed: true`. Its claim, report, deadline,
+single-flight, reaper and deferral ladder are the framework's, unchanged, and `agent-api.md` is
+unchanged by it. It is enabled by default; disabling it (the operator's kill switch) stops installs
+and removals and changes nothing on disk.
+
+**Desired state.** For each host in scope whose current connection advertised `compat_tools_v1`:
+every enabled GE tool installed, every other GE tool this agent installed absent. **The
+reconciler** compares that with the host's latest `capacity.compat_tools` and, when they differ
+and the host has no open run of this job, materializes **one** run for the first difference:
+removals first (they free disk), then installs in catalogue order. It runs when a tool is enabled
+or disabled, when a host's report changes its installed set, when the host's agent connects, and
+when a run of this job on that host ends. A `failed` run is not retried for the same host and
+SHA-512 until the host's agent reconnects, the tool is enabled again, or an admin presses Run now
+for that host (`POST /v1/admin/jobs/compat_tools.converge/run` with `host_id`, which materializes
+the next difference, the failed one included). A `deferred` run retries on the framework's ladder.
+An offline host catches up when it connects; a reinstalled host reports nothing installed and
+receives every enabled tool.
+
+**Params** (one action per run, built by the reconciler; an admin never supplies them):
+
+```json
+{ "action": "install", "tool_id": "6f1c…", "tag": "GE-Proton11-12",
+  "url": "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton11-12/GE-Proton11-12-x86_64.tar.gz",
+  "size_bytes": 566859228, "sha512": "<128 lowercase hex>",
+  "expected_name": "GE-Proton11-12-x86_64" }
+{ "action": "remove", "tool_id": "6f1c…", "name": "GE-Proton11-12-x86_64", "sha512": "<128 hex>" }
+```
+
+A `remove` for an installed tool no catalogue row matches carries `tool_id: null`.
+`expected_name` is the tool's `steam_name`, `null` while none is known. The `install` runner
+follows §Trust rules. `deadline_secs` is 3600.
+
+**Report.** `succeeded` with `summary`
+`{ "action", "tool_id", "name", "sha512", "bytes", "already_installed": bool }`;
+`deferred` or `failed` with `summary.reason` and `error` text. Reasons (an open string; these are
+the ones this amendment defines):
+
+| reason | outcome |
+|---|---|
+| `insufficient_disk` | `deferred` — free space below the T7 floor before download |
+| `in_use` | `deferred` — a `remove` while a live session on the host mounts the tools directory |
+| `invalid_params` | `failed` — params outside T1–T3; nothing fetched |
+| `download_failed`, `redirect_refused`, `size_mismatch` | `failed` — T2–T3 |
+| `checksum_mismatch` | `failed` — T4 |
+| `unsafe_archive`, `archive_too_large` | `failed` — T5 |
+| `vdf_invalid`, `name_reserved`, `name_mismatch`, `name_conflict` | `failed` — T6 |
+| `io_error` | `failed` |
+
+On a `succeeded` install whose tool has `steam_name` `null`, the control plane stores the reported
+`name` (it must pass the grammar, be unique in the catalogue and not be a reserved name; otherwise
+the run is recorded `failed`, `name_conflict`, and the host is asked to remove it). The agent sends
+a fresh `capacity` after every install or removal, so the per-host state does not wait for the
+periodic report.
+
+### Trust rules (normative)
+
+GE-Proton is executable code from outside Quasar's images. These rules are what allow it; an
+implementation that cannot meet one refuses the install. The control plane applies T1–T4 when it
+adds a tag; the agent applies T1–T8 to every install, whatever the control plane checked.
+
+- **T1 — fixed origin.** Only release assets of `GloriousEggroll/proton-ge-custom`. The asset URL is
+  exactly `https://github.com/GloriousEggroll/proton-ge-custom/releases/download/<tag>/<asset>`
+  with `<tag>` in the tag grammar and `<asset>` either `<tag>-x86_64.tar.gz` or `<tag>.tar.gz`;
+  the checksum file is `<asset stem>.sha512sum` beside it. Release metadata comes from GitHub's
+  API for that repository. No other URL, repository, mirror, or compression format is fetched.
+- **T2 — HTTPS to GitHub only.** TLS with certificate verification, never plain HTTP. The control
+  plane reads release metadata only from
+  `https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/tags/<tag>`. Redirects are followed only to `https` URLs on GitHub's own asset hosts
+  (a code-owned list; at this amendment `github.com`, `objects.githubusercontent.com` and
+  `release-assets.githubusercontent.com`), at most 5. Anything else is `redirect_refused`.
+- **T3 — size cap.** The asset is at most 2 GiB (2 147 483 648 bytes) and the checksum file at most
+  4 KiB. The agent reads at most `size_bytes` + 1 bytes and fails `size_mismatch` unless it read
+  exactly `size_bytes`.
+- **T4 — SHA-512.** The checksum file is one line in GNU `sha512sum` format: 128 lowercase hex,
+  two spaces (or space and `*`), the asset's own file name, optional trailing newline; any other
+  content or another file name is `checksum_malformed`. A recommended entry's SHA-512 is pinned in
+  the Quasar release and no checksum file is fetched for it. The agent hashes the download as it
+  writes it to staging and compares with `params.sha512` **before** reading the archive; a mismatch
+  deletes the staging file. Nothing from an unverified download is ever extracted or kept.
+- **T5 — safe extraction.** A gzip tar only, extracted by the agent itself without following
+  links, into a staging directory on the same filesystem as the tools directory and **outside**
+  it. Refused (`unsafe_archive`) unless every entry is under one top-level directory, has a
+  relative path with no `..` component and no NUL, and is a directory, regular file, symlink whose
+  target is relative and resolves inside the top-level directory, or hardlink to an earlier
+  regular file entry. No device, FIFO or socket; no entry below an extracted symlink. Owner and
+  group are the agent's, setuid, setgid and sticky bits and extended attributes are dropped, and
+  after extraction the whole tree is made read-only (directories `0555`; files `0444`, or `0555`
+  when executable). More than 8 GiB unpacked or 200 000 entries is `archive_too_large`. Staging is
+  removed on every failure.
+- **T6 — the Steam name.** The top-level directory holds `compatibilitytool.vdf` (at most 64 KiB)
+  with exactly one key under `compatibilitytools` / `compat_tools`, whose `install_path` is `.`,
+  `from_oslist` is `windows` and `to_oslist` is `linux`; else `vdf_invalid`. That key is the
+  tool's Steam name. It must pass the grammar and must not be **reserved** (start with `proton_`,
+  `steamlinuxruntime` or `legacysteamruntime`) or `name_reserved`; must equal `expected_name` when
+  that is set or `name_mismatch`; and must not be an existing directory in the tools directory
+  holding a different SHA-512, or `name_conflict`. The agent then renames the staged tree into the
+  tools directory as `<name>` in one atomic rename, so a half-installed tool is never visible.
+  An install of a SHA-512 already installed under that name succeeds at once with
+  `already_installed: true`.
+- **T7 — disk.** Before downloading, free space on the tools filesystem must be at least
+  5 × `size_bytes` + 1 GiB, or the run is `deferred` (`insufficient_disk`) with nothing fetched.
+  Extraction stops (`io_error`, staging removed) if free space falls below 1 GiB.
+- **T8 — never executed by the agent.** The agent never runs, sources or loads any file from a
+  download. Tools run only inside a user's session container, from a read-only mount
+  (`agent-api.md` §`session_assign` `compat_tools`), with the session's own privileges.
+
+**Removal.** A `remove` run is `deferred` (`in_use`) while any live session on the host (a parked
+one included) has the tools directory mounted. Otherwise the agent renames the tool's directory
+out of the tools directory, then deletes it, and reports `succeeded`. It removes only a directory
+it installed, identified by `name` and SHA-512.
+
+**Relation to the Steam preparation policy.** `agent-api.md` §Steam preparation source policy
+says a policy "never accepts arbitrary executable commands, host paths or credentials". That rule
+stands. This amendment adds one narrow, separate path for executable content, and only this one:
+GE-Proton release assets admitted under T1–T8, stored in the agent-owned tools directory, mounted
+read-only into Steam-family sessions. It is not a source policy, carries no host path, command or
+credential from the control plane, never reaches a template or a managed home, and no other kind
+of download or upload is admitted by it. Uploading a tarball is out of scope.
+
+### Effective mapping and the Steam binding
+
+For a Steam game with appid *X*, the **effective tool** is its per-game mapping if one exists,
+else the fleet default (never forced), else none (Steam's own choice).
+
+**Placement.** A launch that names a game (a derived tile with `external_source = "steam"`, or a
+claim of one) whose effective tool is a **GE** tool may be placed only on a host whose latest
+report lists that tool as installed. This is a candidate filter beside the codec constraint, and
+it is in the totals probe: when it is the only reason no online host qualifies, the launch is
+`503 no_host_available` with `reason: "compat_tool_missing"` and a `message` naming the tool.
+When a host with the tool exists but is full, the answer is `503 capacity_exhausted` as usual. A
+home that pins the launch to one host (§RH05) waits for that host to install the tool. A Valve
+tool never constrains placement. A launch of the Steam parent app itself (or a parked start)
+names no game and has no tool constraint.
+
+**What the session receives.** At every `session_assign` of a Steam-family app (the enabled app
+with `library_provider = "steam"` and the tiles derived from it, parked sessions included) to a
+host whose connection advertised `compat_tools_v1`, the control plane sends
+`session_assign.compat_tools` (`agent-api.md`): the fleet default as appid `0`, then every
+per-game mapping, **filtered to tools usable on that host** (a Valve tool always; a GE tool only if
+that host's latest report lists it). A game whose GE tool the host lacks is left out, so Steam
+uses its own choice for it: a name Steam does not know would run the Windows executable with no
+tool at all. The control plane records the GE Steam names it sent on the session
+(`schema.md` `sessions.compat_tool_names`). Template preparation runs never receive
+`compat_tools`, so no mapping is baked into a template.
+
+**How Steam's image applies it** (normative for the Steam image's launch wrapper, which reads
+`QUASAR_COMPAT_TOOLS`, `agent-api.md`): before Steam starts, with no Steam running for that home,
+it writes each entry into `config.vdf`
+`InstallConfigStore/Software/Valve/Steam/CompatToolMapping` (appid `0` is Steam's "all other
+titles" slot). A **forced** entry replaces whatever is there. An unforced entry is written only
+when the home has no entry for that appid, or the existing entry is exactly what Quasar last wrote
+there; any other entry is the user's own choice and is kept. An entry Quasar last wrote whose
+appid is no longer sent is removed, unless the user has since changed it. The wrapper keeps the
+record of what it wrote inside the home, and it writes no name it cannot see in the mounted tools
+directory unless the name is a Valve name. Prefixes (`steamapps/compatdata`) stay in the home
+whichever tool runs.
+
+### Hot Loading
+
+A running or parked Steam uses the mapping it loaded at start (accreleus/quasar#1064). So any
+change to the effective mapping (a mapping `PUT` that changes `tool_id` or `forced`, a mapping
+`DELETE` that removed a row, a default `PUT` that changed it) **supersedes every parked session**:
+in the same transaction as the write, each non-terminal parked session moves to `stopping`, and
+after commit it is sent `session_stop` with `reason: "parked_superseded"` (§Warm Steam). The next
+heartbeat warms Steam again with the new mapping. Play sessions are not stopped; the change
+reaches their next start.
+
+The claim of a parked session (§Warm Steam, "Claim") gains a **sixth check**: when the launch
+names a game whose effective tool is a GE tool, that tool's Steam name is in the parked session's
+`compat_tool_names` (it was installed on the host, and sent, when that Steam started). A parked
+Steam started before its host finished installing the tool fails the check and is superseded like
+any other failed check.
+
+### Audit
+
+Each accepted admin write writes one `admin_activity` row: `compat_tool.add` (target the tool;
+details `tag`, `asset`, `sha512`), `compat_tool.enable`, `compat_tool.disable`,
+`compat_tool.default.set` (target `instance`; details `tool_id`, `previous_tool_id`),
+`compat_tool.mapping.set` (target type `compat_tool_mapping`, id `steam:<appid>`; details `tool_id`, `forced`, the previous
+values), `compat_tool.mapping.clear` (details the removed values). Each terminal report of
+`compat_tools.converge` writes `compat_tool.install` or `compat_tool.remove` with a null actor
+(the system), target the host, details `tool_id`, `name`, `state`, `reason`, `run_id`. Tool names
+are stamped into `details` so a row stays readable after a tool is gone (§Audit-log names).
+
 ## Warm Steam — parked sessions *(Amendment 39, #759)*
 
 > *(Amendment 39, #759, approved in principle by the operator 2026-10-18; text reviewed before
@@ -4539,6 +4899,9 @@ scheduling transaction locks the parked row and checks, after entitlement and be
    size, `agent-api.md` §`session_display_update`)*. A launch whose codec that GPU cannot encode
    fails this check;
 5. the launched app's reservation fits on that GPU once the parked reservation is released.
+6. *(Amendment 56, accreleus/quasar#1066)* when the launch names a game whose effective
+   compatibility tool is a GE tool, the parked session was started with that tool
+   (`sessions.compat_tool_names`; §Compatibility tools, "Hot Loading").
 
 **A parked session that is still warming is left to finish.** When check 2 fails only because the
 parked session is `pending`, `assigned` or `starting` and its `parked_until` has not passed, it is
@@ -7664,6 +8027,10 @@ untrustworthy.
 > *(Amendment 48, #840: `platform.release_detect` takes its period from
 > `instance_settings.release_check` in the same way, under the same `PATCH` rule, with `locked_by`
 > naming that setting; §"Platform-release preview channel".)*
+
+> *(Amendment 56, accreleus/quasar#1066: a code-owned host-scoped agent job,
+> `compat_tools.converge`, installs and removes compatibility tools; its params, report and trust
+> rules are §Compatibility tools. Nothing in the framework changes for it.)*
 
 ### Schedule and window semantics
 
