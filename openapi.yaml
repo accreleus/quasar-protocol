@@ -3286,7 +3286,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: compat_tool_disabled - the tool is disabled.
+          description: compat_tool_disabled - the tool is not usable (disabled, or marked name_conflict or pin_conflict).
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/admin/compat-tools/mappings:
     get:
@@ -3331,7 +3331,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: compat_tool_disabled - the tool is disabled; conflict - 1000 mappings exist and this appid is not one.
+          description: compat_tool_disabled - the tool is not usable (disabled or marked); conflict - 1000 mappings exist and this appid is not one.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
     delete:
       tags: [admin]
@@ -3377,7 +3377,11 @@ paths:
     delete:
       tags: [admin]
       summary: Delete a GE tag row that was never enabled (amendment 56).
-      description: Amendment 56. Only a source tag row whose first_enabled_at is null. Audited as compat_tool.delete.
+      description: >-
+        Amendment 56. One conditional statement deletes a disabled GE row that was never enabled
+        and is not on the shipped list, or a disabled pin_conflict row that no mapping, default,
+        host install or live session references; the latter inserts the shipped entry in the same
+        transaction. Audited as compat_tool.delete.
       x-required-role: admin
       security: [ { bearerAuth: [] } ]
       responses:
@@ -3386,7 +3390,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: conflict - a Valve or recommended row, or a tag that was ever enabled.
+          description: conflict - the statement deleted nothing (a Valve row, an enabled row, a row once enabled and not in pin_conflict, or one still mapped, installed or mounted).
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/admin/compat-tools/{id}/force-remove:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
@@ -3397,7 +3401,10 @@ paths:
         Amendment 56. One transaction deletes every mapping naming the tool, clears the fleet
         default if it is the tool, disables it (bypassing compat_tool_in_use) and supersedes every
         parked session; after commit every live session whose compat_tool_names holds the tool's
-        Steam name is stopped as an admin DELETE /v1/sessions/{id} would. Audited as
+        Steam name is stopped as an admin DELETE /v1/sessions/{id} would. The row is locked FOR
+        UPDATE, so it serializes with launches holding its share lock; the stop step is recorded
+        (force_remove_pending_at) and re-run at startup and every 60 s until no live session holds
+        the name; a repeat on a disabled tool stops any remaining holders. Audited as
         compat_tool.force_remove.
       x-required-role: admin
       security: [ { bearerAuth: [] } ]

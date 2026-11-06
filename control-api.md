@@ -4542,7 +4542,8 @@ row is never re-pinned: the reconcile sets its **`pin_conflict`**, which takes i
 state (hosts that hold it remove it) and refuses enabling it (`409 compat_tool_pin_conflict`). Two
 pins for one tag mean the release changed after one of them was taken (T4), so neither is trusted
 silently. The mark clears when a later release ships the row's own SHA-512 again; otherwise an
-admin deletes the row (if it was never enabled), and the next boot inserts the shipped entry.
+admin disables the row and deletes it, and the delete inserts the shipped entry at once
+(`DELETE /v1/admin/compat-tools/{id}`, §Every state has an exit).
 
 ### Admin routes
 
@@ -4573,7 +4574,11 @@ each host removes it; new sessions stop seeing it at once (only enabled tools ar
 `agent-api.md` §`session_assign`), while a running session keeps what it started with. A repeat
 of the current value is a `200` no-op and is not audited. At most
 `instance_settings.compat_tools_max_enabled` GE tools (default **8**, 1–32, `PATCH
-/v1/admin/settings`) may be enabled at once: each is about 1.6 GB on every host.
+/v1/admin/settings`) may be enabled at once: each is about 1.6 GB on every host. An enable runs in
+one transaction that first locks the `instance_settings` row `FOR UPDATE` (so concurrent enables
+serialize and the count cannot overshoot), then counts the enabled GE tools, then flips `enabled`
+and sets `first_enabled_at = COALESCE(first_enabled_at, now())` in the same `UPDATE`. A disable
+locks the tool row `FOR UPDATE` (§Usable).
 
 | condition | status | code |
 |---|---|---|
@@ -4583,21 +4588,34 @@ of the current value is a `200` no-op and is not audited. At most
 | enabling a GE tool when `compat_tools_max_enabled` GE tools are already enabled | `409` | `compat_tool_limit` |
 | enabling a tool marked `pin_conflict` | `409` | `compat_tool_pin_conflict` |
 
-**`DELETE /v1/admin/compat-tools/{id}`** — removes a `tag` row that was **never enabled**
-(`compat_tools.first_enabled_at` is NULL), so no host ever installed it and no mapping, default or
-session ever named it. `204`. `404 not_found` unknown tool; `409 conflict` a Valve or recommended
-row, or a tag that was ever enabled (disable it instead; hosts then remove it). Audited as
-`compat_tool.delete`.
+**`DELETE /v1/admin/compat-tools/{id}`** — removes a GE row in one of two cases, decided by **one
+conditional statement** (`DELETE … WHERE id = $1 AND family = 'ge' AND NOT enabled AND (…)`), so
+no concurrent enable, mapping or install can slip in between a check and the delete:
+- **never enabled** — `first_enabled_at IS NULL AND NOT recommended`: a tag row, or a recommended
+  row the current release no longer ships. No host ever installed it and nothing ever named it.
+- **a stuck `pin_conflict`** — `pin_conflict` and no mapping names it, it is not the default, no
+  `host_compat_tools` row holds its SHA-512 and no live session's `compat_tool_names` holds its
+  name. When the current release ships that tag, the same transaction inserts the shipped entry
+  (disabled, `recommended`), so the shipped pin is available without a restart.
+
+`204`. `404 not_found` unknown tool; `409 conflict` when the statement deleted nothing (a Valve
+row, an enabled row, a tool once enabled and not in conflict, or one still mapped, installed or
+mounted; disable it instead, and hosts remove it). Audited as `compat_tool.delete`.
 
 **`POST /v1/admin/compat-tools/{id}/force-remove`** — the **emergency pull** for a GE tool, body
-`{}`. In one transaction it deletes every per-game mapping naming the tool, clears the fleet
-default if it is the tool, disables it (bypassing `compat_tool_in_use`), and supersedes every
-parked session (§Hot Loading); after commit it stops, as an admin `DELETE /v1/sessions/{id}`
-does, every live session whose `sessions.compat_tool_names` holds the tool's Steam name, so no
-running session keeps it mounted and every host's removal runs without waiting on `in_use`.
+`{}`. One transaction locks the tool's row `FOR UPDATE` (so it serializes with every launch holding
+the row's share lock, §Usable), deletes every per-game mapping naming the tool, clears the fleet
+default if it is the tool, disables it (bypassing `compat_tool_in_use`), supersedes every parked
+session (§Hot Loading), and sets `compat_tools.force_remove_pending_at`. After commit, the **stop
+step** stops, as an admin `DELETE /v1/sessions/{id}` does, every live session whose
+`sessions.compat_tool_names` holds the tool's Steam name, so no running session keeps it mounted
+and every host's removal runs without waiting on `in_use`. The stop step is **crash-safe**: while
+`force_remove_pending_at` is set, the control plane re-runs it at startup and every 60 s, and it
+clears the mark once no live session holds the name. It works on an already-disabled tool too: a
+repeat `force-remove` sets the mark again and stops every session that still holds the name.
 `200 { "tool": CompatTool, "mappings_cleared": 3, "default_cleared": false, "sessions_stopped": 2 }`.
-`404 not_found`; `409 conflict` a Valve build (Quasar installs none). Audited as
-`compat_tool.force_remove` with the counts. Ending users' sessions is the point: use it only when
+`sessions_stopped` counts the first pass. `404 not_found`; `409 conflict` a Valve build (Quasar
+installs none). Audited as `compat_tool.force_remove` with the counts. Ending users' sessions is the point: use it only when
 the tool itself must not run again.
 
 **`PUT /v1/admin/compat-tools/default`** — `{ "tool_id": "<uuid>|null" }`. Sets or clears the
@@ -4605,7 +4623,7 @@ the tool itself must not run again.
 amendment. A GE default never constrains placement: on a host that lacks it, the session simply
 gets Steam's own default (§Effective mapping). `200 { "default_tool_id": … }`. `400` malformed;
 `404 not_found` unknown tool;
-`409 compat_tool_disabled` a disabled tool.
+`409 compat_tool_disabled` a tool that is not usable (disabled, or marked; §Usable).
 
 **`GET /v1/admin/compat-tools/mappings`** → `200 { "items": [CompatToolMapping…] }`, ordered by
 `provider`, then `external_id` numerically:
@@ -4624,7 +4642,7 @@ it applies to every user's tile of that game. The key is the Steam appid, never 
 user's tile. `external_id` matches `^[1-9][0-9]{0,9}$` (the `apps_external_id_ck` regex; appid
 `0` is the fleet default's slot and is not writable here). The primary key makes this a replace,
 never an accumulation. `200 { CompatToolMapping }`. `400` malformed appid or body;
-`404 not_found` unknown tool; `409 compat_tool_disabled` a disabled tool; `409 conflict` the table
+`404 not_found` unknown tool; `409 compat_tool_disabled` a tool that is not usable; `409 conflict` the table
 already holds 1000 mappings and this appid is not one of them.
 
 **`DELETE /v1/admin/compat-tools/mappings/steam/{external_id}`** — clears the mapping: the game
@@ -4663,6 +4681,47 @@ first that holds:
 An installed tool that is disabled reads `installed` until its removal runs. The catalogue's
 `hosts` counts `installing` and `removing` together as `installing`.
 
+### Usable: the one predicate
+
+Every decision about whether a tool may run uses **one predicate**, never a variant of it:
+
+- A tool is **usable** when it is `enabled` and carries neither `name_conflict` nor
+  `pin_conflict`. (A Valve build is never marked, so for it this is `enabled`.)
+- A tool is **usable on host H** when it is usable and, for a GE tool, H's latest report lists
+  the tool's SHA-512 under the tool's bound `steam_name`. A Valve build that is usable is usable on
+  every host.
+
+Exactly four things read it, and they read the same predicate:
+
+| reader | what it uses |
+|---|---|
+| placement (§Effective mapping, "Placement") | a launch whose per-game mapping names a GE tool may go only to a host where that tool is usable |
+| `session_assign.compat_tools.mount` | the GE tools usable on the placed host |
+| `session_assign.compat_tools.entries` (the wrapper's mapping) | Valve builds that are usable, and GE tools in `mount` |
+| `force-remove` | the sessions whose `compat_tool_names` holds the tool's name, i.e. every session that had it mounted |
+
+**Where it is evaluated.** A launch (a claim included) evaluates it **inside its scheduling
+transaction**, after taking a share lock (`SELECT … FOR SHARE`) on every `compat_tools` row it
+reads: its per-game mapping's tool, the default, and the GE rows it puts in `mount`. Every write
+that can make a tool unusable (disable, `force-remove`, setting a mark) first locks the row
+`FOR UPDATE`. So a launch and such a write serialize on the row: a launch that committed first is
+already a live session with the tool in `compat_tool_names`, which `force-remove` stops; a launch
+that commits after sees the tool unusable and neither mounts it nor maps to it. A mapping or
+default `PUT` naming a tool that is not usable is `409 compat_tool_disabled`.
+
+### Every state has an exit
+
+| state or mark | entered by | left by |
+|---|---|---|
+| **never enabled** (`first_enabled_at` NULL) | add-by-tag; the boot reconcile inserting a recommended or Valve row | enable; `DELETE` (a tag row, or a recommended row the current release no longer ships) |
+| **enabled** | enable (sets `first_enabled_at` in the same statement) | disable (refused while a mapping or the default names it, so clear those first); `force-remove` |
+| **disabled**, ever enabled | disable; `force-remove` | enable |
+| **`name_conflict`** | a first install reports a name that fails T6 or another row holds | disable (clears the mark), then enable; `force-remove` (disables, so clears it) |
+| **`pin_conflict`** | the boot reconcile finds the shipped SHA-512 differs from the row's | automatically, when a release ships the row's own SHA-512 again; or `DELETE` once the row is disabled, unmapped, not the default, not installed on any host and mounted by no live session, which inserts the shipped entry in the same transaction |
+| **failed hold** (per host, tool and SHA-512) | an install run fails | transient reasons (`download_failed`, `io_error`): automatically **1 hour** after the failure, when the reconciler schedules the retry (or at a reconnect after that); every reason: enable again, a new pin, or Run now for the host |
+| **deferred** run | `insufficient_disk`, `in_use` | the framework's ladder, with freshly computed params (§Install job) |
+| **force-remove pending** (`force_remove_pending_at` set) | `force-remove` | automatically, once no live session's `compat_tool_names` holds the tool's name |
+
 ### Install job — `compat_tools.converge`
 
 A code-owned job on the existing framework (§Background jobs): `plane: "agent"`,
@@ -4686,12 +4745,14 @@ this agent installed absent.
 tool and SHA-512, so a new pin (a later release's recommended entry) is a new difference with no
 hold. It is released by:
 - the tool being enabled again, or an admin's Run now for this host — for **every** reason;
-- the host's agent reconnecting — **only** for the transient reasons `download_failed` and
-  `io_error`, and only when the failure finished at least **1 hour** before the reconnect. Every
+- **a timer** — **only** for the transient reasons `download_failed` and `io_error`: the hold is
+  released automatically **1 hour** after the failure finished, and the reconciler schedules the
+  host's next run for that moment (a reconnect after the hour releases it too, but is not needed).
+  Every
   other reason (`checksum_mismatch`, `size_mismatch`, `redirect_refused`, `unsafe_archive`,
   `archive_too_large`, `vdf_invalid`, `name_reserved`, `name_mismatch`, `name_conflict`,
   `invalid_params`) is the same bytes failing the same check, and reconnecting would only fetch
-  them again.
+  them again; those wait for an admin.
 
 The first entry is the **first difference**. One failed tool therefore never stalls later
 installs on that host, and a removal waiting on a session never blocks an install.
@@ -4753,7 +4814,8 @@ T6's checks and no other catalogue row holds it. From then on every run carries 
 `expected_name`, so another host's agent refuses a differing name (`name_mismatch`); a
 `succeeded` report from another host whose `name` differs from the bound one (two installs raced
 before the binding) is recorded as that host's failed hold with `name_mismatch`, and the host is
-asked to remove it. If the first reported name fails those checks, the control plane marks the
+asked to remove it: that `remove` carries **the host's own reported name**, not the bound one, so
+it deletes exactly the directory that host holds. If the first reported name fails those checks, the control plane marks the
 tool `name_conflict` and writes an audit row for the mark
 (`schema.md` `compat_tools.name_conflict`): the tool leaves desired state, so a host that installed
 it removes it; the tool reads `failed` with reason `name_conflict` on every host; and nothing
@@ -4782,7 +4844,10 @@ adds a tag; the agent applies T1–T8 to every install, whatever the control pla
   request (the asset and its `.sha512sum`) with a redirect to its own asset host, so redirects are
   followed, but **only** to a URL whose host is exactly one of this allowlist:
   - `github.com`, and then **only** with a path that starts with
-    `/GloriousEggroll/proton-ge-custom/releases/download/<tag>/` (the run's own tag);
+    `/GloriousEggroll/proton-ge-custom/releases/download/<tag>/` (the run's own tag). The prefix is
+    matched byte for byte on the **cleaned** path: a path holding a `.` or `..` segment, an empty
+    segment, a percent-encoded dot or slash (`%2e`, `%2f`, any case), a backslash or a NUL is
+    refused before matching, never normalized into a match;
   - `release-assets.githubusercontent.com` (where GitHub sends release assets at this amendment)
     and `objects.githubusercontent.com` (where it sent them before), with any path.
 
@@ -4831,15 +4896,18 @@ adds a tag; the agent applies T1–T8 to every install, whatever the control pla
     not start with `/`, and holds no NUL;
   - appears **once**: a duplicate archive path is refused, never overwritten;
   - is a **regular file**, a **directory**, or a **symlink** whose target is relative (an absolute
-    target is refused).
+    target is refused) and, after extraction, names an entry that exists inside the tool's
+    directory (a **dangling** symlink is refused, even one that stays inside).
 
   **Hardlinks, character and block devices, FIFOs, sockets and every other type are refused.**
   **Paths resolve physically, never lexically.** Every entry is created relative to a descriptor on
   the temporary tree's root, with `openat2` and `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS` (or an
   equivalent walk that opens one component at a time with `O_NOFOLLOW` and refuses to leave the
-  root), so nothing is ever written through a symlink. After the last entry, every symlink is
-  resolved from that root with `openat2` and `RESOLVE_BENEATH`: one that would leave the tool's
-  directory (`EXDEV`) or loops (`ELOOP`) is refused. Caps: at most **4 GiB unpacked** and
+  root), so nothing is ever written through a symlink. A symlink entry is created with `symlinkat`
+  on a parent directory descriptor opened that way (`RESOLVE_NO_SYMLINKS`), so creating it never
+  follows another link. After the last entry, every symlink is resolved from that root with
+  `openat2` and `RESOLVE_BENEATH`: one that would leave the tool's directory (`EXDEV`), loops
+  (`ELOOP`) or names nothing (`ENOENT`) is refused. Caps: at most **4 GiB unpacked** and
   **200 000 entries**, counted while extracting; past either the run fails `archive_too_large`.
   Owner and group are the agent's whatever the archive says, extended attributes are dropped, and
   modes are set **without following links** (`fchmodat` with `AT_SYMLINK_NOFOLLOW`, or `fchmod` on
@@ -4874,7 +4942,8 @@ adds a tag; the agent applies T1–T8 to every install, whatever the control pla
   is `deferred` (`insufficient_disk`) with nothing fetched. Extraction also stops (`io_error`,
   temporary directory removed) if free space falls below the reserve. The reserve is
   `instance_settings.compat_tools_disk_reserve_gib` (default **10 GiB**, 1–1024, `PATCH
-  /v1/admin/settings`), sent in the params as `reserve_bytes`.
+  /v1/admin/settings`), sent in the params as `reserve_bytes`. The agent clamps `reserve_bytes` to
+  at least 1 GiB, whatever the params say.
 - **T8 — never executed by the agent.** The agent never runs, sources or loads any file from a
   download. Tools run only inside a user's session container, from a read-only, `nosuid,nodev`
   mount of each enabled tool (`agent-api.md` §`session_assign` `compat_tools`), with the session's
@@ -4910,10 +4979,11 @@ else the fleet default (never forced), else none (Steam's own choice).
 
 **Placement.** Only **per-game mappings** constrain placement. A launch that names a game (a
 derived tile with `external_source = "steam"`, or a claim of one) whose **per-game mapping** names a
-**GE** tool may be placed only on a host whose latest report lists that tool as installed. This is a candidate filter beside the codec constraint, and
-it is in the totals probe: when it is the only reason no online host qualifies, the launch is
-`503 no_host_available` with `reason: "compat_tool_missing"` and a `message` naming the tool.
-When a host with the tool exists but is full, the answer is `503 capacity_exhausted` as usual. A
+**GE** tool may be placed only on a host where that tool is **usable** (§Usable): the same predicate
+`mount` uses, so a launch is never placed for a tool it will not be given. This is a candidate
+filter beside the codec constraint, and it is in the totals probe: when it is the only reason no online host qualifies, the launch is
+`503 no_host_available` with `reason: "compat_tool_missing"` and a `message` naming the tool (and,
+when the tool is not usable anywhere, why: disabled or marked). When a host with the tool exists but is full, the answer is `503 capacity_exhausted` as usual. A
 launch pinned to one host by its home (§RH05) gets `503 no_host_available` with
 `compat_tool_missing` until that host has installed the tool; after a `failed` install there, the
 error clears only when that failed hold is released (§Install job, "The first difference"). A
@@ -4925,17 +4995,19 @@ the Steam parent app itself (or a parked start) names no game and has no tool co
 with `library_provider = "steam"` and the tiles derived from it, parked sessions included) to a
 host whose connection advertised `compat_tools_v1`, the control plane sends
 `session_assign.compat_tools` (`agent-api.md`):
-- `mount`: the Steam names of every **enabled** GE tool (not marked `name_conflict` or
-  `pin_conflict`) that host's latest report lists. The agent mounts only these, one read-only bind
+- `mount`: the Steam names of the GE tools **usable on that host** (§Usable). The agent mounts only
+  these, one read-only bind
   mount per tool, so a disabled tool is invisible to every new session at once, even before its
   host has removed it. A running session keeps the tools it started with; the emergency pull is
   `force-remove` (§Admin routes).
-- `entries`: the fleet default as appid `0`, then every per-game mapping, **filtered to tools usable
-  in that session** (a Valve tool always; a GE tool only if it is in `mount`). A game whose GE tool
+- `entries`: the fleet default as appid `0`, then every per-game mapping, **filtered by the same
+  predicate**: a Valve build that is usable, a GE tool only if it is in `mount`. A game whose GE tool
   is not mounted is left out, so Steam uses its own choice for it: a name Steam does not know would
   run the Windows executable with no tool at all.
 
-The control plane records `mount` on the session (`schema.md` `sessions.compat_tool_names`). Template preparation runs never receive
+All of it is computed in the launch's scheduling transaction under the share locks of §Usable. The
+control plane records `mount` on the session (`schema.md` `sessions.compat_tool_names`). Template
+preparation runs never receive
 `compat_tools`, so no mapping is baked into a template.
 
 **How Steam's image applies it** (normative for the Steam image's launch wrapper, which reads
