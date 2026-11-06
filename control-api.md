@@ -4690,11 +4690,20 @@ adds a tag; the agent applies T1–T8 to every install, whatever the control pla
   with `<tag>` in the tag grammar and `<asset>` either `<tag>-x86_64.tar.gz` or `<tag>.tar.gz`;
   the checksum file is `<asset stem>.sha512sum` beside it. Release metadata comes from GitHub's
   API for that repository. No other URL, repository, mirror, or compression format is fetched.
-- **T2 — HTTPS to GitHub only.** TLS with certificate verification, never plain HTTP. The control
-  plane reads release metadata only from
-  `https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/tags/<tag>`. Redirects are followed only to `https` URLs on GitHub's own asset hosts
-  (a code-owned list; at this amendment `github.com`, `objects.githubusercontent.com` and
-  `release-assets.githubusercontent.com`), at most 5. Anything else is `redirect_refused`.
+- **T2 — HTTPS, and redirects only to GitHub's asset hosts.** Every request is `https` with
+  certificate verification, never plain HTTP, and carries no credential. The download URLs (the
+  asset and its `.sha512sum`) are the github.com release-asset URLs of T1. github.com answers each
+  with a redirect to its own release-asset host, so redirects are followed, but **only** to an
+  `https` URL whose host is exactly one of this allowlist: `github.com`,
+  `release-assets.githubusercontent.com` (where GitHub sends release assets at this amendment) and
+  `objects.githubusercontent.com` (where it sent them before). No other host, no subdomain or
+  suffix match, no port other than 443, at most 5 redirects; anything else is `redirect_refused`
+  and nothing is kept. Every hop's resolved address must be publicly routable (loopback, private,
+  link-local, CGNAT, multicast and unspecified addresses are refused), the guard the image-digest
+  resolver's SSRF containment applies. The control plane reads release metadata only from
+  `https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/tags/<tag>` and follows
+  no redirect there. Changing either list is a contract amendment. **The allowlist is containment,
+  not proof:** the SHA-512 (T4) is what proves the bytes, whichever allowed host served them.
 - **T3 — size cap.** The asset is at most 2 GiB (2 147 483 648 bytes) and the checksum file at most
   4 KiB. The agent reads at most `size_bytes` + 1 bytes and fails `size_mismatch` unless it read
   exactly `size_bytes`.
