@@ -32,7 +32,9 @@ override) and `schema.md` (migration 0111).
 - **Invariant 3 (transport is an interface).** This is transport #2. Nothing upstream of the
   encoded-frame boundary appears here: the codec, the encoder, the ABR ladder and the compositor
   are the session's, identical on both transports, so a fallback never re-encodes or renegotiates
-  a codec.
+  a codec. *(Amendment 55, accreleus/quasar#1050.)* The one exception is PyroWave
+  (`codec-pyrowave.md`), a WebTransport-only codec a session may switch to and from
+  mid-session; a WebRTC peer always gets the session's standard codec.
 - **`input.md` is reused verbatim** (§Input). The input format is not forked per transport.
 
 ## Endpoint and URL
@@ -217,6 +219,8 @@ The client sends nothing but `hello` (and then waits) until it receives `hello_a
   `control-api.md`).
 - `session_id`: a cross-check; a token for another session is `auth_failed`.
 - `fec`: the FEC schemes the client can decode (§FEC). Absent or `[]`: the agent sends no FEC.
+- `pyrowave` *(amendment 55, optional)*: `true` when this client can decode PyroWave on this
+  connection (`codec-pyrowave.md`). Absent: never PyroWave.
 
 The agent replies `hello_ack`, or `error` then closes:
 
@@ -246,7 +250,10 @@ The agent replies `hello_ack`, or `error` then closes:
 ```
 
 - `video.codec` is the session's codec in the wire vocabulary `h264 | h265 | av1`, resolved at
-  launch exactly as for WebRTC. This transport never renegotiates it.
+  launch exactly as for WebRTC. This transport never renegotiates it. *(Amendment 55,
+  accreleus/quasar#1050.)* Or `pyrowave`, for a client that sent `hello.pyrowave: true`: such a
+  session may switch between `pyrowave` and its standard codec mid-session, each switch a new
+  `config_id` (`codec-pyrowave.md` §Switching codec).
 - `description_b64`: the decoder configuration record, base64: `avcC` for H.264, `hvcC` for HEVC,
   `av1C` (optional) for AV1. It is what `VideoDecoder.configure({description})` takes.
 - `color_space`: the `VideoColorSpaceInit` the encoder signals (`bt709` or `smpte170m` for
@@ -320,6 +327,8 @@ Receiver feedback for congestion control, sent every 50 ms (20–100 ms) while d
 The agent keeps the send time of every `pkt_seq` and estimates the available rate from the delay
 and loss pattern, together with the QUIC connection's own congestion state. The estimate feeds the
 session's existing ABR (bitrate, then rung, `smooth` mode); there is no second bitrate controller.
+*(Amendment 55, accreleus/quasar#1050.)* Except while PyroWave is active: its per-session rate
+controller then acts in place of the ABR (`codec-pyrowave.md` §Rate).
 An agent may ignore `feedback`, and a client may omit it; the stream then follows QUIC congestion
 control alone.
 
@@ -398,6 +407,8 @@ offset size field
 The header is 25 bytes; at the 1200-byte UDP budget a fragment carries at least about 1123 bytes
 (§Channels, "Datagram size").
 
+- *(Amendment 55)* A PyroWave frame's payload is defined by `codec-pyrowave.md` §Video
+  datagrams, not by the next rule.
 - The payload is the access unit in the form `EncodedVideoChunk` takes: 4-byte length-prefixed NAL
   units for H.264 and HEVC (no Annex-B start codes), the low-overhead OBU format for AV1 (each OBU
   with its size field, no temporal delimiter). Fragments are byte ranges of it, in order.

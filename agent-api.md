@@ -313,6 +313,20 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > **Compatibility:** an older agent sends neither field, so the control plane reads it as
 > WebRTC-only and never assigns it `"webtransport"` or sends it `session_transport_token`.
 
+> **Amendment 55 — PyroWave, "Ultra-low latency (LAN)" (accreleus/quasar#1050; spec #1048),
+> additive, pre-approved by the owner 2026-11-06, independent Opus review before merge.** The wire
+> contract is `codec-pyrowave.md`. This wire gains five things, and no existing message, field or
+> ack changes shape. **(1)** The host and GPU codec sets may list `pyrowave`, after a passing
+> PyroWave codec probe on that GPU (§`capacity`). **(2)** `session_assign` gains `pyrowave`, the
+> grant: present only when the stream plan allowed PyroWave (§`session_assign`). **(3)** A new
+> control → node message, `session_pyrowave`, carries the user's mid-session toggle
+> (§`session_pyrowave`). **(4)** A new trace event, `codec.switched`, reports every switch between
+> PyroWave and the standard codec; `caps.negotiated.codec` may read `pyrowave`
+> (§`session_trace_event`). **(5)** `session_assign.stream.codec` never holds `pyrowave`: it stays
+> the session's standard codec, which a WebRTC peer and every step-down get.
+> **Compatibility:** an older agent never reports `pyrowave`, so the control plane never grants it
+> (the grant needs the placed GPU's set to list it) and never sends it `session_pyrowave`.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -842,6 +856,15 @@ report omits it stores NULL and inherits, and no keep-if-absent rule of its own 
 host-level `codecs` above is the union of this field over the GPUs with `encode_slots_total > 0`.
 The agent re-sends `capacity` whenever a codec probe changes a GPU's set, rather than waiting for
 the next periodic report. `codec_throughput` stays host-level.
+
+*(Amendment 55, accreleus/quasar#1050.)* Both codec sets may also list **`pyrowave`**
+(`codec-pyrowave.md`). A GPU lists it only after a passing **PyroWave codec probe** on that GPU:
+the agent encodes a fixed test picture with its PyroWave encoder element on the GPU's Vulkan
+device and checks that the reference decoder decodes it within the probe's tolerance. It reports
+like every codec probe (a readiness check, `source: host_probe`, never `blocks`, `unsupported`
+when the GPU cannot run PyroWave's Vulkan compute at all), and its result moves only the codec
+set. `pyrowave` is never a rung's codec: the control plane's rung walk ignores it, and it has no
+`codec_throughput` entry. An older control plane that does not know the string ignores it.
 
 `transports` and `webtransport` *(amendment 54, accreleus/quasar#1026, optional, additive)* say
 which media transports the agent serves and where its WebTransport listener is
@@ -1466,12 +1489,17 @@ copy leaves a stale or absent record that reads as the opposite of what happened
 
 | `event` | when | payload |
 |---|---|---|
-| `caps.negotiated` | every time the encode branch (re)negotiates | `trigger` (`"launch"` \| `"rung_step"` \| `"scale_rebuild"` \| `"encoder_restart"` \| `"source_swap"`), `encoder_factory` (string\|null), `codec` (`"h264"`\|`"h265"`\|`"av1"`\|null), `profile` (string\|null — the LIVE value), `level` (string\|null), `encoder_sink_caps` / `encoder_src_caps` / `payloader_src_caps` (string\|null), `size` (`{w,h,fps}`) |
+| `caps.negotiated` | every time the encode branch (re)negotiates | `trigger` (`"launch"` \| `"rung_step"` \| `"scale_rebuild"` \| `"encoder_restart"` \| `"source_swap"` \| `"codec_switch"` *(amendment 55: a switch between PyroWave and the standard codec, paired with a `codec.switched` event)*), `encoder_factory` (string\|null), `codec` (`"h264"`\|`"h265"`\|`"av1"`\|null), `profile` (string\|null — the LIVE value), `level` (string\|null), `encoder_sink_caps` / `encoder_src_caps` / `payloader_src_caps` (string\|null), `size` (`{w,h,fps}`) |
 | `sdp.answer_applied` | after a remote **answer** applied successfully | `pc` (`"video"`\|`"audio"`), `m_lines` (array of `{mid, kind, codec, port, direction, rejected}`), `rejected_count` (int), `ice_ufrag_changed` (bool, optional) |
 | `encoder.stall` | encoder output silence ≥ the host's stall threshold while input keeps arriving, and again on recovery | `phase` (`"detected"`\|`"recovered"`), `reason` (`"no_output"`\|`"input_starved"`\|`"negotiation"`), `since_ms` (int, on `detected`), `stalled_ms` (int, on `recovered`) |
 | `host.xid` | the NVIDIA kernel driver recorded an Xid fault | `code` (int), `pci` (string\|null), `pid` (int\|null), `name` (string\|null), `text` (string, ≤256 chars), `ts_unix_ms` (int) |
 | `host.gpu_fault` | a non-NVIDIA GPU fault the kernel recorded (amdgpu ring timeout / reset) | `vendor` (`"amd"`), `text` (string, ≤256 chars), `ts_unix_ms` (int) |
+| `codec.switched` *(amendment 55)* | the codec sent to the session's media client changes between PyroWave and the standard codec, and when a wanted PyroWave is not started at a `hello` | `from` (wire codec\|null: null at a connection's first configuration), `to` (wire codec), `reason` (`codec-pyrowave.md` §Switching codec: `launch`, `user`, `reconnect`, `rtt_too_high`, `client_no_decoder`, `congestion`, `client_decode_error`, `encoder_error`, `webrtc`; an open string), `config_id` (int\|null: the WebTransport configuration, null for a WebRTC peer), `target_kbps` (int\|null: the PyroWave rate in force when `to` is `pyrowave`) |
 
+- *(Amendment 55)* `caps.negotiated.codec` may also read `"pyrowave"`. `codec.switched` rides the
+  reliable lane like the rest of this table. On ingest the control plane updates the session's
+  `pyrowave` record (`schema.md` `sessions.pyrowave`), observability only, like
+  `transport_fallback_reason`; the trace allow-list (`trace-format.md`) gains the type.
 - **`caps.negotiated` is NOT a replacement for `session.effective_media`.** That message keeps
   its exact shape and its one-shot, first-offer semantics. This event exists because a one-shot
   snapshot stops being true: a scale-stage rebuild renegotiates the branch, and on the Vulkan
@@ -1869,6 +1897,26 @@ capability but does not by itself put ordinary browser sessions on a physical di
 > cannot serve it now (its listener is down) answers `ack{ok:true}` and the client falls back,
 > because the session itself is sound.
 
+> *(amendment 55, accreleus/quasar#1050, additive)* `session_assign` may carry **`pyrowave`**,
+> the grant to encode PyroWave for this session's WebTransport client (`codec-pyrowave.md`):
+> ```json
+> "pyrowave": { "wanted": true, "target_kbps": 200000, "floor_kbps": 100000, "max_rtt_ms": 5 }
+> ```
+> - **Present only when the control plane's stream plan allowed PyroWave**
+>   (`control-api.md` §Ultra-low latency (LAN)): `transport` is `"webtransport"` and the assigned
+>   GPU's codec set lists `pyrowave`. Absent ⇒ the agent never encodes PyroWave for the session,
+>   and refuses a `session_pyrowave` for it.
+> - **`wanted`**: the launch asked for PyroWave. The agent's per-session *wanted* flag starts here
+>   (`codec-pyrowave.md` §Switching codec).
+> - **`target_kbps`**, **`floor_kbps`**, **`max_rtt_ms`**: the rate target, the step-down floor
+>   and the round-trip gate (`codec-pyrowave.md` §Rate, §Link). The agent seeds its rate estimate
+>   at `target_kbps` at every switch on, and starts the floor timer no earlier than the first
+>   `feedback` after it (§Rate, "Seeding", "Step-down").
+> - `stream.codec` is still the session's **standard codec**, never `pyrowave`; `stream.bitrate_kbps`
+>   and `abr_floor_kbps` are the standard codec's. A WebRTC peer always gets the standard codec.
+> - Resources are unchanged: one encode slot. The agent runs one encoder at a time for the
+>   session's one media client.
+
 > *(first-run-experience §S2, additive, 2026-08-09)* The `app` object may also carry an optional
 > **`network`: `"none" | "bridge"`** — the docker network mode for the app container.
 > This is a **per-app requirement, not a host setting**: app containers default to `--network
@@ -2047,6 +2095,29 @@ returns the token to the client only after the `ack{ok:true}`**, so a client nev
 token its agent has not been given. A swap, a display update or a takeover does not invalidate a
 token. An agent that never listed `"webtransport"` in `capacity.transports` is never sent this
 message.
+
+### `session_pyrowave` — turn PyroWave on or off mid-session (amendment 55, accreleus/quasar#1050)
+```json
+{ "type": "session_pyrowave", "id": "<command-id>", "session_id": "<uuid>", "active": true }
+```
+The user's "Ultra-low latency (LAN)" toggle, relayed by `PATCH /v1/sessions/{id}/pyrowave`
+(`control-api.md`). When it accepts the command (`ack{ok:true}`), the agent has set the session's
+*wanted* flag to `active` and, when the media client is a WebTransport client, switched codec
+(reason `user`, `codec-pyrowave.md` §Switching codec). A rejected command sets nothing. **Ack semantics are `session_display_update`'s**: a rejection is a no-op and never changes
+session state.
+
+- `ack{ok:true}`: applied. For `active: true` the client is now receiving PyroWave; for
+  `active: false` it is receiving the standard codec (or already was).
+- `ack{ok:false, error: "pyrowave_rejected: <reason>"}` for `active: true` when the session has no
+  `session_assign.pyrowave` (`not_granted`), the media client is not a WebTransport client
+  (`not_on_webtransport`), its `hello` did not offer PyroWave (`client_no_decoder`), the round
+  trip fails `max_rtt_ms` (`rtt_too_high`), or the encoder did not start (`encoder_error`). On
+  every rejection, `not_on_webtransport` included, the session keeps its codec and its *wanted*
+  flag unchanged: *wanted* is set only by an `ack{ok:true}`. `active: false` is never rejected for
+  a session the agent holds (with a WebRTC media client it only clears *wanted*).
+
+The control plane sends it only for a `running` session it granted PyroWave, so an agent that
+never listed `pyrowave` is never sent it.
 
 ### `session_swap_app` — swap the source app, transport stays live (P2-02)
 Tells the agent to swap a `running` session's **source container** behind its interpipe boundary
