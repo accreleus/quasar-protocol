@@ -3403,8 +3403,8 @@ paths:
         parked session; after commit every live session whose compat_tool_names holds the tool's
         Steam name is stopped as an admin DELETE /v1/sessions/{id} would. The row is locked FOR
         UPDATE, so it serializes with launches holding its share lock; the stop step is recorded
-        (force_remove_pending_at) and re-run at startup and every 60 s until no live session holds
-        the name; a repeat on a disabled tool stops any remaining holders. Audited as
+        (force_remove_pending_at) and re-run at startup and every 60 s; it targets only sessions
+        created at or before that time and clears when none of those remain live; a repeat on a disabled tool stops any remaining holders. Audited as
         compat_tool.force_remove.
       x-required-role: admin
       security: [ { bearerAuth: [] } ]
