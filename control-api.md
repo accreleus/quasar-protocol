@@ -4607,7 +4607,9 @@ mounted; disable it instead, and hosts remove it). Audited as `compat_tool.delet
 `{}`. One transaction locks `instance_settings` `FOR UPDATE`, then the tool's row `FOR UPDATE` (the
 lock order of §Usable, so it serializes with every launch holding the row's share lock), deletes every per-game mapping naming the tool, clears the fleet
 default if it is the tool, disables it (bypassing `compat_tool_in_use`), supersedes every parked
-session (§Hot Loading), and sets `compat_tools.force_remove_pending_at`. After commit, the **stop
+session (§Hot Loading), and sets `compat_tools.force_remove_pending_at`.
+`force_remove_pending_at` is `clock_timestamp()` read after the supersede step, as the
+transaction's last statement. After commit, the **stop
 step** stops, as an admin `DELETE /v1/sessions/{id}` does, every live session whose
 `sessions.compat_tool_names` holds the tool's Steam name. The stop step targets only sessions
 created at or before `force_remove_pending_at`; the mark clears when none of those remain live.
@@ -4922,10 +4924,11 @@ adds a tag; the agent applies T1–T8 to every install, whatever the control pla
   equivalent walk that opens one component at a time with `O_NOFOLLOW` and refuses to leave the
   root), so nothing is ever written through a symlink. A symlink entry is created with `symlinkat`
   on a parent directory descriptor opened that way (`RESOLVE_NO_SYMLINKS`), so creating it never
-  follows another link. After the last entry, every symlink target is resolved from a descriptor
-  on the tool's top-level directory with `openat2` and `RESOLVE_BENEATH` (so `tool/a -> ..` is
-  refused): one that would leave the tool's directory (`EXDEV`), loops
-  (`ELOOP`) or names nothing (`ENOENT`) is refused. Caps: at most **4 GiB unpacked** and
+  follows another link. After the last entry, every symlink is resolved as
+  `openat2(topfd, "<the link's own path>", RESOLVE_BENEATH)`: the link is followed from where it
+  lives, relative to a descriptor on the tool's top-level directory, so a safe in-tree link like
+  `tool/a/b/l -> ../x` is accepted and `tool/a -> ..` is refused. One that would leave the tool's
+  directory (`EXDEV`), loops (`ELOOP`) or names nothing (`ENOENT`) is refused. Caps: at most **4 GiB unpacked** and
   **200 000 entries**, counted while extracting; past either the run fails `archive_too_large`.
   Owner and group are the agent's whatever the archive says, extended attributes are dropped, and
   modes are set **without following links** (`fchmodat` with `AT_SYMLINK_NOFOLLOW`, or `fchmod` on
@@ -4970,7 +4973,9 @@ adds a tag; the agent applies T1–T8 to every install, whatever the control pla
 **The install record.** The agent records each tool it installed (name, tag, SHA-512, bytes) in its
 own state, **outside** the tools directory, never inside a tool's tree, which the archive controls.
 That record, not anything under the tools directory, is what `capacity.compat_tools` reports and
-what `remove` matches.
+what `remove` matches. The record entry is written durably, marked `installing` or `removing`,
+BEFORE the rename or removal. On start the agent finishes or rolls back each such entry, and it
+drops any recorded tool whose directory is missing before reporting or mounting.
 
 **Removal.** A `remove` run is `deferred` (`in_use`) while any live **non-parked** session on the
 host has **that tool** mounted. A parked session does not hold it back: it runs no game, and when
@@ -5063,7 +5068,9 @@ session's `compat_tool_names` (it was mounted when that Steam started). A parked
 Steam started before its host finished installing the tool fails the check and is superseded like
 any other failed check. A claim copies the parked session's `compat_tool_names` onto the adopting
 session, and takes its `compat_tools` share locks before locking any session row (§Usable, "Lock
-order").
+order"). A claim share-locks the `compat_tools` rows for the parked session's `compat_tool_names`,
+in id order and before any session lock (per the lock order); if any of them is not usable, the
+claim fails like any other check and the parked session is superseded.
 
 ### Audit
 
