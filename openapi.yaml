@@ -5643,9 +5643,11 @@ components:
     TransportOptions:
       type: object
       description: >-
-        Amendment 54 (accreleus/quasar#1026): present on the POST /v1/sessions 201 only when
-        session.transport is webtransport; omitted otherwise, never null. The signaling block is
-        always present beside it: it is the client's fallback.
+        Amendment 54 (accreleus/quasar#1026): the coordinates for the session's WebTransport
+        transport. On the POST /v1/sessions 201 it is present only when session.transport is
+        webtransport (omitted otherwise, never null), beside the signaling block that is the
+        client's fallback. It is also the body of POST /v1/sessions/{id}/transport-token
+        (TransportEnvelope), freshly resolved and minted.
       required: [webtransport]
       properties:
         webtransport: { $ref: "#/components/schemas/WebTransportCoords" }

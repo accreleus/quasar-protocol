@@ -4179,8 +4179,12 @@ otherwise, never `null`):
 
 - `url` is opaque: the client passes it to `new WebTransport(url, …)` unchanged.
 - `token` is the transport token: single-use, 60 s, stored hashed (`schema.md` `session_tokens`,
-  `kind = 'webtransport'`), plaintext only here. It is never accepted by `/v1/signal`, and the
-  signaling token is never accepted by the agent.
+  `kind = 'transport'`), plaintext only here. **Tokens do not cross:** `/v1/signal` redeems only
+  `kind = 'signaling'` rows (a transport token there is closed `4401`), and only `kind =
+  'transport'` hashes reach the agent, so a signaling token in a WebTransport `hello` is
+  `auth_failed`. An implementation test proves both directions. *(Implementation obligation,
+  accreleus/quasar#1030, A05: the control plane's signaling token store looks a token up by hash
+  alone today; it must filter on `kind = 'signaling'`.)*
 - `cert_hashes`: always serialized; the client passes it as `serverCertificateHashes` (base64
   decoded) when it is non-empty. `[]` on an edge endpoint, or when the agent presents a publicly
   trusted certificate.
@@ -4206,6 +4210,10 @@ own launch give-up time, and fall back to WebRTC when it passes, when `hello` is
 lost and a fresh transport token does not restore it. A client that was displaced (close `4410`,
 `bye {reason: "taken_over"}`) does not fall back: it stops.
 
+**Close first.** A client that falls back closes its WebTransport session before it opens
+signaling, and sends no WebTransport `hello` for the session after that, so a late `hello` of its
+own cannot take over its WebRTC peer (`transport-webtransport.md` §Falling back to WebRTC).
+
 It reports the fallback as a trace event (§Session trace) of the new type **`transport.fallback`**:
 
 ```json
@@ -4227,7 +4235,7 @@ Mints a WebTransport token for an existing session owned by the authenticated ca
 reconnect (a reload, a lost connection) or a takeover from another device. Mirrors
 `POST /v1/sessions/{id}/signaling-token`: the same allowed states (`assigned`, `starting`,
 `running`), the same ownership rule and rate limits; concurrent calls produce independent tokens;
-each inserts a `session_tokens` row (`kind = 'webtransport'`).
+each inserts a `session_tokens` row (`kind = 'transport'`).
 
 The control plane resolves the endpoint again (so a rotated certificate or a changed override is
 picked up), sends the token's hash to the agent (`agent-api.md` `session_transport_token`) and

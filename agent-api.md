@@ -1858,7 +1858,8 @@ capability but does not by itself put ordinary browser sessions on a physical di
 > **`wt_token_expires_at`** (RFC 3339), the first transport token, which the agent accepts in a
 > WebTransport `hello` (`transport-webtransport.md` §Authentication and tokens). The agent
 > keeps every unexpired token hash it is given for the session, accepts each once, and forgets
-> them when the session ends.
+> them when the session ends. It reads `wt_token_expires_at` on its own clock with an allowed
+> skew of 15 s.
 >
 > A `"webtransport"` session is the same session: the codec, `h264_profile`, ABR, the encoder
 > and the microphone grant are unchanged, and the agent **still accepts a WebRTC peer** for it
