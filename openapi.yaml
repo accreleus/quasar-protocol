@@ -3259,6 +3259,31 @@ paths:
         "503":
           description: upstream_unavailable - github.com unreachable, 5xx or rate-limited; retryable, nothing stored.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  /v1/admin/compat-tools/available:
+    get:
+      tags: [admin]
+      summary: GE-Proton releases available to install - the shipped recommended list plus the latest on github.com (amendment 57).
+      description: >-
+        Amendment 57 (accreleus/quasar#1067). Read-only, not audited. The recommended list this
+        release ships, then the 5 newest GE-Proton releases fetched from
+        api.github.com/repos/GloriousEggroll/proton-ge-custom/releases?per_page=10 under trust rule
+        T2 (https 443, no credential, no redirect, direct, connect-time address check,
+        Accept-Encoding identity, a 1 MiB cap on decoded bytes, a 10 s deadline), each with its
+        live catalogue state including pin_conflict and name_conflict. Pins nothing: install with
+        POST /v1/admin/compat-tools then PATCH /v1/admin/compat-tools/{id}. The GitHub outcome is
+        cached in memory per process (success 1 h, failure 5 min or until a valid GitHub reset, at
+        most 1 h); the single-flight fetch runs under its own context, so an aborting caller only
+        stops waiting and is never cached as a failure. At most one upstream request per window.
+        An upstream failure is 200 with github_latest.available false and a reason, never a 5xx.
+        control-api.md §Compatibility tools, Available tools.
+      x-required-role: admin
+      security: [ { bearerAuth: [] } ]
+      responses:
+        "200":
+          description: The available tools.
+          content: { application/json: { schema: { $ref: "#/components/schemas/CompatToolAvailableList" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /v1/admin/compat-tools/default:
     put:
       tags: [admin]
@@ -4742,6 +4767,36 @@ components:
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/CompatTool" } }
         default_tool_id: { type: [string, "null"], format: uuid }
+    CompatToolAvailable:
+      type: object
+      description: "Amendment 57 (accreleus/quasar#1067): one GE-Proton release an admin can install. control-api.md §Available tools."
+      required: [tag, source, display_name, published_at, tool_id, enabled, pin_conflict, name_conflict, hosts]
+      properties:
+        tag: { type: string, pattern: "^GE-Proton[0-9]{1,3}-[0-9]{1,4}$" }
+        source: { type: string, enum: [recommended, github_latest] }
+        display_name: { type: string, description: "The catalogue row's display_name, else the tag. GitHub release names are never passed through." }
+        published_at: { type: [string, "null"], format: date-time, description: "GitHub's published_at when the served GitHub list holds the tag and it is RFC 3339, else null." }
+        tool_id: { type: [string, "null"], format: uuid, description: "The catalogue row with this tag, read live; null when none (install with POST /v1/admin/compat-tools)." }
+        enabled: { type: boolean, description: "The row's enabled; false when tool_id is null." }
+        pin_conflict: { type: boolean, description: "The row's pin_conflict; false when tool_id is null. When true the enable is 409 compat_tool_pin_conflict." }
+        name_conflict: { type: boolean, description: "The row's name_conflict; false when tool_id is null. When true the exit is disable, then enable." }
+        hosts:
+          oneOf:
+            - { $ref: "#/components/schemas/CompatToolHostCounts" }
+            - { type: "null" }
+          description: "The row's per-host install counts; null when tool_id is null."
+    CompatToolAvailableList:
+      type: object
+      required: [items, github_latest]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/CompatToolAvailable" }, description: "Recommended entries (newest tag first), then up to 5 GitHub entries not on the recommended list (published_at descending, null last, then tag descending); each tag once." }
+        github_latest:
+          type: object
+          required: [available, reason, fetched_at]
+          properties:
+            available: { type: boolean, description: "false when the GitHub fetch failed; items then holds only the recommended entries." }
+            reason: { type: [string, "null"], description: "Open string for clients; null when available. The control plane emits exactly one of unreachable, rate_limited, upstream_error, response_invalid, never a raw error (detail goes to its log)." }
+            fetched_at: { type: [string, "null"], format: date-time, description: "When the served GitHub list was fetched; null when not available." }
     CompatToolAdd:
       type: object
       additionalProperties: false
