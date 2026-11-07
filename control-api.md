@@ -1118,6 +1118,7 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `PUT /v1/admin/compat-tools/default` | **admin** | *(Amendment 56)* set or clear the fleet default tool |
 | `GET /v1/admin/compat-tools/mappings`, `PUT` / `DELETE /v1/admin/compat-tools/mappings/steam/{external_id}` | **admin** | *(Amendment 56)* the per-game tool mappings, keyed by Steam appid, with `forced` |
 | `GET /v1/admin/hosts/{id}/compat-tools` | **admin** | *(Amendment 56)* the tools installed, installing or failed on one host, and its free space |
+| `GET /v1/admin/compat-tools/available` | **admin** | *(Amendment 57, accreleus/quasar#1067)* the GE-Proton releases available to install: the shipped recommended list plus the latest releases on github.com, each with its catalogue state; read-only, not audited |
 | `GET /v1/admin/runtime-presets`, `GET /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* read the shared runtime presets, each with its `used_by` app list |
 | `POST /v1/admin/runtime-presets` | **admin** | *(UI-P3)* create a runtime preset |
 | `PATCH /v1/admin/runtime-presets/{id}` | **admin** | *(UI-P3)* edit a runtime preset — takes effect on the **next launch** of every app using it, with no app edit |
@@ -4671,6 +4672,99 @@ any installed tool no catalogue row matches (`tool_id` `null`, listed until it i
 `bytes` is the installed size (`null` unless installed). `run_id` is the open or latest run of
 `compat_tools.converge` for this tool on this host (Fleet ▸ Jobs).
 
+### Available tools *(Amendment 57, accreleus/quasar#1067, pre-approved by the owner 2026-11-07)*
+
+> *Additive and admin-gated. One read route, `GET /v1/admin/compat-tools/available`, and one more
+> release-metadata URL the control plane may read under trust rule T2. No existing shape, status
+> code or route changes. `schema.md` and `agent-api.md` are unchanged: the route stores nothing,
+> and no agent sees it. It feeds the Library ▸ Compatibility "Add tool" picker (owner revision on
+> accreleus/quasar#1067); installing still goes through the amendment 56 routes.*
+
+**`GET /v1/admin/compat-tools/available`** — the GE-Proton releases an admin can install: the
+recommended list this Quasar release ships, plus the latest GE-Proton releases on github.com.
+Admin-only (§Authorization: `401`, then `426`, then `403`). A read, so not audited. No query
+parameters, no request body.
+
+```json
+{ "items": [
+    { "tag": "GE-Proton11-12", "source": "recommended", "display_name": "GE-Proton11-12-x86_64",
+      "published_at": "2026-10-30T18:02:11Z", "tool_id": "6f1c…", "enabled": true,
+      "hosts": { "installed": 3, "installing": 0, "waiting": 0, "failed": 0, "unsupported": 0 } },
+    { "tag": "GE-Proton11-14", "source": "github_latest", "display_name": "GE-Proton11-14",
+      "published_at": "2026-11-05T09:40:00Z", "tool_id": null, "enabled": false, "hosts": null } ],
+  "github_latest": { "available": true, "reason": null, "fetched_at": "2026-11-07T01:12:09Z" } }
+```
+
+- `items`: every recommended entry, then the GitHub entries; within each group newest tag first,
+  comparing the two numbers of `GE-Proton<major>-<minor>` numerically. A tag appears **once**: a
+  recommended tag that is also among the latest releases is listed only as `recommended`. Valve
+  builds are never listed (Quasar installs none; they are choices in the selects).
+- `source`: `recommended` (on the list this release ships) or `github_latest` (fetched, below).
+- `tool_id`, `enabled`, `hosts`: the catalogue row with this `tag` (§The catalogue), read live on
+  every request, never cached. `tool_id` is `null` and `hosts` is `null` when no row has the tag
+  (`enabled` is then `false`). `hosts` is the row's `CompatTool.hosts`, so "installed on 3 / 3"
+  reads from it. A recommended entry always has a row (the boot reconcile inserts it).
+- `display_name`: the row's `display_name` when a row exists, else the `tag`. Release names and
+  release notes from GitHub are never passed through.
+- `published_at`: GitHub's `published_at` for the tag when the served GitHub list holds it, else
+  `null` (the recommended list ships no date).
+- `github_latest.available`: whether the GitHub part was served. When `false`, `items` holds only
+  the recommended entries, `reason` says why (below) and `fetched_at` is `null`. When `true`,
+  `fetched_at` is when the served list was fetched and `reason` is `null`.
+
+`200` always, for an admin. **An upstream failure is never a 5xx and never an error envelope**: it
+is `github_latest.available: false` with a `reason`. `reason` is an open string; these are the
+ones this amendment defines:
+
+| reason | when |
+|---|---|
+| `unreachable` | DNS, connect, TLS or timeout failure, or the T2 address check refused the address |
+| `rate_limited` | `429`, or `403` with `X-RateLimit-Remaining: 0` |
+| `upstream_error` | any other status than `200`, a `3xx` included (no redirect is followed) |
+| `response_invalid` | the body is over the 1 MiB cap, is not JSON, or is not an array of releases |
+
+**The GitHub list.** On a cache miss (below) the control plane makes **one** request,
+`GET https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases?per_page=10`, under
+trust rule T2 as it applies to release metadata: `https` on port 443 with certificate
+verification, no credential sent, **no redirect followed**, a **direct** connection (proxy
+variables ignored) and the **connect-time address check**. It reads at most **1 MiB** of body and
+stops there, with a **10 s** deadline for the whole request. From the answer it keeps a release
+only when `draft` and `prerelease` are both `false`, `tag_name` matches
+`^GE-Proton[0-9]{1,3}-[0-9]{1,4}$`, and its `assets` names hold an asset add-by-tag would pick and
+that asset's checksum file (`<tag>-x86_64.tar.gz` with `<tag>-x86_64.sha512sum`, else
+`<tag>.tar.gz` with `<tag>.sha512sum`; T1). Of those it keeps the **5** newest tags, with their
+`published_at`. Nothing else from the answer is kept. **No checksum is fetched and nothing is
+pinned:** the list is advisory; the pin is taken only by `POST /v1/admin/compat-tools` (T4).
+
+**Cache and rate limit.** The control plane keeps the outcome of its last fetch in memory, per
+process:
+- a **successful** fetch is served for **1 hour**;
+- a **failed** fetch is served (as `available: false` with its `reason`) for **5 minutes**; after
+  `rate_limited`, until the time GitHub's `Retry-After` or `X-RateLimit-Reset` names, if later, but
+  never more than 1 hour.
+
+A request that finds the outcome still within that window is answered from it and makes no
+upstream request. A request that finds none fetches, and concurrent requests that miss share that
+one fetch (single-flight). So each control-plane process makes **at most one upstream request per
+window**: at most one an hour while GitHub answers, at most twelve an hour while it does not, which
+stays inside GitHub's unauthenticated limit. Nothing fetches in the background, and no request can
+force a refresh. The cache is not state (invariant 5): it holds only public upstream data that is
+re-fetched when lost, so a restart costs one fetch. A stale successful list is not served after a
+failed fetch.
+
+**Installing a listed tool** uses the amendment 56 routes unchanged; this route writes nothing:
+- `tool_id` `null`: `POST /v1/admin/compat-tools` with `{ "tag": "<tag>" }`, then
+  `PATCH /v1/admin/compat-tools/{id}` with `{ "enabled": true }` on the returned row.
+- `tool_id` set and `enabled` `false`: the `PATCH` alone (a recommended entry always takes this
+  path; a `POST` for it is `409 compat_tool_exists`).
+- `enabled` `true`: nothing to install.
+
+Add-by-tag holds as written for a tag picked from this list: the tag is in its grammar, and the
+`POST` resolves the release and checks its checksum file itself under T1–T4, trusting nothing this
+list returned. It can therefore still answer `422 compat_tool_unverifiable` or
+`503 upstream_unavailable` for a listed tag. The `POST` does not require the tag to be listed; the
+picker narrows what the UI offers, which is never the access control.
+
 ### Per-host install state
 
 A host is **in scope** while it is enrolled. For each GE tool and host in scope, `state` is the
@@ -4879,7 +4973,9 @@ adds a tag; the agent applies T1–T8 to every install, whatever the control pla
   otherwise `redirect_refused`. Connections are **direct**: proxy environment variables
   (`HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and the rest) are ignored. The control plane reads
   release metadata only from
-  `https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/tags/<tag>`, under the
+  `https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/tags/<tag>` and, for the
+  available list only (*Amendment 57*, §Available tools),
+  `https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases?per_page=10`, under the
   same address and proxy rules, and follows no redirect there. Changing either list is a contract
   amendment. **The allowlist is containment, not proof:** the SHA-512 (T4) is what proves the
   bytes, whichever allowed host served them.
