@@ -313,10 +313,10 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > **Compatibility:** an older agent sends neither field, so the control plane reads it as
 > WebRTC-only and never assigns it `"webtransport"` or sends it `session_transport_token`.
 
-> **Amendment 55 — PyroWave, "Ultra-low latency (LAN)" (accreleus/quasar#1050; spec #1048),
+> **Amendment 55 — PyroWave, "Ultra-low latency (PyroWave)" (accreleus/quasar#1050; spec #1048; revised by amendment 58, accreleus/quasar#1059),
 > additive, pre-approved by the owner 2026-11-06, independent Opus review before merge.** The wire
-> contract is `codec-pyrowave.md`. This wire gains five things, and no existing message, field or
-> ack changes shape. **(1)** The host and GPU codec sets may list `pyrowave`, after a passing
+> contract is `codec-pyrowave.md`. Amendment 55 gave this wire five things; amendment 58 withdrew
+> the third, so **four remain**, and no existing message, field or ack changes shape. **(1)** The host and GPU codec sets may list `pyrowave`, after a passing
 > PyroWave codec probe on that GPU (§`capacity`). **(2)** `session_assign` gains `pyrowave`, the
 > grant: present only when the stream plan allowed PyroWave (§`session_assign`). **(3)** *(Withdrawn
 > by amendment 58, accreleus/quasar#1059, 2026-11-07: the control → node message

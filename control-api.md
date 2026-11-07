@@ -4150,7 +4150,7 @@ fails, or whose stream dies, falls back to it on its own (*transport fallback*).
 |---|---|
 | `webrtc` | the default. Sessions use WebRTC; a request for WebTransport is not honoured. |
 | `webtransport_opt_in` | WebRTC unless the launch request asks for WebTransport (the client's developer URL switch), or *(amendment 58)* the stream plan wants PyroWave. |
-| `webtransport` | WebTransport (experimental) unless the request asks for WebRTC. |
+| `webtransport` | WebTransport (experimental) unless the request asks for WebRTC (or, amendment 58, the plan wants PyroWave). |
 
 Always serialized on the read. Optional on the write: absent on `POST` is `webrtc`, absent on
 `PATCH` leaves it unchanged; any other value is `400 validation_failed`. Upgrading changes nothing,
@@ -4354,23 +4354,27 @@ same keys (`native-client.md` additive superset).
 > before anything implements it.** PyroWave moves from a session-overlay toggle into the Launch
 > options Codec list, and a profile can let Auto pick it at launch:
 >
-> 1. The launch profile's boolean `pyrowave_allowed` becomes **`pyrowave_mode`**:
->    `off | allow | prefer` (§The launch profile's `pyrowave_mode` and `pyrowave_kbps`).
->    `pyrowave_kbps` is unchanged; the console calls it "Maximum bitrate".
-> 2. **Launch-time Auto rule** for `prefer` (§The stream plan), measured on the device probe's
->    `bandwidth_kbps` and `rtt_ms`, which amendment 55 had excluded. `Session.pyrowave` gains
->    `choice` and `auto_reason`.
-> 3. **No user-facing transport choice.** PyroWave implies WebTransport; the launch request's
+> 1. The launch profile's boolean `pyrowave_allowed` is deleted and replaced by
+>    **`pyrowave_mode`**: `off | allow | prefer` (§The launch profile's `pyrowave_mode` and
+>    `pyrowave_kbps`). `pyrowave_kbps` is unchanged; the console calls it "Maximum bitrate".
+> 2. **Launch-time Auto rule** for `prefer` (§The stream plan), using the device probe's
+>    `bandwidth_kbps` and `rtt_ms`, which amendment 55 had excluded. They are an unauthenticated
+>    hint and count only within the **network-figure window** (10 minutes). `Session.pyrowave`
+>    gains `choice` and `auto_reason`.
+> 3. **A per-GPU PyroWave ceiling**, the instance setting `pyrowave_max_per_gpu` (default 1),
+>    held under the scheduler's own locks (§The PyroWave ceiling). A launch over it gets its
+>    standard codec with `reason` `gpu_pyrowave_busy`; it never fails.
+> 4. **No user-facing transport choice.** PyroWave implies WebTransport; the launch request's
 >    `transport` is a developer and test switch (§Transport).
-> 4. `GET /v1/me/profiles` launch profiles gain **`pyrowave`**, what the Launch options Codec entry
+> 5. `GET /v1/me/profiles` launch profiles gain **`pyrowave`**, what the Launch options Codec entry
 >    needs (§Launch options).
-> 5. **Mid-session switching on is withdrawn from 0.6** and deferred to 0.6.1:
+> 6. **Mid-session switching on is withdrawn from 0.6** and deferred to 0.6.1:
 >    `PATCH /v1/sessions/{id}/pyrowave` and `agent-api.md` `session_pyrowave` are removed
 >    (§Mid-session switching). The agent's own switches off PyroWave (`codec-pyrowave.md`
 >    §Switching codec) stay.
 >
-> Changing the type and name of an amendment 55 field, and removing a route and an agent message,
-> is allowed here only because nothing implements them: on 2026-11-07 no branch of
+> Deleting an amendment 55 field, and removing a route and an agent message, is allowed here only
+> because nothing implements them: on 2026-11-07 no branch of
 > accreleus/quasar has a migration, handler, agent message or UI for them; they appear only in the
 > generated `web/src/api/schema.d.ts`. Migration 0112 was pencilled in for amendment 55; the lead
 > has since decided PyroWave's migration takes **the next free number at landing, 0114 or above**
@@ -4392,7 +4396,7 @@ that session, decided once at launch.
 | field | console label | meaning |
 |---|---|---|
 | `pyrowave_mode` *(amendment 58)* | Ultra-low latency (PyroWave): Off / Allow / Prefer when possible | `off` (default): this profile's users never get PyroWave and the Codec entry is disabled. `allow`: a user gets it only by picking it in the Launch options Codec list. `prefer`: as `allow`, and a launch whose codec is Auto gets it when the Auto rule holds (§The stream plan). |
-| `pyrowave_kbps` | Maximum bitrate (blank = automatic by resolution) | the **maximum** PyroWave bitrate, kbit/s, `50000 … 1000000`, a cap on the default, not a fixed target; `null` (default) = no cap below 1 000 000. The session's target is `min(height_default × fps / 60, pyrowave_kbps ?? 1 000 000)`, with `height_default` **200 000 up to 1080, 300 000 up to 1440, 400 000 above** by the session's encoded stream height at launch (`codec-pyrowave.md` §Rate). |
+| `pyrowave_kbps` | Maximum bitrate (blank = automatic by resolution) | the **maximum** PyroWave bitrate, kbit/s, `50000 … 1000000`, a cap on the default, not a fixed target; `null` (default) = no cap below 1 000 000. The session's target is `min(floor(height_default × fps / 60), pyrowave_kbps ?? 1 000 000)`, with `height_default` **200 000 up to 1080, 300 000 up to 1440, 400 000 above** by the session's encoded stream height at launch (`codec-pyrowave.md` §Rate, the formula of record). |
 
 Both always serialized on the read. Optional on the write: absent on `POST` is the default, absent
 on `PATCH` leaves it unchanged; any other `pyrowave_mode` value, a wrong type or an out-of-range
@@ -4401,10 +4405,12 @@ on `PATCH` leaves it unchanged; any other `pyrowave_mode` value, a wrong type or
 never yields PyroWave. Upgrading changes nothing: every existing profile reads `off`. Admin-only,
 like the rest of the launch-profile write path.
 
-**Amendment 55's `pyrowave_allowed`** is withdrawn: never served. A write that still carries it
-is mapped, `false → off`, `true → allow`, and ignored when the same body has `pyrowave_mode`. The
-same mapping applies to any stored value an unreleased build may hold (`false`/`off → off`,
-`true`/`on → allow`); none exists on 2026-11-07.
+**Amendment 55's `pyrowave_allowed` is deleted**: it is in no request or response shape, and
+nothing maps it. A write that sends it gets what any unknown key on this write path gets: the
+launch-profile write decodes with `DisallowUnknownFields()`, so the request is rejected whole with
+`400 validation_failed` and the generic malformed-body message, the API's existing rule (§Library,
+`AppWrite` and `hero_url`; §Placement ▸ Shape rules on the write path). No build stored it, so
+there is nothing to migrate.
 
 ### `POST /v1/sessions` — `pyrowave`
 
@@ -4415,6 +4421,8 @@ resolves the standard codec as for Auto. Absent is `false`; any other type is
 `400 validation_failed`. It is a wish, never an error: a launch that asks for PyroWave on a
 session that cannot have it does not get it, and `session.pyrowave.reason` says why. A request
 with both `pyrowave: true` and a `stream.codec` is legal: the explicit codec is the standard codec.
+The server keeps no per-user or per-device PyroWave preference: the client keeps its own record of
+the user's Codec pick, and sends `pyrowave: true` from it.
 
 A launch is **Auto** for this section when it has no `stream.codec` and no `pyrowave: true`.
 
@@ -4441,46 +4449,67 @@ first that failed:
 An ineligible session never wants it. An `allow` profile never wants it on an Auto launch, and no
 profile wants it on a launch with a `stream.codec` and no `pyrowave: true`.
 
+**2b. The ceiling.** A session that would want PyroWave by step 2 wants it only when it holds a
+**PyroWave slot** on the placed GPU (§The PyroWave ceiling). Without one it does not want it, it is
+not allowed, and `reason` is **`gpu_pyrowave_busy`**, for an explicit pick and an Auto pick alike:
+the session gets its standard codec, the Codec note says why, and the launch never fails.
+
 **The Auto rule.** Condition (a), the device probe shows PyroWave decode (`webgpu.available`),
 already holds on an eligible session. The rest are checked in this order; the first that fails is
 `auto_reason`:
 
 | condition | `auto_reason` when it fails |
 |---|---|
-| the probe has both `bandwidth_kbps` and `rtt_ms` as numbers | `no_measurement` |
+| the probe was measured within the network-figure window, and has both `bandwidth_kbps` and `rtt_ms` as usable numbers (below) | `no_measurement` |
 | (c) `rtt_ms` ≤ `max_rtt_ms` (5) | `rtt_too_high` |
-| (b) `bandwidth_kbps` ≥ the session's PyroWave target (`target_kbps` below: amendment 55's formula, capped by `pyrowave_kbps`) | `link_too_slow` |
+| (b) `bandwidth_kbps` ≥ the session's PyroWave target (`target_kbps` below: `codec-pyrowave.md` §Rate's formula, capped by `pyrowave_kbps`) | `link_too_slow` |
 
-The measurement is the **launching device's fresh probe** (`POST /v1/me/devices`), the same row
-the stream plan already reads for the codec clamps and the probe envelope, fresh under the codec
-clamp's rule. It is the only network figure the stream plan has at launch: no earlier session's
-ABR estimate is a stream-plan input, and none is added. **No measurement means no Auto pick**: an
-absent or stale probe, or a missing or non-numeric field, is `no_measurement`, and the session
-gets its standard codec.
+The measurement is the **launching device's probe** (`POST /v1/me/devices`), the same row the
+stream plan already reads for the codec clamps and the probe envelope. It is the only network
+figure the stream plan has at launch: no earlier session's ABR estimate is a stream-plan input, and
+none is added.
 
-The probe measures client ↔ control plane, not client ↔ host (`codec-pyrowave.md` §Link), so the
-Auto rule is a launch-time guess that grants nothing. Its errors fail safe: a control plane across
-the internet reads a high `rtt_ms` and Auto never picks PyroWave (ADR 0011: never automatic over
-the internet); a probe that under-reads a fast LAN only loses the Auto pick. A probe that
-over-reads, or is from another network, is caught by the agent: it still starts PyroWave only when
-the session's own QUIC round trip passes `max_rtt_ms`, and steps down within a second if the link
-cannot hold the target (`codec-pyrowave.md` §Link, §Rate), with `switch_reason` `rtt_too_high` or
-`congestion`.
+- **The network-figure window** is **10 minutes**: for the Auto rule, `bandwidth_kbps` and
+  `rtt_ms` count only when the probe's server-stamped `measured_at` is at most 10 minutes before
+  the launch. It is this rule's own window, separate from (and much shorter than) the freshness
+  rule of the codec clamps, which still decides `webgpu.available` in step 1. A client SHOULD post
+  a fresh probe with the existing `POST /v1/me/devices` before it launches when its last post is
+  older than the window; one post per window fits that endpoint's rate limit.
+- **Usable numbers.** A value that is not a number, is 0 or less, or a `bandwidth_kbps` above
+  10 000 000 (10 Gbit/s) is treated as absent.
+- **No measurement means no Auto pick**: no probe, a probe outside the window, or an absent or
+  unusable field is `no_measurement`, and the session gets its standard codec.
+
+**The figures are advisory.** `bandwidth_kbps` and `rtt_ms` are unauthenticated client reports.
+They are a hint for Auto and nothing else: they grant nothing, and a client that lies about them
+gains nothing it could not get by picking PyroWave explicitly. What enforces PyroWave's limits is
+the agent's QUIC round-trip gate (`max_rtt_ms`), its 1 s step-down on the QUIC-capped rate estimate
+(`codec-pyrowave.md` §Link, §Rate), and the per-GPU ceiling (§The PyroWave ceiling).
+
+They also measure client ↔ control plane, not client ↔ host (`codec-pyrowave.md` §Link), and their
+errors fail safe: a control plane across the internet reads a high `rtt_ms` and Auto never picks
+PyroWave (ADR 0011: never automatic over the internet); a probe that under-reads a fast LAN only
+loses the Auto pick; a probe that over-reads is caught by the agent, which starts PyroWave only when
+the session's own QUIC round trip passes `max_rtt_ms` and steps down within a second if the link
+cannot hold the target, with `switch_reason` `rtt_too_high` or `congestion`. Condition (b) stays,
+as the owner asked. The web probe's bandwidth figure comes from one small download and can
+under-read a LAN; making it read true (best of several samples, or a larger sample) is a client fix
+for B12 (accreleus/quasar#1061), not a contract change.
 
 **3. Transport.** PyroWave implies WebTransport: a session that wants PyroWave **wants
 WebTransport** (§Transport, "The choice"), whatever the request's `transport` says. Step 1 already
 excluded a `webrtc` profile. Amendment 54's checks then decide, as for any session.
 
-**4. The grant.** PyroWave is **allowed** for the session when it is eligible and the session's
-transport is `webtransport`; an eligible session that ended on WebRTC has `reason`
-`not_webtransport` (`transport_reason` says why). A console session (`local_only`) and a parked
+**4. The grant.** PyroWave is **allowed** for the session when it is eligible, the ceiling did
+not refuse it (step 2b), and the session's transport is `webtransport`; an eligible session that
+ended on WebRTC has `reason` `not_webtransport` (`transport_reason` says why). A console session (`local_only`) and a parked
 session are never WebTransport, so never allowed. Placement does not look at PyroWave: a GPU
 without it is never avoided, it yields `host_no_pyrowave`. A swap keeps the grant. A claim of a
 parked session plans it like any launch.
 
 When allowed, the control plane sends the grant as `session_assign.pyrowave` (`agent-api.md`):
-`wanted` = step 2's result; `target_kbps` = `min(height_default × fps / 60,
-pyrowave_kbps ?? 1 000 000)`, where `height_default` is 200 000, 300 000 or 400 000 kbit/s for an
+`wanted` = step 2's result; `target_kbps` = `min(floor(height_default × fps / 60),
+pyrowave_kbps ?? 1 000 000)` (`codec-pyrowave.md` §Rate), where `height_default` is 200 000, 300 000 or 400 000 kbit/s for an
 encoded stream height at launch (`stream.height` as resolved: the rung's or a `stream.*`
 override's, never the display or render size) up to 1080, up to 1440, or above, and `fps` is the
 session's launch fps; `floor_kbps` = half the target; `max_rtt_ms` = 5. The agent starts the
@@ -4489,6 +4518,38 @@ computes `target_kbps` the same way, from the same resolved stream, before the g
 
 `webgpu.features` (`subgroups`, `shader-f16`) decide nothing: the client picks its decoder path,
 and it has one that needs neither.
+
+### The PyroWave ceiling *(amendment 58)*
+
+A PyroWave encode at 200 Mbit/s and up costs a GPU far more than a standard one, so the instance
+setting **`pyrowave_max_per_gpu`** (integer, **default 1**, `1 … 4`; `GET`/`PATCH
+/v1/admin/settings`, admin-only, absent on `PATCH` = unchanged, anything else
+`400 validation_failed`) caps how many sessions on one GPU hold a **PyroWave slot**
+(`schema.md` `sessions.pyrowave_slot`).
+
+- **Taken under the scheduler's locks.** A launch is a *PyroWave candidate* when its launch
+  profile's `pyrowave_mode` is `allow` or `prefer`, its `transport` is not `webrtc`, and the
+  request has `pyrowave: true` or (on `prefer`) is an Auto launch. The scheduling transaction that
+  admits the session, while it holds the picked GPU's row lock (the `FOR UPDATE` it already takes
+  for the encode-slot check, host first, `schema.md` encode slots), counts that GPU's sessions in an
+  active state with `pyrowave_slot` true. When the launch is a candidate and the count is below
+  `pyrowave_max_per_gpu`, it inserts the session with `pyrowave_slot` true. The count and the insert
+  are one transaction under one lock, so two launches cannot both take the last slot.
+- **Released when unused.** The stream plan's one write (§The stream plan) clears the slot when the
+  session ends up not allowed or not wanted. A session that is allowed and wanted keeps its slot
+  until it reaches a terminal state, including after a step-down to its standard codec: a
+  0.6 session never switches back on (§Mid-session switching).
+- **Never a refusal.** A candidate that finds no free slot is admitted as before with
+  `pyrowave_slot` false, and step 2b gives it its standard codec with `reason`
+  `gpu_pyrowave_busy`. A candidate that finds a free slot but whose plan does not want PyroWave
+  gives it back at once; for that moment it can make another launch read busy, which fails safe.
+- **No PyroWave-aware placement in 0.6.** Placement does not look for a GPU with a free PyroWave
+  slot, just as it does not avoid a GPU without PyroWave: a busy GPU yields `gpu_pyrowave_busy`.
+- A swap keeps the slot with the grant. A claim of a parked session plans it like any launch,
+  taking the slot under the same row lock on the parked session's GPU in its own transaction.
+  Lowering `pyrowave_max_per_gpu` ends no session; it only refuses new slots.
+- The Launch options preview (§Launch options) cannot know the placed GPU and does not report the
+  ceiling; `Session.pyrowave.reason` does.
 
 ### The session's `pyrowave`
 
@@ -4506,7 +4567,9 @@ amendment: `null` for every session before it, otherwise:
 - **`wanted`**: the session wants PyroWave now: step 2's result at launch; cleared when the agent
   steps down for `rtt_too_high`, `congestion`, `client_decode_error` or `encoder_error`.
 - **`choice`** *(amendment 58)*: why it was wanted at launch: `"explicit"` (the user picked it) or
-  `"auto"` (Auto, on a `prefer` profile); `null` when it was not wanted. Written once at launch.
+  `"auto"` (Auto, on a `prefer` profile); `null` when it was not wanted, including an explicit pick
+  the plan refused (then `reason` says why). Written once at launch. The client keeps its own
+  record of what the user picked; `choice` is the plan's record, not the user's.
 - **`auto_reason`** *(amendment 58)*: on an Auto launch of an eligible session on a `prefer`
   profile that Auto did not pick, why: `no_measurement`, `rtt_too_high` or `link_too_slow` (an
   open string); otherwise `null`. Written once at launch.
@@ -4521,8 +4584,8 @@ amendment: `null` for every session before it, otherwise:
 `active` with `choice: "auto"` ("Auto chose PyroWave: you're on the local network"); `active`
 ("Ultra-low latency (PyroWave)"); `wanted` was set and `switch_reason` is a switch off ("Not
 PyroWave: <switch_reason>"); `auto_reason` ("Not PyroWave: <auto_reason>", e.g. "the link is too
-slow"); `reason` on a launch that asked for PyroWave or on a `prefer` profile ("Not PyroWave:
-<reason>"). The wording is the client's; the codes are the contract.
+slow"); `reason` on a launch that asked for PyroWave (the client's own record) or on a `prefer`
+profile ("Not PyroWave: <reason>", e.g. `gpu_pyrowave_busy`). The wording is the client's; the codes are the contract.
 
 `wanted`, `active`, `used` and `switch_reason` follow the agent's `codec.switched` trace events
 (`agent-api.md`). They are observability and UI state: nothing in scheduling, admission or the

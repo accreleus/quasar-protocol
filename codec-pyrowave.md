@@ -297,6 +297,12 @@ frame (`maximum_bitstream_size`), and the frame lands within it.
 - **Clamp.** Each frame's budget is `min(target, estimate) / fps`, where *estimate* is the
   available-rate estimate of `transport-webtransport.md` §Feedback (from `feedback`, and the QUIC
   connection's congestion state when the client sends none), less the agent's datagram overhead.
+- **The estimate is capped by QUIC** *(amendment 58)*. For PyroWave the estimate is never above
+  what the session's own QUIC connection carries: the rate its congestion controller permits
+  (congestion window over smoothed RTT, or the stack's delivery-rate estimate where it exposes
+  that instead). Client `feedback` can only **lower** the estimate below that cap, never raise it
+  above it. `feedback` is the client's report and is not trusted to grant rate; the cap is the
+  transport's own state, which the client cannot inflate.
   While PyroWave is active the session's ABR governor and its resolution/fps ladder do not act;
   they resume from the estimate after a switch back. A live `stream_width`/`stream_height`
   change (`agent-api.md` `session_display_update`) still applies: it is a new configuration, and
@@ -305,7 +311,9 @@ frame (`maximum_bitstream_size`), and the frame lands within it.
   estimate at `target_kbps`**, whatever the estimate was under the standard codec (a 20 Mbit/s
   H.264 stream says nothing about a 200 Mbit/s link). From there it drops below the target only
   on loss or delay signals (`feedback`, or QUIC's congestion state), recovers as they clear, and
-  never exceeds the target.
+  never exceeds the target. The QUIC cap applies from the first `feedback` after the switch on
+  (for a client that sends none, 1 s after it: the point the floor timer starts, below), so the seed is judged on what QUIC carries at
+  PyroWave's rate rather than on a window sized by the standard codec.
 - **One controller per codec.** `transport-webtransport.md` §Feedback says the estimate feeds the
   session's ABR and there is no second bitrate controller. For a PyroWave session that rule is
   overridden: while PyroWave is active its per-session rate controller (this section) is the one
@@ -313,7 +321,7 @@ frame (`maximum_bitstream_size`), and the frame lands within it.
   PyroWave, amendment 54's rule stands unchanged.
 - **Pacing.** The agent SHOULD pace a frame's datagrams over no more than half a frame interval
   (a 1080p/200 frame is about 380 datagrams), not burst them.
-- **Step-down.** When the estimate stays below **`floor_kbps`** (`session_assign.pyrowave`, half
+- **Step-down.** When the estimate (QUIC-capped, above) stays below **`floor_kbps`** (`session_assign.pyrowave`, half
   the target) for **1 s**, the agent switches to the standard codec, reason `congestion`
   (§Switching codec). The 1 s timer starts no earlier than the **first `feedback` received after
   the switch on** (for a client that sends no `feedback`: 1 s after the switch on), so a switch
