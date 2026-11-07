@@ -1,11 +1,14 @@
-# PyroWave codec — "Ultra-low latency (LAN)" (EXPERIMENTAL, FROZEN)
+# PyroWave codec — "Ultra-low latency (PyroWave)" (EXPERIMENTAL, FROZEN)
 
 *(Amendment 55, accreleus/quasar#1050, spec accreleus/quasar#1048, spike accreleus/quasar#1049,
-pre-approved by the owner 2026-11-06; independent Opus review before merge.)*
+pre-approved by the owner 2026-11-06; independent Opus review before merge. Revised by
+amendment 58, accreleus/quasar#1059, pre-approved by the owner 2026-11-07: PyroWave is chosen at
+launch only, from the Launch options Codec list or by Auto on a `prefer` profile, and the
+mid-session user toggle is withdrawn and deferred to 0.6.1.)*
 
 The wire contract for PyroWave: an intra-only wavelet codec, encoded on the host GPU in Vulkan
 compute and decoded by the client in WebGPU. It is the codec behind the user-facing
-**Ultra-low latency (LAN)** switch. It rides **only** the WebTransport transport
+**Ultra-low latency (PyroWave)** entry in the Launch options Codec list. It rides **only** the WebTransport transport
 (`transport-webtransport.md`, `wt_proto` 1) and never WebRTC, because its bitrate (about
 200 Mbit/s and up) rules out WebRTC and the internet.
 
@@ -13,10 +16,10 @@ compute and decoded by the client in WebGPU. It is the codec behind the user-fac
 amendment never sees PyroWave (§Who gets PyroWave), and nothing in `transport-webtransport.md`
 changes for a session that does not use it.
 
-Co-defined with `agent-api.md` (the host codec set, `session_assign.pyrowave`,
-`session_pyrowave`, the `codec.switched` trace event), `control-api.md` (the launch profile's
-switch, the stream plan rule, the session's `pyrowave` object, the mid-session toggle) and
-`schema.md` (migration 0112).
+Co-defined with `agent-api.md` (the host codec set, `session_assign.pyrowave`, the
+`codec.switched` trace event), `control-api.md` (the launch profile's `pyrowave_mode`, the stream
+plan rule with its launch-time Auto rule, the session's `pyrowave` object, the Launch options
+entry) and `schema.md` (PyroWave's migration, numbered at landing, 0114 or above).
 
 ## The bitstream
 
@@ -70,9 +73,9 @@ PyroWave is sent on a WebTransport connection only when **all** of these hold:
 1. the control plane granted it at launch (`session_assign.pyrowave` present): the launch profile
    allows it, the session's transport is `webtransport`, the placed GPU's codec set lists
    `pyrowave`, and the launching device's fresh probe reports WebGPU (`control-api.md`
-   §Ultra-low latency (LAN));
-2. the user wants it: the launch asked for it, or the user turned it on mid-session, and nothing
-   since has turned it off (§Switching codec);
+   §Ultra-low latency (PyroWave));
+2. the session wants it: the user picked it at launch, or Auto picked it on a `prefer` profile
+   (`session_assign.pyrowave.wanted`), and nothing since has turned it off (§Switching codec);
 3. **this connection** can decode it: its `hello` carries `"pyrowave": true` (below);
 4. the link qualifies, measured on this connection (§Link).
 
@@ -321,8 +324,7 @@ frame (`maximum_bitstream_size`), and the frame lands within it.
 The link that matters is client ↔ host, and it exists only once the WebTransport connection does,
 so the agent measures it there:
 
-- **Round trip.** The agent starts PyroWave on a connection, and accepts a mid-session switch on
-  to it, only when the QUIC connection's smoothed RTT (from the handshake at `hello`, QUIC's own
+- **Round trip.** The agent starts PyroWave on a connection only when the QUIC connection's smoothed RTT (from the handshake at `hello`, QUIC's own
   estimate after) is at most **`max_rtt_ms`** (`session_assign.pyrowave`, 5 ms). This is what
   keeps PyroWave on the LAN: over the internet the gate fails, and the session streams the
   standard codec with reason `rtt_too_high`.
@@ -330,9 +332,12 @@ so the agent measures it there:
   rule (§Rate) steps it down within a second if the link cannot hold it.
 
 The device probe's `bandwidth_kbps` and `rtt_ms` (`control-api.md` `POST /v1/me/devices`) are
-**not** inputs: they measure the client ↔ control plane path, from a sample of a few hundred KB, so
-they say nothing about a host on the client's LAN or about 200 Mbit/s. The probe's input to
-PyroWave is WebGPU (`control-api.md` §Ultra-low latency (LAN)).
+**not** inputs to this gate: they measure the client ↔ control plane path, from a sample of a few
+hundred KB, so they say little about a host on the client's LAN or about 200 Mbit/s. *(Amendment
+58: they are inputs to one launch-time guess, the control plane's Auto rule on a `prefer`
+profile, which only decides whether the session wants PyroWave; this gate and the step-down still
+decide whether it gets it, `control-api.md` §Ultra-low latency (PyroWave) ▸ The stream plan.)*
+The probe's other input to PyroWave is WebGPU.
 
 ## Switching codec
 
@@ -353,8 +358,7 @@ PyroWave-eligible.
 
 | reason | switch | trigger |
 |---|---|---|
-| `launch` | on to PyroWave | the first `hello` of a session whose launch asked for PyroWave passes §Link |
-| `user` | either way | the user's toggle (`control-api.md` `PATCH /v1/sessions/{id}/pyrowave` → `agent-api.md` `session_pyrowave`) |
+| `launch` | on to PyroWave | the first `hello` of a session that wants PyroWave (picked by the user or by Auto) passes §Link |
 | `reconnect` | on to PyroWave | a new WebTransport connection (reload, takeover) of a session that still wants PyroWave passes §Link |
 | `rtt_too_high` | off, or never on | §Link failed at `hello` or at a switch on |
 | `client_no_decoder` | off, or never on | the session wants PyroWave but this connection's `hello` did not offer it (a takeover from another browser) |
@@ -363,12 +367,16 @@ PyroWave-eligible.
 | `encoder_error` | off | the PyroWave encoder failed on the host |
 | `webrtc` | off | the media client is now a WebRTC peer (a fallback or a takeover), which cannot carry PyroWave; the agent encodes the standard codec for it |
 
-**Wanting PyroWave.** The agent keeps a per-session *wanted* flag: `session_assign.pyrowave.wanted`
-at launch, then the `active` of the latest `session_pyrowave` the agent answered `ack{ok:true}`;
-a rejected one leaves it unchanged. A switch off for `rtt_too_high`,
-`congestion`, `client_decode_error` or `encoder_error` **clears** it, so the session does not flap
-back on; only the user turns it on again. `webrtc` does not clear it: a client that comes back on
+**Wanting PyroWave.** The agent keeps a per-session *wanted* flag, set from
+`session_assign.pyrowave.wanted` at launch. A switch off for `rtt_too_high`, `congestion`,
+`client_decode_error` or `encoder_error` **clears** it, so the session does not flap back on, and
+nothing sets it again during the session. `webrtc` does not clear it: a client that comes back on
 WebTransport gets PyroWave again (reason `reconnect`).
+
+**Mid-session switching on is deferred to 0.6.1** *(amendment 58)*. Amendment 55's `user` reason,
+the user's toggle (`PATCH /v1/sessions/{id}/pyrowave` → `session_pyrowave`), is withdrawn: 0.6
+decides PyroWave at launch, and a 0.6.1 amendment adds switching in and out of it during a
+session, driven by the client → encoder telemetry. The switches above are unchanged.
 
 ## Versioning
 
