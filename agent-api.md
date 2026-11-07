@@ -341,6 +341,15 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > `compat_tools`, is never given an install run, and is never chosen for a launch that needs a
 > GE tool. An older control plane ignores the capability and the `capacity` field.
 
+> **Amendment 59 — Hot Loading adopts across stream settings (accreleus/quasar#1133), additive,
+> pre-approved by the owner 2026-11-07, two review seats before merge.** One optional `register`
+> capability, `adopt_restream_v1` (§`register`). An agent that advertises it adopts a parked or
+> held runtime whatever the play session's `codec`, `h264_profile` and `bitrate_kbps`, at a size
+> and frame rate up to the ones the runtime was built with, and moves the warm runtime to the new
+> stream at `session_start` (§`session_assign`, `adopt_session_id`). No message, field or ack
+> changes shape. **Compatibility:** an agent without the capability is claimed and adopts exactly
+> as before, and an older control plane never relaxes the claim.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -624,6 +633,15 @@ mount includes `"compat_tools_v1": true` in `register`. Absent or false means un
 `parked_sessions_v1` it is bound to the connection epoch and every reconnect replaces it. An agent
 advertises it only when its tools directory is usable: agent-owned, on a filesystem it can write,
 and **not under the managed-home root** (nor under any directory an app may mount).
+
+**Adopt-restream capability.** *(Amendment 59, accreleus/quasar#1133.)* An agent that moves an
+adopted runtime to a new stream (§`session_assign`, `adopt_session_id`, "An agent that advertised
+`adopt_restream_v1`") includes `"adopt_restream_v1": true` in `register`. Absent or false means
+unsupported. It means nothing without `parked_sessions_v1`. Like that capability it is bound to the
+connection epoch and every reconnect replaces it. The control plane relaxes claim check 4 only for
+a parked session whose host's current connection advertised it (`control-api.md` §Warm Steam,
+"Claim"), and sends nothing new. A claim decided on a capability that a reconnect then dropped is
+caught by the agent's own compare: it builds fresh.
 
 ### `capacity` — full capacity report
 Sent immediately after `registered`, and again whenever hardware/topology changes. Replaces
@@ -2084,6 +2102,80 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >     larger than the runtime's launch size: it tears that runtime down and builds fresh. The
 >     control plane checks the same before it claims (`control-api.md` §Warm Steam, "Claim"); this
 >     is the agent's backstop.
+>   - *(Amendment 59, accreleus/quasar#1133.)* **An agent that advertised `adopt_restream_v1`**
+>     compares instead only `stream.mic`, and `stream.width`, `stream.height` and `stream.fps`
+>     against the size and frame rate the runtime was **built** with (an earlier adoption does not
+>     lower them). It does not adopt when `stream.mic` differs or any of the three is larger; it
+>     tears that runtime down and builds fresh, as above. Otherwise it adopts whatever
+>     `stream.codec`, `stream.h264_profile` and `stream.bitrate_kbps` say. On `session_start`,
+>     before step 1 below and before the runtime is re-labelled `session_id`, it moves the warm
+>     runtime to the play session's stream:
+>     (a) it sets the encoder's target bitrate to `stream.bitrate_kbps` and restarts ABR from it,
+>        as at launch;
+>     (b) when `stream.fps` differs from what the runtime encodes, it moves the encoded frame
+>        rate to it live, as the ABR frame-rate ladder does (never above the built rate);
+>     (c) when `stream.codec` or `stream.h264_profile` differs from what the runtime encodes, it
+>        replaces the encoder and the media tail after it (parser, payloader, and `webrtcbin` or
+>        the WebTransport sender) with ones built for the new values. The compositor, the app
+>        container and Steam keep running. The old encoder reaches `NULL` and has released its
+>        hardware encode session (NVENC, VCN or VA) and its VRAM **before** the new encoder is
+>        built: the session reserves one encode slot, never two. When the old effective encoder
+>        is NVENC, `QUASAR_NVENC_DEFER_TEARDOWN` keeps its meaning: the old pipeline is parked as
+>        at a session end, and the new encoder is not started until that deferred teardown has
+>        completed. That teardown waits until the host holds no live encode lease, so **an
+>        adoption whose old encoder is NVENC is never done warm while another encoder is live on
+>        that host**: the agent takes the failure branch without trying (c), step `nvenc_drain`.
+>        It never destroys the NVENC session early: the NVIDIA driver has a use-after-free when an
+>        encoder is destroyed while another is live.
+>
+>     **Advertising `adopt_restream_v1` promises (a)–(c).** An agent that cannot do one of them
+>     for a given adoption takes the failure branch below; it never adopts on the old encoder, so
+>     the session's `codec` and `h264_profile` are always what is encoded.
+>
+>     **A codec change across encoder families is never done warm.** What the compositor emits is
+>     fixed when it is built, by the effective encoder's family: `memory:VulkanImage` NV12 for the
+>     Vulkan encoders, `memory:CUDAMemory` BGRA for NVENC, system-memory RGBx for VA, I420 for
+>     `openh264enc`. When the new codec's effective encoder is of another family than the old one
+>     (for example H.264 on Vulkan to HEVC on NVENC, on a host where Vulkan HEVC is disabled), the
+>     agent takes the failure branch without trying (c), step `encoder_family`. The Vulkan
+>     encode-ring depth is not such a setting: it is pinned once for the whole agent process at
+>     start, from the host's Vulkan HEVC knob, so every Vulkan session on a host that encodes HEVC
+>     on Vulkan already runs at depth 2.
+>
+>     **One deadline covers (a)–(c): 5 s from `session_start`** (provisional, to be measured on
+>     the lab by accreleus/quasar#1133). If they have not finished by then the agent aborts the
+>     step in flight and takes the failure branch, step `deadline`. An encoder that step had
+>     created is released, as in (c), before the fresh build starts, so the one-slot rule holds.
+>
+>     **Signaling during (a)–(c).** The new viewer has no offer yet: step 4's offer is made after
+>     them, for the new tail. An `answer`, `ice` or `restart_ice` for `session_id` that arrives
+>     before that offer is dropped (logged at DEBUG); the client answers step 4's offer, and that
+>     offer also satisfies a `restart_ice`.
+>
+>     From then on the play session's `stream` is the runtime's: ABR's ceilings, a later park on
+>     exit and the next adoption's `mic` compare read it. Only the built size and frame rate stay
+>     as they were. When the play session's `stream` matches what the runtime encodes, none of
+>     (a)–(c) runs.
+>
+>     **If any of (a)–(c) fails, or is not tried (above)**, the runtime is torn down as a declined
+>     runtime: terminal proof under the adopted id, before any report under `session_id`. The
+>     agent then builds the session fresh from `app`, exactly as for a runtime it does not adopt,
+>     and logs `adopt_restream_failed` at WARN with the step (`bitrate`, `fps`, `encoder`,
+>     `encoder_family`, `nvenc_drain`, `transport` or `deadline`) and the error. No game was launched in the
+>     runtime: step 1 below has not run. The control plane sees an ordinary fresh build
+>     (`starting`, then `running`); no field reports the failure, and the session's stream values
+>     are still right, because the fresh build uses them.
+>
+>     **A deterministic (c) failure is remembered for the connection epoch.** When (c) fails on an
+>     element or caps error, or the encoder refuses to be created, the agent records the GPU, the
+>     new `stream.codec` and the new `stream.h264_profile`. A later adoption that needs (c) for
+>     the same three builds fresh at once, without trying it, whoever's session it is: the record
+>     describes the hardware and the driver, not a user. A `deadline` miss and an `nvenc_drain`
+>     are never recorded, because they depend on load. A reconnect clears the record. Nothing is
+>     sent for it.
+>
+>     An agent that did not advertise the capability compares as the bullet above says, and does
+>     none of (a)–(c).
 >   - **A play session on an adopted runtime.** On `session_start` the agent:
 >     1. sends the launch helper `launch <appid>`, the appid being the one after `-applaunch` in
 >        the play `app`'s `STEAM_STARTUP_FLAGS` (read as for a derived tile today), or

@@ -3704,6 +3704,11 @@ compatibility tool the launched game's per-game mapping names (§Compatibility t
 has installed it. If that host's install failed, it clears only when the failed hold is released
 (§Compatibility tools, "The first difference").
 
+*(Amendment 59, accreleus/quasar#1133.)* `reason` is also `steam_restarting` on every
+`503 capacity_exhausted` a launch gets while the caller's parked session is stopping (a claim that
+fails stops it) or the caller's released runtime holds the home (§Warm Steam, "Claim" and "Park on
+exit"). The client keeps its automatic retry for it.
+
 ### `GET /v1/sessions/{id}` — poll lifecycle
 ```json
 // 200
@@ -5499,6 +5504,13 @@ scheduling transaction locks the parked row and checks, after entitlement and be
    others cannot change on a live session, and a display update can only shrink below the launch
    size, `agent-api.md` §`session_display_update`)*. A launch whose codec that GPU cannot encode
    fails this check;
+   *(Amendment 59, accreleus/quasar#1133.)* When that host's current agent connection also
+   advertised `adopt_restream_v1` (`agent-api.md` §`register`), check 4 is instead: the launch's
+   `mic` matches, and its `width`, `height` and `fps` are no larger than the parked session's.
+   `codec`, `h264_profile` and `bitrate_kbps` may differ; the agent moves the warm runtime to them
+   when it adopts (`agent-api.md` §`session_assign`, `adopt_session_id`). A launch whose codec that
+   GPU cannot encode still fails this check. Without the capability, check 4 is the text above,
+   unchanged;
 5. the launched app's reservation fits on that GPU once the parked reservation is released.
 6. *(Amendment 56, accreleus/quasar#1066)* when the launch names a game whose per-game
    compatibility-tool mapping names a GE tool, the parked session was started with that tool
@@ -5556,6 +5568,44 @@ stopping (a launch outside the family superseded it), or while the caller's rele
 still holds the home (§Park on exit), answers `409 home_in_use` without `session_id`; a launch
 never answers `home_in_use` for either.
 
+*(Amendment 59, accreleus/quasar#1133.)* Every `503 capacity_exhausted` a launch gets while the
+caller's parked session is stopping (a claim that fails stops it) or the caller's released runtime
+holds the home (§Park on exit) carries `reason: "steam_restarting"` (§`POST /v1/sessions`, the
+`reason` field of amendment 40). The status, code and `Retry-After` are unchanged and the client
+keeps its retry. A client SHOULD say that Steam is restarting for this launch instead of showing a
+generic wait for a free slot. The value does not depend on `adopt_restream_v1`.
+
+**Two launches racing for one parked session.** The first to lock the parked row claims it. The
+other finds the row already `stopped` (`claimed`) and is answered as any launch whose home a live
+session of the caller's holds: `409 home_in_use` naming that play session, or an earlier refusal
+(the quota, for instance) as for any launch. It is never `503 capacity_exhausted` with
+`steam_restarting`, and it stops nothing.
+
+The control plane logs each superseded claim at `INFO` (`warm steam: claim superseded`) with
+`cause`, the first check that failed in the order listed above: `not_running`, `expired` (check
+2), `host_unavailable` (check 3), `mic_differs`, `size_larger`, `fps_higher`, `codec_unsupported`
+(the GPU cannot encode the launch's codec), `stream_differs` (any other check-4 difference, on a
+host without `adopt_restream_v1`), `no_room` (check 5) and `compat_tool` (check 6). Check 1 is
+never logged: a launch claims only a parked session of its own family, so check 1 cannot fail for
+it. A claim lost to a racing launch (above) is not a supersede and is not logged here. `cause` is
+logged, never served. A claim that adopts with a stream other than the parked session's logs
+`warm steam: claim adopted` with `restream`, the fields that differ (`size`, `fps`, `bitrate`,
+`codec`, `h264_profile`).
+
+The play row holds the stream the launch resolved (`codec`, `bitrate_kbps`, `width`, `height`,
+`fps`, `h264_profile`, `mic`), as for every claim, so `GET /v1/sessions/{id}` shows the new stream
+from the `201`, and `session_metrics` reports what is encoded, which matches once the agent has
+adopted. When the agent builds fresh instead (`agent-api.md`, "If any of (a)–(c) fails"), the row
+is still right.
+
+A claim whose plan grants PyroWave takes a `pyrowave_slot` on the parked session's GPU in the
+claim's scheduling transaction, the one this section describes (amendment 58's "its own
+transaction" means this one), under the lock order §Ultra-low latency (PyroWave) states (session
+row → host row → GPU row). The parked row's move to `stopped` and the slot therefore commit
+together: no other transaction sees the parked row `stopped` before the slot is decided. A parked
+session never holds a slot, because it is always `webrtc`. The agent starts PyroWave on the
+adopted runtime as on any session (`codec-pyrowave.md`).
+
 The play session counts against the quota as any session does, and the parked one does not, so a
 claim is admitted at the quota exactly when the same launch with no parked session would be. Any
 admitted launch of a Steam parent app or derived tile, claim or not, clears the caller's
@@ -5572,7 +5622,13 @@ parks or releases the runtime:
   parked; the agent sends no `stopping` before this report, `agent-api.md` §`session_state`), and
   its Steam parent app is enabled and visible to the user (the predicate of `GET /v1/apps`). It inserts a parked row for the Steam parent app on the same
   host and GPU, with the ended session's stream columns (what the runtime encodes) and
-  `device_id`, and `parked_until` = now plus `steam_warm_idle_minutes`. The ended session's
+  `device_id`, and `parked_until` = now plus `steam_warm_idle_minutes`. *(Amendment 59,
+  accreleus/quasar#1133.)* On a host whose current connection advertised `adopt_restream_v1`,
+  when the ended session adopted a runtime (`adopt_session_id`), the parked row's `width`,
+  `height` and `fps` are instead those of the row it adopted, so the parked row keeps the size and
+  frame rate the runtime was built with, and a 1440p, 1080p, 1440p series of launches adopts each
+  time. Its other stream columns are still the ended session's. A runtime the agent rebuilt
+  smaller (it built fresh) is caught by the agent's own compare, which declines it. The ended session's
   reservation and managed-home binding move to it in the same write, so the GPU is never shown
   free in between; its hold stays on the ended play id and moves as for a claim, when the agent
   adopts (§Claim). It then sends
