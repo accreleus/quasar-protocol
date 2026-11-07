@@ -311,9 +311,10 @@ frame (`maximum_bitstream_size`), and the frame lands within it.
   estimate at `target_kbps`**, whatever the estimate was under the standard codec (a 20 Mbit/s
   H.264 stream says nothing about a 200 Mbit/s link). From there it drops below the target only
   on loss or delay signals (`feedback`, or QUIC's congestion state), recovers as they clear, and
-  never exceeds the target. The QUIC cap applies from the first `feedback` after the switch on
-  (for a client that sends none, 1 s after it: the point the floor timer starts, below), so the seed is judged on what QUIC carries at
-  PyroWave's rate rather than on a window sized by the standard codec.
+  never exceeds the target. The QUIC cap applies from **`min(first feedback after the switch on,
+  switch on + 1 s)`**, the point the floor timer starts (below), so the seed is judged on what QUIC
+  carries at PyroWave's rate rather than on a window sized by the standard codec, and a client that
+  holds back its `feedback` never runs uncapped for more than 1 s.
 - **One controller per codec.** `transport-webtransport.md` §Feedback says the estimate feeds the
   session's ABR and there is no second bitrate controller. For a PyroWave session that rule is
   overridden: while PyroWave is active its per-session rate controller (this section) is the one
@@ -323,9 +324,9 @@ frame (`maximum_bitstream_size`), and the frame lands within it.
   (a 1080p/200 frame is about 380 datagrams), not burst them.
 - **Step-down.** When the estimate (QUIC-capped, above) stays below **`floor_kbps`** (`session_assign.pyrowave`, half
   the target) for **1 s**, the agent switches to the standard codec, reason `congestion`
-  (§Switching codec). The 1 s timer starts no earlier than the **first `feedback` received after
-  the switch on** (for a client that sends no `feedback`: 1 s after the switch on), so a switch
-  on is judged on what the link does at PyroWave's rate, never on the estimate it replaced.
+  (§Switching codec). The 1 s timer starts at **`min(first feedback received after the switch on,
+  switch on + 1 s)`**, so a switch on is judged on what the link does at PyroWave's rate, never on
+  the estimate it replaced, and withholding `feedback` cannot postpone it.
 
 ## Link
 

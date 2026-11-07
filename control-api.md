@@ -4531,10 +4531,13 @@ setting **`pyrowave_max_per_gpu`** (integer, **default 1**, `1 … 4`; `GET`/`PA
   profile's `pyrowave_mode` is `allow` or `prefer`, its `transport` is not `webrtc`, and the
   request has `pyrowave: true` or (on `prefer`) is an Auto launch. The scheduling transaction that
   admits the session, while it holds the picked GPU's row lock (the `FOR UPDATE` it already takes
-  for the encode-slot check, host first, `schema.md` encode slots), counts that GPU's sessions in an
-  active state with `pyrowave_slot` true. When the launch is a candidate and the count is below
-  `pyrowave_max_per_gpu`, it inserts the session with `pyrowave_slot` true. The count and the insert
-  are one transaction under one lock, so two launches cannot both take the last slot.
+  for the encode-slot check, host first, `schema.md` encode slots), counts that GPU's sessions with
+  `pyrowave_slot` true in the **active set**, `state IN ('assigned','starting','running','stopping')`,
+  the same set as the encode-slot reservation (`schema.md` `gpus`, encode slots). When the launch
+  is a candidate and the count is below `pyrowave_max_per_gpu`, it inserts the session with
+  `pyrowave_slot` true. A launch inserts its row in `assigned`, already in the active set, so it
+  counts at once. The count and the insert are one transaction under one lock, so two launches
+  cannot both take the last slot.
 - **Released when unused.** The stream plan's one write (§The stream plan) clears the slot when the
   session ends up not allowed or not wanted. A session that is allowed and wanted keeps its slot
   until it reaches a terminal state, including after a step-down to its standard codec: a
@@ -4545,8 +4548,9 @@ setting **`pyrowave_max_per_gpu`** (integer, **default 1**, `1 … 4`; `GET`/`PA
   gives it back at once; for that moment it can make another launch read busy, which fails safe.
 - **No PyroWave-aware placement in 0.6.** Placement does not look for a GPU with a free PyroWave
   slot, just as it does not avoid a GPU without PyroWave: a busy GPU yields `gpu_pyrowave_busy`.
-- A swap keeps the slot with the grant. A claim of a parked session plans it like any launch,
-  taking the slot under the same row lock on the parked session's GPU in its own transaction.
+- A swap keeps the slot with the grant. A claim of a parked session (Hot Loading) plans it like
+  any launch, taking the slot on the parked session's GPU in its own transaction, which locks
+  `FOR UPDATE` in the order **session row → host row → GPU row**, then counts and writes as above.
   Lowering `pyrowave_max_per_gpu` ends no session; it only refuses new slots.
 - The Launch options preview (§Launch options) cannot know the placed GPU and does not report the
   ceiling; `Session.pyrowave.reason` does.
