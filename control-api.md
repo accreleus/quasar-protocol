@@ -3704,6 +3704,11 @@ compatibility tool the launched game's per-game mapping names (§Compatibility t
 has installed it. If that host's install failed, it clears only when the failed hold is released
 (§Compatibility tools, "The first difference").
 
+*(Amendment 59, accreleus/quasar#1133.)* `reason` is also `steam_restarting` on
+`503 capacity_exhausted` when the caller's parked session is being stopped for this launch, or
+its released runtime still holds the home (§Warm Steam, "Claim"). The client keeps its automatic
+retry for it.
+
 ### `GET /v1/sessions/{id}` — poll lifecycle
 ```json
 // 200
@@ -5499,6 +5504,13 @@ scheduling transaction locks the parked row and checks, after entitlement and be
    others cannot change on a live session, and a display update can only shrink below the launch
    size, `agent-api.md` §`session_display_update`)*. A launch whose codec that GPU cannot encode
    fails this check;
+   *(Amendment 59, accreleus/quasar#1133.)* When that host's current agent connection also
+   advertised `adopt_restream_v1` (`agent-api.md` §`register`), check 4 is instead: the launch's
+   `mic` matches, and its `width`, `height` and `fps` are no larger than the parked session's.
+   `codec`, `h264_profile` and `bitrate_kbps` may differ; the agent moves the warm runtime to them
+   when it adopts (`agent-api.md` §`session_assign`, `adopt_session_id`). A launch whose codec that
+   GPU cannot encode still fails this check. Without the capability, check 4 is the text above,
+   unchanged;
 5. the launched app's reservation fits on that GPU once the parked reservation is released.
 6. *(Amendment 56, accreleus/quasar#1066)* when the launch names a game whose per-game
    compatibility-tool mapping names a GE tool, the parked session was started with that tool
@@ -5555,6 +5567,31 @@ home is still held by the caller's parked session gets the same `503 capacity_ex
 stopping (a launch outside the family superseded it), or while the caller's released runtime
 still holds the home (§Park on exit), answers `409 home_in_use` without `session_id`; a launch
 never answers `home_in_use` for either.
+
+*(Amendment 59, accreleus/quasar#1133.)* That `503 capacity_exhausted`, and every later one a
+launch gets while the caller's parked session is stopping or the caller's released runtime holds
+the home (§Park on exit), carries `reason: "steam_restarting"` (§`POST /v1/sessions`, the
+`reason` field of amendment 40). The status, code and `Retry-After` are unchanged and the client
+keeps its retry. A client SHOULD say that Steam is restarting for this launch instead of showing a
+generic wait for a free slot. The value does not depend on `adopt_restream_v1`.
+
+The control plane logs each superseded claim at `INFO` (`warm steam: claim superseded`) with
+`cause`, one of: `not_running`, `expired` (check 2), `host_unavailable` (check 3), `mic_differs`,
+`size_larger`, `fps_higher`, `codec_unsupported` (the GPU cannot encode the launch's codec),
+`stream_differs` (any other check-4 difference, on a host without `adopt_restream_v1`), `no_room`
+(check 5) and `compat_tool` (check 6). `cause` is logged, never served. A claim that adopts with a
+stream other than the parked session's logs `warm steam: claim adopted` with `restream`, the
+fields that differ (`size`, `fps`, `bitrate`, `codec`, `h264_profile`).
+
+The play row holds the stream the launch resolved (`codec`, `bitrate_kbps`, `width`, `height`,
+`fps`), as for every claim, so `GET /v1/sessions/{id}` shows the new stream from the `201`, and
+`session_metrics` reports what is encoded, which matches once the agent has adopted. When the
+agent builds fresh instead (`agent-api.md`, "If any of (a)–(c) fails"), the row is still right.
+
+A claim whose plan grants PyroWave takes a `pyrowave_slot` on the parked session's GPU in its own
+transaction, under the lock order §Ultra-low latency (PyroWave) already states (session row → host
+row → GPU row). The agent starts PyroWave on the adopted runtime as on any session
+(`codec-pyrowave.md`).
 
 The play session counts against the quota as any session does, and the parked one does not, so a
 claim is admitted at the quota exactly when the same launch with no parked session would be. Any

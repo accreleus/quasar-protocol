@@ -341,6 +341,15 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > `compat_tools`, is never given an install run, and is never chosen for a launch that needs a
 > GE tool. An older control plane ignores the capability and the `capacity` field.
 
+> **Amendment 59 — Hot Loading adopts across stream settings (accreleus/quasar#1133), additive,
+> pre-approved by the owner 2026-11-07, two review seats before merge.** One optional `register`
+> capability, `adopt_restream_v1` (§`register`). An agent that advertises it adopts a parked or
+> held runtime whatever the play session's `codec`, `h264_profile` and `bitrate_kbps`, at a size
+> and frame rate up to the ones the runtime was built with, and moves the warm runtime to the new
+> stream at `session_start` (§`session_assign`, `adopt_session_id`). No message, field or ack
+> changes shape. **Compatibility:** an agent without the capability is claimed and adopts exactly
+> as before, and an older control plane never relaxes the claim.
+
 ## Transport: one persistent, node-initiated WebSocket
 The node agent **dials** the control plane and holds open a single WebSocket; all agent-API
 traffic flows over it, in both directions. JSON, one message object per WS frame, discriminated
@@ -624,6 +633,15 @@ mount includes `"compat_tools_v1": true` in `register`. Absent or false means un
 `parked_sessions_v1` it is bound to the connection epoch and every reconnect replaces it. An agent
 advertises it only when its tools directory is usable: agent-owned, on a filesystem it can write,
 and **not under the managed-home root** (nor under any directory an app may mount).
+
+**Adopt-restream capability.** *(Amendment 59, accreleus/quasar#1133.)* An agent that moves an
+adopted runtime to a new stream (§`session_assign`, `adopt_session_id`, "An agent that advertised
+`adopt_restream_v1`") includes `"adopt_restream_v1": true` in `register`. Absent or false means
+unsupported. It means nothing without `parked_sessions_v1`. Like that capability it is bound to the
+connection epoch and every reconnect replaces it. The control plane relaxes claim check 4 only for
+a parked session whose host's current connection advertised it (`control-api.md` §Warm Steam,
+"Claim"), and sends nothing new. A claim decided on a capability that a reconnect then dropped is
+caught by the agent's own compare: it builds fresh.
 
 ### `capacity` — full capacity report
 Sent immediately after `registered`, and again whenever hardware/topology changes. Replaces
@@ -2084,6 +2102,37 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >     larger than the runtime's launch size: it tears that runtime down and builds fresh. The
 >     control plane checks the same before it claims (`control-api.md` §Warm Steam, "Claim"); this
 >     is the agent's backstop.
+>   - *(Amendment 59, accreleus/quasar#1133.)* **An agent that advertised `adopt_restream_v1`**
+>     compares instead only `stream.mic`, and `stream.width`, `stream.height` and `stream.fps`
+>     against the size and frame rate the runtime was **built** with (an earlier adoption does not
+>     lower them). It does not adopt when `stream.mic` differs or any of the three is larger; it
+>     tears that runtime down and builds fresh, as above. Otherwise it adopts whatever
+>     `stream.codec`, `stream.h264_profile` and `stream.bitrate_kbps` say. On `session_start`,
+>     before step 1 below, it moves the warm runtime to the play session's stream:
+>     (a) it sets the encoder's target bitrate to `stream.bitrate_kbps` and restarts ABR from it,
+>        as at launch;
+>     (b) when `stream.fps` differs from what the runtime encodes, it moves the encoded frame
+>        rate to it live, as the ABR frame-rate ladder does (never above the built rate);
+>     (c) when `stream.codec` or `stream.h264_profile` differs from what the runtime encodes, it
+>        replaces the encoder and the media tail after it (parser, payloader, and `webrtcbin` or
+>        the WebTransport sender) with ones built for the new values. The compositor, the app
+>        container and Steam keep running. No viewer is attached meanwhile: the old viewer has
+>        gone, and step 4's offer is made for the new tail.
+>
+>     From then on the play session's `stream` is the runtime's: ABR's ceilings, a later park on
+>     exit and the next adoption's `mic` compare read it. Only the built size and frame rate stay
+>     as they were. When the play session's `stream` matches what the runtime encodes, none of
+>     (a)–(c) runs.
+>
+>     **If any of (a)–(c) fails**, the agent tears the runtime down and builds the session fresh from
+>     `app`, exactly as for a runtime it does not adopt, and logs `adopt_restream_failed` at WARN
+>     with the step (`bitrate`, `fps`, `encoder` or `transport`) and the error. No game was
+>     launched in it: step 1 below has not run. The control plane sees an ordinary fresh build
+>     (`starting`, then `running`); no field reports the failure, and the session's stream values
+>     are still right, because the fresh build uses them.
+>
+>     An agent that did not advertise the capability compares as the bullet above says, and does
+>     none of (a)–(c).
 >   - **A play session on an adopted runtime.** On `session_start` the agent:
 >     1. sends the launch helper `launch <appid>`, the appid being the one after `-applaunch` in
 >        the play `app`'s `STEAM_STARTUP_FLAGS` (read as for a derived tile today), or
