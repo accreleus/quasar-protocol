@@ -1967,46 +1967,6 @@ paths:
             the stream, only returned when the request includes stream_width/stream_height. The
             session is left untouched in every case.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
-  /v1/sessions/{id}/pyrowave:
-    parameters: [ { $ref: "#/components/parameters/PathId" } ]
-    patch:
-      tags: [sessions]
-      summary: Turn Ultra-low latency (LAN), i.e. PyroWave, on or off in a running session (owner or admin) (amendment 55).
-      description: >-
-        Amendment 55 (accreleus/quasar#1050). A best-effort relay to the assigned host's agent
-        (agent-api.md session_pyrowave), like PATCH /v1/sessions/{id}/display: no session-state
-        transition, and a rejection is a no-op (the session keeps its codec). The 202 is sent once
-        the agent acked; its body carries the updated session.pyrowave.
-      security: [ { bearerAuth: [] } ]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/SessionPyroWaveUpdate" }
-      responses:
-        "202":
-          description: Applied. Body is the current session.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [session]
-                properties:
-                  session: { $ref: "#/components/schemas/Session" }
-        "400": { $ref: "#/components/responses/ValidationFailed" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403":
-          description: Caller is neither owner nor admin.
-          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409":
-          description: >-
-            session_not_running - the session's state is not running - or pyrowave_unavailable -
-            session.pyrowave.allowed is false (active true only; the message carries the reason) -
-            or pyrowave_rejected - the agent refused (not_on_webtransport, client_no_decoder,
-            rtt_too_high, encoder_error) or did not ack within the command timeout. The session is
-            left untouched in every case.
-          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/sessions/{id}/verdict:
     parameters:
       - { $ref: "#/components/parameters/PathId" }
@@ -2425,6 +2385,7 @@ paths:
                     deadline to now plus this many minutes. Absent = unchanged; outside 1-60 is
                     400 validation_failed.
                 compat_tools_max_enabled: { type: integer, minimum: 1, maximum: 32, description: "Amendment 56 (accreleus/quasar#1066). How many GE compatibility tools may be enabled at once. Default 8. Absent = unchanged; outside 1-32 is 400 validation_failed." }
+                pyrowave_max_per_gpu: { type: integer, minimum: 1, maximum: 4, description: "Amendment 58 (accreleus/quasar#1059). How many sessions on one GPU may hold a PyroWave slot at once (control-api.md §The PyroWave ceiling). Default 1. Absent = unchanged; outside 1-4 is 400 validation_failed. Lowering it ends no session." }
                 compat_tools_disk_reserve_gib: { type: integer, minimum: 1, maximum: 1024, description: "Amendment 56. Free GiB a tool install must leave on a host beyond the asset and the 4 GiB unpacked cap (trust rule T7). Default 10. Absent = unchanged." }
                 default_timezone: { type: string, description: "Amendment 49 (#845). As RegionSettings.timezone. Default UTC. Absent = unchanged." }
                 default_language: { type: string, pattern: "^[a-z]{2,3}-[A-Z]{2}$", description: "Amendment 49. Default en-US. Absent = unchanged." }
@@ -4866,24 +4827,22 @@ components:
     SessionPyroWave:
       type: object
       description: >-
-        Amendment 55 (accreleus/quasar#1050): a session's Ultra-low latency (LAN) / PyroWave
-        record. allowed and reason are the stream plan's grant, written once at launch; wanted,
-        active, used and switch_reason follow the agent's codec.switched trace events and the
-        toggle's acks. Observability and UI state: nothing decides on it.
+        Amendment 55 (accreleus/quasar#1050), revised by amendment 58 (accreleus/quasar#1059): a
+        session's Ultra-low latency (PyroWave) record. allowed, reason, choice and auto_reason are
+        the stream plan's launch-time decision, written once; wanted, active, used and
+        switch_reason follow the agent's codec.switched trace events. Observability and UI state
+        (the Launch options Codec note): nothing decides on it.
       required: [allowed, reason, wanted, active, used, target_kbps, switch_reason]
       properties:
         allowed: { type: boolean }
-        reason: { type: [string, "null"], description: "Why not allowed: profile_disallows, not_webtransport, host_no_pyrowave, device_no_webgpu (an open string); null when allowed." }
-        wanted: { type: boolean, description: "The user wants PyroWave now. Cleared by a step-down for rtt_too_high, congestion, client_decode_error or encoder_error." }
+        reason: { type: [string, "null"], description: "Why not allowed: profile_disallows, host_no_pyrowave, device_no_webgpu, gpu_pyrowave_busy (amendment 58: the GPU's PyroWave slots, instance setting pyrowave_max_per_gpu, were all held), not_webtransport (an open string); null when allowed." }
+        wanted: { type: boolean, description: "The session wants PyroWave now: the stream plan's launch decision (the user picked it, or Auto picked it on a prefer profile). Cleared by a step-down for rtt_too_high, congestion, client_decode_error or encoder_error." }
+        choice: { type: [string, "null"], enum: [explicit, auto, null], description: "Amendment 58: why PyroWave was wanted at launch - explicit (the user picked it in Launch options) or auto (Auto, on a prefer profile); null when not wanted, including an explicit pick the plan refused (reason says why). The plan's record; the client keeps its own record of the user's pick. Always serialized by a server implementing amendment 58." }
+        auto_reason: { type: [string, "null"], description: "Amendment 58: on an Auto launch of an eligible session on a prefer profile that Auto did not pick, why: no_measurement, rtt_too_high, link_too_slow (an open string); otherwise null. Always serialized by a server implementing amendment 58." }
         active: { type: boolean, description: "The media client is receiving PyroWave now." }
         used: { type: boolean, description: "The media client received PyroWave at some point in this session." }
-        target_kbps: { type: [integer, "null"], description: "The PyroWave target bitrate granted: min(height_default * fps / 60, pyrowave_kbps ?? 1000000); null when not allowed." }
-        switch_reason: { type: [string, "null"], description: "The reason of the latest switch on or off (launch, user, reconnect, rtt_too_high, client_no_decoder, congestion, client_decode_error, encoder_error, webrtc; an open string); null before the first." }
-    SessionPyroWaveUpdate:
-      type: object
-      required: [active]
-      properties:
-        active: { type: boolean, description: "Amendment 55: true turns Ultra-low latency (LAN) on, false turns it off." }
+        target_kbps: { type: [integer, "null"], description: "The PyroWave target bitrate granted: min(floor(height_default * fps / 60), pyrowave_kbps ?? 1000000) (codec-pyrowave.md §Rate); null when not allowed." }
+        switch_reason: { type: [string, "null"], description: "The reason of the latest switch on or off (launch, reconnect, rtt_too_high, client_no_decoder, congestion, client_decode_error, encoder_error, webrtc; an open string); null before the first." }
     CatalogCodec:
       type: string
       description: >-
@@ -4987,9 +4946,9 @@ components:
             passes every clamp. floor_not_least_demanding - the H.264 rung has a higher
             min_offer_bandwidth_kbps or min_decode_height than a rung above it, or requires a
             hardware encoder while a rung above it does not; a floor harder to satisfy than the
-            rung above it is a misconfiguration. pyrowave_needs_webtransport (amendment 55) -
-            pyrowave_allowed is true on a launch profile whose transport is webrtc, so PyroWave
-            can never be offered.
+            rung above it is a misconfiguration. pyrowave_needs_webtransport (amendments 55, 58) -
+            pyrowave_mode is allow or prefer on a launch profile whose transport is webrtc, so
+            PyroWave can never be offered.
         message: { type: string }
     SessionState:
       type: string
@@ -5974,7 +5933,7 @@ components:
           oneOf:
             - { $ref: "#/components/schemas/SessionPyroWave" }
             - { type: "null" }
-          description: "Amendment 55: the session's Ultra-low latency (LAN) / PyroWave record. Always serialized by a server implementing the amendment; null for every earlier session; absent from an older server."
+          description: "Amendments 55 and 58: the session's Ultra-low latency (PyroWave) record. Always serialized by a server implementing the amendment; null for every earlier session; absent from an older server."
         created_at: { type: string, format: date-time }
         started_at: { type: [string, "null"], format: date-time }
         ended_at: { type: [string, "null"], format: date-time }
@@ -6060,7 +6019,7 @@ components:
         client_type: { type: string, enum: [browser, native], description: "Absent ⇒ browser." }
         mic: { type: boolean, description: "Microphone capture request (2026-08-02). Absent ⇒ false. Granted only when instance setting mic_capture_enabled is on; an ungranted request is not an error — the session stream body reports the granted state." }
         transport: { $ref: "#/components/schemas/TransportPreference" }
-        pyrowave: { type: boolean, description: "Amendment 55: the user's remembered Ultra-low latency (LAN) choice on this device. Absent = false. A wish, never an error: Session.pyrowave says whether it was allowed and why not." }
+        pyrowave: { type: boolean, description: "Amendments 55 and 58: true when the user picked Ultra-low latency (PyroWave) in the Launch options Codec list (the client then sends no stream.codec). Absent = false. A wish, never an error: Session.pyrowave says whether it was allowed and why not. On a prefer profile an Auto launch (no stream.codec, no pyrowave true) may also get PyroWave (control-api.md §Ultra-low latency (PyroWave))." }
         stream:
           type: object
           description: "Admin/debug/back-compat override; beats profile_id field-by-field."
@@ -6118,7 +6077,10 @@ components:
       description: >-
         Amendment 54 (accreleus/quasar#1026): the client's transport preference on POST
         /v1/sessions. Absent means the launch profile decides. Honoured only as the profile's
-        transport allows (control-api.md §Transport); WebRTC is always the floor.
+        transport allows (control-api.md §Transport); WebRTC is always the floor. Amendment 58:
+        a developer and test switch only (the web client's ?transport= URL parameter); no player
+        UI offers a transport choice, and a session that wants PyroWave wants WebTransport
+        whatever this says.
     Transport:
       type: string
       enum: [webrtc, webtransport]
@@ -6128,8 +6090,33 @@ components:
       enum: [webrtc, webtransport_opt_in, webtransport]
       description: >-
         Amendment 54: whether a launch profile's sessions may use WebTransport. webrtc = never;
-        webtransport_opt_in = only when the launch request asks for it; webtransport = unless
-        the launch request asks for webrtc.
+        webtransport_opt_in = only when the launch request asks for it (the developer URL
+        switch) or, amendment 58, the stream plan wants PyroWave; webtransport = unless the
+        launch request asks for webrtc (or, amendment 58, the plan wants PyroWave).
+    LaunchProfilePyroWaveMode:
+      type: string
+      enum: ["off", allow, prefer]
+      description: >-
+        Amendment 58 (accreleus/quasar#1059): a launch profile's Ultra-low latency (PyroWave)
+        setting. off = never; allow = only when the user picks it in the Launch options Codec
+        list; prefer = as allow, and an Auto launch gets it when the launch-time Auto rule holds
+        (device probe shows WebGPU; within the 10-minute network-figure window, probe rtt_ms <= 5
+        and probe bandwidth_kbps >= the PyroWave target; the figures are unauthenticated hints;
+        control-api.md §Ultra-low latency (PyroWave)). Either way subject to the per-GPU ceiling
+        pyrowave_max_per_gpu.
+    LaunchProfilePyroWave:
+      type: object
+      description: >-
+        Amendment 58 (accreleus/quasar#1059): what the Launch options Codec list needs to show
+        the Ultra-low latency (PyroWave) entry enabled, or disabled with its reason. Advisory,
+        like the rest of GET /v1/me/profiles: the launch decides, and Session.pyrowave records it.
+      required: [mode, available, reason, auto, auto_reason]
+      properties:
+        mode: { $ref: "#/components/schemas/LaunchProfilePyroWaveMode" }
+        available: { type: boolean, description: "The entry is enabled: mode is allow or prefer, the profile's transport is not webrtc, a GPU in the caller's candidate union lists pyrowave, and the fresh probe shows WebGPU and WebTransport with datagrams." }
+        reason: { type: [string, "null"], description: "Why not available, first failing: profile_disallows, host_no_pyrowave, device_no_webgpu, device_no_webtransport (an open string); null when available." }
+        auto: { type: boolean, description: "An Auto launch would pick PyroWave by the Auto rule, with the top rung's height and fps for the target. False unless mode is prefer and available is true." }
+        auto_reason: { type: [string, "null"], description: "When mode is prefer, available is true and auto is false: no_measurement, rtt_too_high or link_too_slow (an open string); otherwise null." }
     TransportOptions:
       type: object
       description: >-
@@ -6985,6 +6972,7 @@ components:
               description: Amendment 39. Default 10.
             compat_tools_max_enabled: { type: integer, minimum: 1, maximum: 32, description: "Amendment 56 (accreleus/quasar#1066). Default 8. Optional in the envelope so a pre-amendment server stays conformant." }
             compat_tools_disk_reserve_gib: { type: integer, minimum: 1, maximum: 1024, description: "Amendment 56. Default 10." }
+            pyrowave_max_per_gpu: { type: integer, minimum: 1, maximum: 4, description: "Amendment 58 (accreleus/quasar#1059). The per-GPU PyroWave ceiling. Default 1. Optional in the envelope so a pre-amendment server stays conformant." }
             default_timezone: { type: string, description: "Amendment 49 (#845). Default UTC. Optional in the envelope so a pre-amendment server stays conformant." }
             default_language: { type: string, description: "Amendment 49. Default en-US." }
             default_region_format: { type: [string, "null"], description: "Amendment 49. null = the same as the language." }
@@ -8906,8 +8894,10 @@ components:
         transport:
           allOf: [ { $ref: "#/components/schemas/LaunchProfileTransport" } ]
           description: "Amendment 54. Always serialized by a server implementing the amendment; absent from an older one, read as webrtc."
-        pyrowave_allowed: { type: boolean, description: "Amendment 55: whether this profile's users may turn on Ultra-low latency (LAN) (PyroWave) on a WebTransport session. Always serialized by a server implementing the amendment; absent from an older one, read as false." }
-        pyrowave_kbps: { type: [integer, "null"], minimum: 50000, maximum: 1000000, description: "Amendment 55: the MAXIMUM PyroWave bitrate, kbit/s - a cap, not a fixed target. A session's target is min(height_default * fps / 60, pyrowave_kbps ?? 1000000), height_default 200000 / 300000 / 400000 for an encoded stream height at launch up to 1080 / up to 1440 / above. null = no cap below 1000000." }
+        pyrowave_mode:
+          allOf: [ { $ref: "#/components/schemas/LaunchProfilePyroWaveMode" } ]
+          description: "Amendment 58 (amendment 55's pyrowave_allowed is deleted): Ultra-low latency (PyroWave) for this profile. Always serialized by a server implementing the amendment; absent from an older one, read as off."
+        pyrowave_kbps: { type: [integer, "null"], minimum: 50000, maximum: 1000000, description: "Amendment 55: the MAXIMUM PyroWave bitrate, kbit/s - a cap, not a fixed target. A session's target is min(floor(height_default * fps / 60), pyrowave_kbps ?? 1000000) (codec-pyrowave.md §Rate), height_default 200000 / 300000 / 400000 for an encoded stream height at launch up to 1080 / up to 1440 / above. null = no cap below 1000000." }
         used_by: { $ref: "#/components/schemas/LaunchProfileUsedBy" }
         warnings:
           type: array
@@ -8932,8 +8922,10 @@ components:
         transport:
           allOf: [ { $ref: "#/components/schemas/LaunchProfileTransport" } ]
           description: "Amendment 54. Absent on POST = webrtc; absent on PATCH = unchanged."
-        pyrowave_allowed: { type: boolean, description: "Amendment 55. Absent on POST = false; absent on PATCH = unchanged. True with transport webrtc draws the warning pyrowave_needs_webtransport." }
-        pyrowave_kbps: { type: [integer, "null"], minimum: 50000, maximum: 1000000, description: "Amendment 55: the maximum PyroWave bitrate (a cap). Absent on POST = null (no cap below 1000000); absent on PATCH = unchanged; out of range = 400 validation_failed." }
+        pyrowave_mode:
+          allOf: [ { $ref: "#/components/schemas/LaunchProfilePyroWaveMode" } ]
+          description: "Amendment 58. Absent on POST = off; absent on PATCH = unchanged; any other value = 400 validation_failed. allow or prefer with transport webrtc draws the warning pyrowave_needs_webtransport. Amendment 55's pyrowave_allowed is deleted: sent, it is an unknown key, 400 validation_failed like any other on this decoder."
+        pyrowave_kbps: { type: [integer, "null"], minimum: 50000, maximum: 1000000, description: "Amendment 55: the maximum PyroWave bitrate (a cap; the console's Maximum bitrate, blank = automatic by resolution). Absent on POST = null (no cap below 1000000); absent on PATCH = unchanged; out of range = 400 validation_failed." }
         rungs:
           type: array
           minItems: 1
@@ -9008,6 +9000,9 @@ components:
           type: array
           minItems: 1
           items: { $ref: "#/components/schemas/ProfileEvaluation" }
+        pyrowave:
+          allOf: [ { $ref: "#/components/schemas/LaunchProfilePyroWave" } ]
+          description: "Amendment 58: the Launch options Ultra-low latency (PyroWave) entry for this profile. Always serialized by a server implementing the amendment; absent from an older one, read as mode off, not available."
     ProfilesResponse:
       type: object
       description: >-

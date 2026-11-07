@@ -12,9 +12,9 @@ Phase 0 uses plain JSON for everything to stay debuggable. A compact binary inpu
 - `transport-webtransport.md` — media transport #2 (EXPERIMENTAL, amendment 54): media and input
   as QUIC datagrams over WebTransport, decoded by the client. WebRTC (`signaling.md`) stays the
   default and the guaranteed fallback.
-- `codec-pyrowave.md` — the PyroWave codec (EXPERIMENTAL, amendment 55): "Ultra-low latency
-  (LAN)", WebTransport-only, decoded by the client in WebGPU; its datagram payload, block
-  concealment, rate and mid-session codec switch.
+- `codec-pyrowave.md` — the PyroWave codec (EXPERIMENTAL, amendments 55 and 58): "Ultra-low
+  latency (PyroWave)", chosen at launch, WebTransport-only, decoded by the client in WebGPU; its
+  datagram payload, block concealment, rate and the agent's codec switches.
 - `native-client.md` — native-client capability, metrics and certification report (AS10-12).
 
 ## Phase 1 contracts (P1-A..D)
