@@ -2122,7 +2122,11 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >        built: the session reserves one encode slot, never two. When the old effective encoder
 >        is NVENC, `QUASAR_NVENC_DEFER_TEARDOWN` keeps its meaning: the old pipeline is parked as
 >        at a session end, and the new encoder is not started until that deferred teardown has
->        completed.
+>        completed. That teardown waits until the host holds no live encode lease, so **an
+>        adoption whose old encoder is NVENC is never done warm while another encoder is live on
+>        that host**: the agent takes the failure branch without trying (c), step `nvenc_drain`.
+>        It never destroys the NVENC session early: the NVIDIA driver has a use-after-free when an
+>        encoder is destroyed while another is live.
 >
 >     **Advertising `adopt_restream_v1` promises (a)–(c).** An agent that cannot do one of them
 >     for a given adoption takes the failure branch below; it never adopts on the old encoder, so
@@ -2138,8 +2142,10 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >     start, from the host's Vulkan HEVC knob, so every Vulkan session on a host that encodes HEVC
 >     on Vulkan already runs at depth 2.
 >
->     **One deadline covers (a)–(c): 5 s from `session_start`.** If they have not finished by then
->     the agent takes the failure branch, step `deadline`.
+>     **One deadline covers (a)–(c): 5 s from `session_start`** (provisional, to be measured on
+>     the lab by accreleus/quasar#1133). If they have not finished by then the agent aborts the
+>     step in flight and takes the failure branch, step `deadline`. An encoder that step had
+>     created is released, as in (c), before the fresh build starts, so the one-slot rule holds.
 >
 >     **Signaling during (a)–(c).** The new viewer has no offer yet: step 4's offer is made after
 >     them, for the new tail. An `answer`, `ice` or `restart_ice` for `session_id` that arrives
@@ -2155,15 +2161,18 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >     runtime: terminal proof under the adopted id, before any report under `session_id`. The
 >     agent then builds the session fresh from `app`, exactly as for a runtime it does not adopt,
 >     and logs `adopt_restream_failed` at WARN with the step (`bitrate`, `fps`, `encoder`,
->     `encoder_family`, `transport` or `deadline`) and the error. No game was launched in the
+>     `encoder_family`, `nvenc_drain`, `transport` or `deadline`) and the error. No game was launched in the
 >     runtime: step 1 below has not run. The control plane sees an ordinary fresh build
 >     (`starting`, then `running`); no field reports the failure, and the session's stream values
 >     are still right, because the fresh build uses them.
 >
->     **A failed (c) is remembered for the connection epoch.** The agent records the GPU, the new
->     `stream.codec` and the new `stream.h264_profile` of each failed (c). A later adoption that
->     needs (c) for the same three builds fresh at once, without trying it. A reconnect clears the
->     record. Nothing is sent for it.
+>     **A deterministic (c) failure is remembered for the connection epoch.** When (c) fails on an
+>     element or caps error, or the encoder refuses to be created, the agent records the GPU, the
+>     new `stream.codec` and the new `stream.h264_profile`. A later adoption that needs (c) for
+>     the same three builds fresh at once, without trying it, whoever's session it is: the record
+>     describes the hardware and the driver, not a user. A `deadline` miss and an `nvenc_drain`
+>     are never recorded, because they depend on load. A reconnect clears the record. Nothing is
+>     sent for it.
 >
 >     An agent that did not advertise the capability compares as the bullet above says, and does
 >     none of (a)–(c).
