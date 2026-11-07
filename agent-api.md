@@ -2108,7 +2108,8 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >     lower them). It does not adopt when `stream.mic` differs or any of the three is larger; it
 >     tears that runtime down and builds fresh, as above. Otherwise it adopts whatever
 >     `stream.codec`, `stream.h264_profile` and `stream.bitrate_kbps` say. On `session_start`,
->     before step 1 below, it moves the warm runtime to the play session's stream:
+>     before step 1 below and before the runtime is re-labelled `session_id`, it moves the warm
+>     runtime to the play session's stream:
 >     (a) it sets the encoder's target bitrate to `stream.bitrate_kbps` and restarts ABR from it,
 >        as at launch;
 >     (b) when `stream.fps` differs from what the runtime encodes, it moves the encoded frame
@@ -2116,20 +2117,53 @@ capability but does not by itself put ordinary browser sessions on a physical di
 >     (c) when `stream.codec` or `stream.h264_profile` differs from what the runtime encodes, it
 >        replaces the encoder and the media tail after it (parser, payloader, and `webrtcbin` or
 >        the WebTransport sender) with ones built for the new values. The compositor, the app
->        container and Steam keep running. No viewer is attached meanwhile: the old viewer has
->        gone, and step 4's offer is made for the new tail.
+>        container and Steam keep running. The old encoder reaches `NULL` and has released its
+>        hardware encode session (NVENC, VCN or VA) and its VRAM **before** the new encoder is
+>        built: the session reserves one encode slot, never two. When the old effective encoder
+>        is NVENC, `QUASAR_NVENC_DEFER_TEARDOWN` keeps its meaning: the old pipeline is parked as
+>        at a session end, and the new encoder is not started until that deferred teardown has
+>        completed.
+>
+>     **Advertising `adopt_restream_v1` promises (a)–(c).** An agent that cannot do one of them
+>     for a given adoption takes the failure branch below; it never adopts on the old encoder, so
+>     the session's `codec` and `h264_profile` are always what is encoded.
+>
+>     **A codec change across encoder families is never done warm.** What the compositor emits is
+>     fixed when it is built, by the effective encoder's family: `memory:VulkanImage` NV12 for the
+>     Vulkan encoders, `memory:CUDAMemory` BGRA for NVENC, system-memory RGBx for VA, I420 for
+>     `openh264enc`. When the new codec's effective encoder is of another family than the old one
+>     (for example H.264 on Vulkan to HEVC on NVENC, on a host where Vulkan HEVC is disabled), the
+>     agent takes the failure branch without trying (c), step `encoder_family`. The Vulkan
+>     encode-ring depth is not such a setting: it is pinned once for the whole agent process at
+>     start, from the host's Vulkan HEVC knob, so every Vulkan session on a host that encodes HEVC
+>     on Vulkan already runs at depth 2.
+>
+>     **One deadline covers (a)–(c): 5 s from `session_start`.** If they have not finished by then
+>     the agent takes the failure branch, step `deadline`.
+>
+>     **Signaling during (a)–(c).** The new viewer has no offer yet: step 4's offer is made after
+>     them, for the new tail. An `answer`, `ice` or `restart_ice` for `session_id` that arrives
+>     before that offer is dropped (logged at DEBUG); the client answers step 4's offer, and that
+>     offer also satisfies a `restart_ice`.
 >
 >     From then on the play session's `stream` is the runtime's: ABR's ceilings, a later park on
 >     exit and the next adoption's `mic` compare read it. Only the built size and frame rate stay
 >     as they were. When the play session's `stream` matches what the runtime encodes, none of
 >     (a)–(c) runs.
 >
->     **If any of (a)–(c) fails**, the agent tears the runtime down and builds the session fresh from
->     `app`, exactly as for a runtime it does not adopt, and logs `adopt_restream_failed` at WARN
->     with the step (`bitrate`, `fps`, `encoder` or `transport`) and the error. No game was
->     launched in it: step 1 below has not run. The control plane sees an ordinary fresh build
+>     **If any of (a)–(c) fails, or is not tried (above)**, the runtime is torn down as a declined
+>     runtime: terminal proof under the adopted id, before any report under `session_id`. The
+>     agent then builds the session fresh from `app`, exactly as for a runtime it does not adopt,
+>     and logs `adopt_restream_failed` at WARN with the step (`bitrate`, `fps`, `encoder`,
+>     `encoder_family`, `transport` or `deadline`) and the error. No game was launched in the
+>     runtime: step 1 below has not run. The control plane sees an ordinary fresh build
 >     (`starting`, then `running`); no field reports the failure, and the session's stream values
 >     are still right, because the fresh build uses them.
+>
+>     **A failed (c) is remembered for the connection epoch.** The agent records the GPU, the new
+>     `stream.codec` and the new `stream.h264_profile` of each failed (c). A later adoption that
+>     needs (c) for the same three builds fresh at once, without trying it. A reconnect clears the
+>     record. Nothing is sent for it.
 >
 >     An agent that did not advertise the capability compares as the bullet above says, and does
 >     none of (a)–(c).
