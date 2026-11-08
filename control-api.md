@@ -2877,7 +2877,9 @@ unaffected by this feature.
 
 - *(Amendment 54, accreleus/quasar#1026)* A launch profile also carries **`transport`**
   (`webrtc` | `webtransport_opt_in` | `webtransport`, default `webrtc`): whether its sessions may
-  use WebTransport (§Transport — WebRTC and WebTransport).
+  use WebTransport (§Transport — WebRTC and WebTransport). *(Amendment 61, accreleus/quasar#1217:
+  also `default`, now the default: follow the instance setting `default_transport`, §Transport ▸
+  The instance default.)*
 - *(Amendment 55, accreleus/quasar#1050; amendment 58)* and **`pyrowave_mode`**
   (`off` | `allow` | `prefer`, default `off`) and **`pyrowave_kbps`** (default `null`): whether its
   users may pick Ultra-low latency (PyroWave), whether Auto may pick it, and the most bitrate it
@@ -4153,14 +4155,48 @@ fails, or whose stream dies, falls back to it on its own (*transport fallback*).
 
 | value | meaning |
 |---|---|
-| `webrtc` | the default. Sessions use WebRTC; a request for WebTransport is not honoured. |
+| `default` | *(Amendment 61)* the default. Follow the instance setting `default_transport` (§The instance default). |
+| `webrtc` | Sessions use WebRTC; a request for WebTransport is not honoured. |
 | `webtransport_opt_in` | WebRTC unless the launch request asks for WebTransport (the client's developer URL switch), or *(amendment 58)* the stream plan wants PyroWave. |
 | `webtransport` | WebTransport (experimental) unless the request asks for WebRTC (or, amendment 58, the plan wants PyroWave). |
 
-Always serialized on the read. Optional on the write: absent on `POST` is `webrtc`, absent on
-`PATCH` leaves it unchanged; any other value is `400 validation_failed`. Upgrading changes nothing,
-because every existing profile reads `webrtc`. Admin-only, like the rest of the launch-profile
-write path.
+Always serialized on the read. Optional on the write: absent on `POST` is `default`
+*(amendment 61; it was `webrtc`)*, absent on `PATCH` leaves it unchanged; any other value is
+`400 validation_failed`. Admin-only, like the rest of the launch-profile write path.
+
+### The instance default *(Amendment 61, accreleus/quasar#1217, signed off 2026-11-08)*
+
+> *Additive except for one write default. One instance setting, one launch-profile `transport`
+> value, one `transport_reason` value and migration 0116 (`schema.md`). Absent `transport` on a
+> launch-profile `POST` now means `default` instead of `webrtc`, and existing `webrtc` profiles
+> read `default` after the upgrade (below); with the shipped instance default both still mean
+> WebRTC. No endpoint, status code or session field changes. The transport fallback, the checks
+> under "The choice" and the launch request's `transport` switch are unchanged.*
+
+The instance setting **`default_transport`** (`webrtc` | `webtransport`, **default `webrtc`**;
+`GET`/`PATCH /v1/admin/settings`, admin-only, absent on `PATCH` = unchanged, any other value
+`400 validation_failed`) is the transport of every launch profile whose `transport` is `default`.
+It is audited like every settings change (`instance.settings.updated`).
+
+A launch profile's **effective transport** is its `transport`, or `default_transport` when that is
+`default`. `default_transport: "webrtc"` behaves exactly as `webrtc` in the table above;
+`"webtransport"` exactly as `webtransport`. Everywhere else this document reads a launch profile's
+`transport` (the choice below, the PyroWave eligibility, candidate and launch-option checks, the
+warning `pyrowave_needs_webtransport`), it reads the effective transport.
+
+A launch reads `default_transport` once, with its launch profile, and every step of that launch
+uses that value. Changing it affects launches that start afterwards, including a claim of a
+parked session; a running session keeps the transport it launched with.
+
+**Upgrade.** Migration 0116 sets every launch profile whose `transport` is `webrtc` to `default`,
+and `default_transport` starts at `webrtc`, so no session's transport changes on upgrade. Profiles
+set to `webtransport_opt_in` or `webtransport` keep that value. Migration 0111 is in no release
+yet, so on an install upgrading from a release every `webrtc` this rewrites is the column default,
+not an admin's choice. On an install that ran a pre-release build with 0111, an admin's explicit
+`webrtc` also becomes `default`; that
+still means WebRTC until an admin changes `default_transport`, and the admin can set the profile
+back to `webrtc` to pin it. There is no bulk "switch all to default" endpoint; the console's
+profile editor offers "Use instance default" per profile.
 
 ### `POST /v1/sessions` — `transport`
 
@@ -4175,8 +4211,10 @@ codec). WebTransport is wanted when the profile is `webtransport` and the reques
 *(amendment 58)* the stream plan wants PyroWave and the profile is not `webrtc`
 (§Ultra-low latency (PyroWave) ▸ The stream plan, step 3). A request
 for `"webtransport"` on a `webrtc` profile is not an error: the session is `webrtc` with
-`transport_reason: "profile_disallows"`. A wanted WebTransport is chosen only when all of these
-hold; otherwise the session is `webrtc` and `transport_reason` says which failed first:
+`transport_reason: "profile_disallows"` *(amendment 61: `"instance_default_disallows"` when the
+profile's `transport` is `default` and `default_transport` is `webrtc`)*. A wanted WebTransport
+is chosen only when all of these hold; otherwise the session is `webrtc` and `transport_reason`
+says which failed first:
 
 | check | `transport_reason` |
 |---|---|
