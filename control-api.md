@@ -4164,7 +4164,7 @@ Always serialized on the read. Optional on the write: absent on `POST` is `defau
 *(amendment 61; it was `webrtc`)*, absent on `PATCH` leaves it unchanged; any other value is
 `400 validation_failed`. Admin-only, like the rest of the launch-profile write path.
 
-### The instance default *(Amendment 61, accreleus/quasar#1217, awaiting owner sign-off)*
+### The instance default *(Amendment 61, accreleus/quasar#1217, signed off 2026-11-08)*
 
 > *Additive except for one write default. One instance setting, one launch-profile `transport`
 > value, one `transport_reason` value and migration 0116 (`schema.md`). Absent `transport` on a
