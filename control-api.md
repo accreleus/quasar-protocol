@@ -3692,7 +3692,7 @@ well-formed and authorized; the server simply has no room to place it now.
 
 *(Amendment 53, #1001, signed off 2026-10-31.)* `reason` is also set on `409 home_in_use`: `steam_library_open_in_desktop`
 when the holder mounts the Steam library as a shared home, `steam_game_running` when the refused
-launch shares the library and a Steam-family session holds it. It is absent when the holder is
+launch (or, amendment 60, swap) shares the library and a Steam-family session holds it. It is absent when the holder is
 already `stopping`, and on every other `home_in_use`. `home_host_unavailable` also covers a
 sharing launch pinned to the host of the caller's Steam home (§Storage, "A shared Steam
 library").
@@ -6983,17 +6983,27 @@ holds the home it mounts as a shared home exactly as it holds its own:
   naming it, `reason: steam_library_open_in_desktop`. That includes a swap of the sharing
   session itself into the Steam family, which names the session itself. A second launch of the
   same desktop app collides on its own home first and gets the ordinary `home_in_use`, with no
-  `reason`;
+  `reason`. *(Amendment 60, accreleus/quasar#1006, signed off 2026-11-08.)* A swap into a
+  sharing app is refused the same way, naming the sharing session; that includes a swap of the
+  sharing session itself into another sharing app, which names the session itself;
 - a sharing launch is refused `409 home_in_use` while a Steam-family play session is live,
   naming it, `reason: steam_game_running` (message "Close your Steam game first.");
+  *(Amendment 60.)* so is a swap into a sharing app;
 - while the caller's own **parked** Steam (§Warm Steam) holds the library it is superseded, and
   the launch answers the retryable `503 capacity_exhausted` with `Retry-After`, as a family
   launch does; a released held runtime (§Warm Steam, "Park on exit") answers the same `503`.
   Once the parked session has stopped, the launch waits for its home hold to clear for the same
   bounded time as any launch waiting on a settling hold, then answers `409 home_conflict` if the
-  hold has not cleared;
+  hold has not cleared.
+  *(Amendment 60.)* A swap into a sharing app supersedes the parked Steam the same way; it then
+  answers `409 home_in_use` with no `reason` and the "still shutting down" message, as it does
+  while a released held runtime holds the library (a swap has no `Retry-After` answer). A swap
+  does not wait for a settling Steam hold: it answers `409 home_conflict` at once. A console
+  auto-start supersedes the parked Steam the same way and runs again once it has stopped;
 - a sharing session takes the Steam claim's pending-home hold together with its own, under one
   token; the agent's qualified terminal for the session clears both (RH05, `schema.md`);
+  *(Amendment 60.)* a swap into a sharing app takes it in its swap guard transaction, under the
+  target's token;
 - the home-tombstone, claim-release, GC claim-cleanup and app-delete in-use checks count it too;
 - when the control plane fails a sharing launch before its assignment reaches the agent, it deletes
   the Steam claim if that claim is `reserved` with no hold, no home row of the Steam family exists,
@@ -7005,10 +7015,29 @@ down" message and carries no `reason`.
 When the sharing session ends, warm Steam re-warms by its existing setting
 (`steam_warm_rewarm`); nothing else changes.
 
-Only `POST /v1/sessions` shares. A console auto-start (§Console mode) never shares. A swap
-neither adds nor drops a shared home: a swap target is dispatched with its own managed home
-only, and the session keeps `shared_home_app_id`, and its hold on the Steam claim, until it
-ends.
+*(Amendment 60, accreleus/quasar#1006, signed off 2026-11-08.)* This replaces amendment 53's rule
+that only `POST /v1/sessions` shares.
+
+**Where sharing applies.** A launch (`POST /v1/sessions`), a swap into a sharing app (§Quick
+switch) and a console auto-start of one (§Console mode) all share: each makes the same
+single-Steam choice, claims the Steam home on the session's host in the same transaction and
+lock order as its own home, and holds it. A swap or console auto-start that cannot share (the
+Steam home is on another host, needs operator review or carries a hold that will not clear by
+itself, there is no Steam app to share, or a Steam claim would be created on a host the Steam
+app's placement does not select) runs without
+the library; a launch says so in its `201` `notice`, while a swap and a console auto-start have
+no response to carry one and record it only in the control plane's log. A console auto-start
+goes through the launch's placement transaction, pinned to the console's host, so every rule
+above for a launch applies to it.
+
+A swap target's dispatch carries the shared mount after its own managed-home mount, as a
+launch's does. The session records `shared_home_app_id` when the agent reports the swap
+complete, in the commit that records the new `app_id`; until then it keeps the old app's value.
+A swap away from a sharing app releases, in that same commit, this session's pending-home hold
+on the Steam claim and sets `shared_home_app_id` to `null`: the agent reports the swap complete
+only after the outgoing container has stopped, so the data dir it mounted is unmounted by then.
+A swap of a sharing session into the Steam family or into another sharing app stays refused,
+naming the session itself (above): nothing yet proves its old container let go of the mount.
 
 `shared_home_app_id` on the session read (`Session`): the Steam app whose library the session
 mounts, `null` otherwise. Always serialized. A client marks that app's family in use (as it does
