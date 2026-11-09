@@ -7021,7 +7021,7 @@ holds the home it mounts as a shared home exactly as it holds its own:
   naming it, `reason: steam_library_open_in_desktop`. A second launch of the same desktop app
   collides on its own home first and gets the ordinary `home_in_use`, with no `reason`.
   *(Amendment 60, accreleus/quasar#1006, signed off 2026-11-08.)* A swap into a sharing app is
-  refused the same way, naming the sharing session. *(Amendment 62, accreleus/quasar#1232.)* The
+  refused the same way, naming the sharing session. *(Amendment 62, accreleus/quasar#1232, signed off 2026-11-09.)* The
   swapping session never counts against itself: a sharing session may swap into the Steam family
   or into another sharing app (below);
 - a sharing launch is refused `409 home_in_use` while a Steam-family play session is live,
