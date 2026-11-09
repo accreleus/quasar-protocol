@@ -7018,12 +7018,12 @@ holds the home it mounts as a shared home exactly as it holds its own:
 - the single-writer guard (launch and swap) counts a live session whose `shared_home_app_id`
   is the home-owning app. So while a sharing session is live, every Steam-family launch or swap
   (the parent and every tile) and every sharing launch of another app is `409 home_in_use`
-  naming it, `reason: steam_library_open_in_desktop`. That includes a swap of the sharing
-  session itself into the Steam family, which names the session itself. A second launch of the
-  same desktop app collides on its own home first and gets the ordinary `home_in_use`, with no
-  `reason`. *(Amendment 60, accreleus/quasar#1006, signed off 2026-11-08.)* A swap into a
-  sharing app is refused the same way, naming the sharing session; that includes a swap of the
-  sharing session itself into another sharing app, which names the session itself;
+  naming it, `reason: steam_library_open_in_desktop`. A second launch of the same desktop app
+  collides on its own home first and gets the ordinary `home_in_use`, with no `reason`.
+  *(Amendment 60, accreleus/quasar#1006, signed off 2026-11-08.)* A swap into a sharing app is
+  refused the same way, naming the sharing session. *(Amendment 62, accreleus/quasar#1232.)* The
+  swapping session never counts against itself: a sharing session may swap into the Steam family
+  or into another sharing app (below);
 - a sharing launch is refused `409 home_in_use` while a Steam-family play session is live,
   naming it, `reason: steam_game_running` (message "Close your Steam game first.");
   *(Amendment 60.)* so is a swap into a sharing app;
@@ -7074,8 +7074,13 @@ complete, in the commit that records the new `app_id`; until then it keeps the o
 A swap away from a sharing app releases, in that same commit, this session's pending-home hold
 on the Steam claim and sets `shared_home_app_id` to `null`: the agent reports the swap complete
 only after the outgoing container has stopped, so the data dir it mounted is unmounted by then.
-A swap of a sharing session into the Steam family or into another sharing app stays refused,
-naming the session itself (above): nothing yet proves its old container let go of the mount.
+*(Amendment 62, accreleus/quasar#1232; until then such a swap was refused, naming the session
+itself.)* A sharing session may swap into the Steam family or into another sharing app. The agent
+starts the target only after the outgoing container has stopped and its exit is proven; a stop it
+cannot prove fails the swap and starts nothing, so the library is never mounted twice. The
+session's Steam hold carries over to the target instead of being released: when the target mounts
+the same Steam home, as its own managed home or as its shared home, the commit keeps this
+session's hold on that claim; only a Steam home the target does not mount is released.
 
 `shared_home_app_id` on the session read (`Session`): the Steam app whose library the session
 mounts, `null` otherwise. Always serialized. A client marks that app's family in use (as it does
