@@ -6212,6 +6212,17 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
   glass-to-glass. The client posts **both** keys with the same value this release; the taxonomy
   carries `client.rvfc_capture_to_display_ms` alongside `client.glass_to_glass_ms`, and no
   falsifier, derived window or stored series changes.
+- *(Amendment 63, accreleus/quasar#1035, additive)* **A WebTransport session posts the same
+  samples**, measured where that transport has the facts: present cadence from the client's own
+  present times, `decode_ms` from a unit entering the decoder to its frame leaving it, and
+  `packets_lost` as the cumulative count of video fragments it found missing (each counted once,
+  at its first NACK). Keys it cannot measure (`jitter_buffer_ms`, `frames_dropped`,
+  `display_refresh_hz`, the RVFC and abs-capture-time keys) are absent, never zero. Two keys are
+  its own: **`wt_capture_to_present_ms`**, the agent's `capture_us` to present submission on the
+  agent's clock (median over a ring of up to 600 frames; absent until the ping/pong offset is
+  stable; not RVFC-qualified), and **`wt_keyframe_requests`**, the `keyframe_request` messages it
+  sent in the window. A WebRTC session posts neither. It also posts `…/trace/clock` from the
+  control stream's `pong` (`tw`), with the same min-RTT estimate.
 - *(UI-P6, additive)* `codec_mime_type` is an optional per-sample **string** carrying the
   `getStats()` codec `mimeType` the receiver is actually decoding. It is a sibling of the numeric
   `metrics` object, not a key inside it. The server normalises it to the wire codec vocabulary and
