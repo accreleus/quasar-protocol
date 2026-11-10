@@ -173,7 +173,7 @@ after its 25-byte header.
 
 **Clocks.** Media timestamps are 90 kHz (video) and 48 kHz (audio), as on RTP. `capture_us` is the
 agent's wall clock (Unix epoch, microseconds). For audio it is when the packet's samples began.
-For video it is when the frame's access unit **left the encoder** *(amendment 63, erratum
+For video it is when the frame's access unit **left the encoder** *(amendment 63, signed off 2026-11-10; erratum
 quasar-protocol#29 item 13: the 0.6 agent has no capture-time stamp to carry, and the WebRTC
 path's abs-capture-time is stamped after the encoder too)*, so capture and encode are not inside
 any interval measured from it; the

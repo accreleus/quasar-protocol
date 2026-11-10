@@ -6212,7 +6212,7 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
   glass-to-glass. The client posts **both** keys with the same value this release; the taxonomy
   carries `client.rvfc_capture_to_display_ms` alongside `client.glass_to_glass_ms`, and no
   falsifier, derived window or stored series changes.
-- *(Amendment 63, accreleus/quasar#1035, additive)* **A WebTransport session posts the same
+- *(Amendment 63, accreleus/quasar#1035, additive, signed off 2026-11-10)* **A WebTransport session posts the same
   samples**, measured where that transport has the facts: present cadence from the client's own
   present times, `decode_ms` from a unit entering the decoder to its frame leaving it, and
   `packets_lost` as the cumulative count of video fragments it found missing (each counted once,
