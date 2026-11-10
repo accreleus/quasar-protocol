@@ -480,7 +480,14 @@ from that buffer.
    `discardable` the client sends `keyframe_request {reason: "late"}` and drops every frame until
    the next keyframe.
 4. **FEC first.** When the frame's FEC (§FEC) can rebuild the missing fragment, the client does
-   that and sends no NACK for it.
+   that and sends no NACK for it. A repair datagram follows the fragments it protects, so a gap
+   shows before the repair that covers it can arrive. *(Amendment 65, accreleus/quasar#1046,
+   signed off 2026-11-10.)* While repair datagrams are arriving (at least one within the last
+   second), a client MAY hold a fragment's first NACK (rule 2) until the earliest of: a repair
+   rebuilds it; a fragment of a later frame arrives; or 8 ms after the fragment was found missing.
+   The repeat NACK and the late rule (3) count from when the first NACK is sent. A fragment
+   rebuilt before its NACK is never NACKed, and so is not in the client's count of fragments
+   found missing (`control-api.md` stats, `packets_lost`).
 
 `keyframe_request {reason: "loss"}` remains for a client that does no NACK at all.
 
@@ -494,7 +501,8 @@ Specified now so a client and agent can be built against it; the agent need not 
 payloads, each padded with zeros to the longest; it rebuilds any **one** of them that is missing.
 `stride` 1 protects a run of fragments, a larger `stride` interleaves groups against a burst. The
 agent chooses `count`, `stride` and how many repair datagrams to send from the loss it sees in
-feedback.
+feedback. The agent SHOULD send a frame's repair datagrams right after that frame's video
+datagrams, before any datagram of a later frame *(amendment 65)*.
 
 ```
 0      u8   channel     0x04
