@@ -4583,8 +4583,12 @@ setting **`pyrowave_max_per_gpu`** (integer, **default 1**, `1 … 4`; `GET`/`PA
   cannot both take the last slot.
 - **Released when unused.** The stream plan's one write (§The stream plan) clears the slot when the
   session ends up not allowed or not wanted. A session that is allowed and wanted keeps its slot
-  until it reaches a terminal state, including after a step-down to its standard codec: a
-  0.6 session never switches back on (§Mid-session switching).
+  until it reaches a terminal state **or steps down to its standard codec** for `rtt_too_high`,
+  `congestion`, `client_decode_error` or `encoder_error` *(amendment 64, accreleus/quasar#1252,
+  signed off 2026-11-10; the text had it keep the slot after a step-down)*: a 0.6 session never
+  switches back on (§Mid-session switching), so a kept slot would only read `gpu_pyrowave_busy` to
+  the next launch. The write that records the step-down (`wanted` cleared, §The session's
+  `pyrowave`) clears `pyrowave_slot` with it.
 - **Never a refusal.** A candidate that finds no free slot is admitted as before with
   `pyrowave_slot` false, and step 2b gives it its standard codec with `reason`
   `gpu_pyrowave_busy`. A candidate that finds a free slot but whose plan does not want PyroWave
