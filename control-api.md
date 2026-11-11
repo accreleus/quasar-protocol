@@ -6227,6 +6227,17 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
   stable; not RVFC-qualified), and **`wt_keyframe_requests`**, the `keyframe_request` messages it
   sent in the window. A WebRTC session posts neither. It also posts `…/trace/clock` from the
   control stream's `pong` (`tw`), with the same min-RTT estimate.
+- *(Amendment 66, accreleus/quasar#1317 and #1318, additive; number taken at landing)* **WebTransport display cushion
+  and audio dropouts.** A WebTransport client may hold decoded video frames for a **display cushion** that follows
+  its measured frame-arrival jitter: `playout_target_ms` carries the cushion in force (it was always `0` on that
+  transport; it stays `0` on a clean link and never exceeds three frame intervals or 50 ms), and the new
+  **`wt_arrival_jitter_ms`** carries the smoothed arrival jitter behind it. Two keys report audio dropouts on **both**
+  transports, cumulative for the page view, absent until audio has been measured: **`audio_concealed_samples`**
+  (sample frames played that the stream did not supply; 48000 is one second) and **`audio_concealment_events`**
+  (separate dropouts). WebRTC posts the browser's `inbound-rtp` `concealedSamples` and `concealmentEvents`;
+  WebTransport posts silence played for want of audio plus the fade that replaces a lost packet, and counts one
+  event per gap: a run of silence, or a lost packet's fade with any silence after it, however many packets were lost
+  in a row. A client that predates the keys omits them; an ingest that predates them drops them as unknown.
 - *(UI-P6, additive)* `codec_mime_type` is an optional per-sample **string** carrying the
   `getStats()` codec `mimeType` the receiver is actually decoding. It is a sibling of the numeric
   `metrics` object, not a key inside it. The server normalises it to the wire codec vocabulary and
