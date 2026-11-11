@@ -329,10 +329,14 @@ Receiver feedback for congestion control, sent every 50 ms (20–100 ms) while d
   interval the message covers, for the agent's logs and metrics.
 
 The agent keeps the send time of every `pkt_seq` and estimates the available rate from the delay
-and loss pattern, together with the QUIC connection's own congestion state. The estimate feeds the
+and loss pattern and the QUIC connection's RTT. The estimate feeds the
 session's existing ABR (bitrate, then rung, `smooth` mode); there is no second bitrate controller.
 *(Amendment 55, accreleus/quasar#1050.)* Except while PyroWave is active: its per-session rate
 controller then acts in place of the ABR (`codec-pyrowave.md` §Rate).
+While the estimate governs the encoder, the agent may size the QUIC congestion window from it
+instead of from QUIC's loss response *(erratum, accreleus/quasar#1330: the text said the estimate
+used the connection's congestion state; QUIC's loss response read jitter and reordering as
+congestion)*.
 An agent may ignore `feedback`, and a client may omit it; the stream then follows QUIC congestion
 control alone.
 
