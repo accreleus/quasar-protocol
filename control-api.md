@@ -6235,8 +6235,9 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
   transports, cumulative for the page view, absent until audio has been measured: **`audio_concealed_samples`**
   (sample frames played that the stream did not supply; 48000 is one second) and **`audio_concealment_events`**
   (separate dropouts). WebRTC posts the browser's `inbound-rtp` `concealedSamples` and `concealmentEvents`;
-  WebTransport posts silence played for want of audio plus the fade that replaces a lost packet, and counts a run of
-  silence as one event. A client that predates the keys omits them; an ingest that predates them drops them as unknown.
+  WebTransport posts silence played for want of audio plus the fade that replaces a lost packet, and counts one
+  event per gap: a run of silence, or a lost packet's fade with any silence after it, however many packets were lost
+  in a row. A client that predates the keys omits them; an ingest that predates them drops them as unknown.
 - *(UI-P6, additive)* `codec_mime_type` is an optional per-sample **string** carrying the
   `getStats()` codec `mimeType` the receiver is actually decoding. It is a sibling of the numeric
   `metrics` object, not a key inside it. The server normalises it to the wire codec vocabulary and
