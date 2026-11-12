@@ -157,6 +157,7 @@ Two QUIC primitives:
    | `0x03` | input | client → agent |
    | `0x04` | FEC repair | agent → client |
    | `0x05` | microphone | client → agent |
+   | `0x06` | audio redundancy | agent → client |
 
    A receiver drops a datagram on a channel it does not know.
 
@@ -180,9 +181,9 @@ any interval measured from it; the
 client maps it to its own clock with the control-stream `ping`/`pong` offset (§Ping and pong), which
 is what the deep glass-to-glass trace needs.
 
-**`pkt_seq`.** Every agent → client datagram (video, audio, FEC) carries a u32 `pkt_seq`, one
-counter for the whole connection, +1 per datagram sent, retransmissions included. It is what
-receiver feedback reports on (§Feedback).
+**`pkt_seq`.** Every agent → client datagram (video, audio, audio redundancy, FEC) carries a u32
+`pkt_seq`, one counter for the whole connection, +1 per datagram sent, retransmissions included.
+It is what receiver feedback reports on (§Feedback).
 
 **Wrap-around.** `pkt_seq` (u32), `frame_seq` and every other sequence number here wrap, and are
 compared with modulo (serial-number) arithmetic: `a` is after `b` when `(a − b) mod 2ⁿ` is
@@ -223,6 +224,10 @@ The client sends nothing but `hello` (and then waits) until it receives `hello_a
   `control-api.md`).
 - `session_id`: a cross-check; a token for another session is `auth_failed`.
 - `fec`: the FEC schemes the client can decode (§FEC). Absent or `[]`: the agent sends no FEC.
+- `audio_red` *(amendment 67, optional)*: `true` when this client takes channel `0x06`, the repeat
+  of the previous audio packet (§Audio redundancy). Absent or `false`: the agent sends none.
+  An older client must leave it out: it would drop the channel as unknown and then report its
+  `pkt_seq` as lost.
 - `pyrowave` *(amendment 55, optional)*: `true` when this client can decode PyroWave on this
   connection (`codec-pyrowave.md`). Absent: never PyroWave.
 
@@ -265,6 +270,9 @@ The agent replies `hello_ack`, or `error` then closes:
 - `mic`: present only when the session was granted a microphone (`session_assign.stream.mic`);
   `null` otherwise, and the agent drops channel `0x05`.
 - `fec`: the scheme the agent will send, one of the client's `hello.fec`, or `null`.
+- `audio.redundancy` *(amendment 67, optional)*: present, `1`, only when the agent will send channel
+  `0x06` (the client's `hello.audio_red` was `true`): the number of earlier audio packets each
+  audio datagram repeats. `1` is the only value defined.
 - `retransmit_window_ms`: how long the agent keeps video datagrams for retransmission (§NACK).
 
 **`config_id` and a new description.** `config_id` (0–255) names the decoder configuration in
@@ -435,6 +443,36 @@ One Opus packet per datagram, 10 ms (`hello_ack.audio`).
 
 Audio is never retransmitted; a lost packet is concealed (Opus PLC or silence). `capture_us` on
 both channels is what keeps audio and video in sync.
+
+## Audio redundancy (`0x06`, agent → client)
+
+*(Amendment 67, accreleus/quasar#1346.)* Sent only when the client's `hello.audio_red` was `true`
+(§Hello) and `hello_ack.audio.redundancy` names it (§Hello ack). The same layout as `0x02` with
+channel byte `0x06`, carrying one audio packet a second time, so a lost or late packet is already
+there with the next one:
+
+```
+0      u8   channel     0x06
+1      u32  pkt_seq
+5      u16  packet_seq
+7      u32  ts_48khz
+11     u64  capture_us
+19     ...  Opus packet
+```
+
+`packet_seq`, `ts_48khz`, `capture_us` and the Opus packet are the repeated packet's, unchanged;
+`pkt_seq` is the datagram's own, as for every agent → client datagram (§Channels). For each audio
+packet N the agent sends, it sends one `0x06` datagram repeating packet N − 1 **immediately before**
+N's `0x02` datagram. It sends none before the first packet, and none across a pause: nothing when
+N − 1 began more than 100 ms before N did (`capture_us`).
+
+The client treats a `0x06` datagram exactly as the audio packet it repeats, and drops a copy of a
+packet it has already taken — so a copy that arrives after the datagram it repeats, or after the
+packet has played, is dropped. A packet whose original was lost is played from its copy, with no
+concealment. Audio is still never retransmitted on request.
+
+**Cost.** Audio bitrate roughly doubles (a few hundred kbit/s at most). The copies are not counted
+against the video bitrate ceiling: they are not in the estimate the ABR is fed (§Feedback).
 
 ## Input (`0x03`, client → agent)
 
