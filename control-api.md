@@ -6242,8 +6242,9 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
   keys let a WebTransport session's audio dropouts be read apart, absent until that client's audio has played and
   never posted by a WebRTC session. **`wt_audio_buffer_ms`** is the least audio queued in its playout ring at a
   quantum since the previous sample, in ms of audio: `0` means the ring ran empty and played silence, a value at
-  **`wt_audio_target_ms`** (the depth it aims for: its base target plus the jitter allowance it measures from audio
-  packet arrival) means it was never in danger. **`wt_audio_underruns`** is cumulative for the page view: the times
+  **`wt_audio_target_ms`** (the depth it aims for: the larger of its base target, what the output device and posting
+  need, and the jitter allowance it measures from audio packet arrival, capped at 150 ms) means it was never in
+  danger. **`wt_audio_underruns`** is cumulative for the page view: the times
   the ring ran empty and played silence, however long each run lasted. It is the silence-run half of
   `audio_concealment_events`, so that count minus this one is the dropouts a lost packet's fade caused: events
   rising with underruns flat is packet loss, underruns rising is the buffer running dry. A client that predates the
