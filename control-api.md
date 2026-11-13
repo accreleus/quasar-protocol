@@ -3891,7 +3891,9 @@ The session `stream` block gains:
   `PATCH /v1/sessions/{id}/display`, filtered to the launch profile's aspect-ratio family and to
   sizes `≤` the launch size (the launch size is always one of the listed pairs). The fixed rung
   table, by family:
-  - **16:9** — 3840x2160, 2560x1440, 1920x1080, 1600x900, 1280x720
+  - **16:9** — 3840x2160, 2560x1440, 1920x1080, 1600x900, 1280x720, 960x540, 640x360
+    *(Amendment 70, accreleus/quasar#1397, approved by the lead as additive 2026-11-14: the two
+    sizes under 720p, so the resolution ladder can go below it where the link needs it.)*
   - **16:10** — 2560x1600, 1920x1200, 1680x1050, 1440x900, 1280x800
   - **21:9** — 3440x1440, 2560x1080
   - **4:3** — 1600x1200, 1280x960, 1024x768
@@ -4037,7 +4039,7 @@ banner at the top of this document. Owner-or-admin (same rule as `DELETE`/`swap`
     "id": "<uuid>", "app_id": "<uuid>",
     "state": "running", "state_detail": "running", "error_message": null,
     "stream": { "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 15000, "h264_profile": "main",
-                "external_resize_supported": true, "rungs": [[1920,1080],[1600,900],[1280,720]] },
+                "external_resize_supported": true, "rungs": [[1920,1080],[1600,900],[1280,720],[960,540],[640,360]] },
     "created_at": "...", "started_at": "...", "ended_at": null
   } }
 ```
