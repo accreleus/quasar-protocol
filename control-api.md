@@ -6238,6 +6238,17 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
   WebTransport posts silence played for want of audio plus the fade that replaces a lost packet, and counts one
   event per gap: a run of silence, or a lost packet's fade with any silence after it, however many packets were lost
   in a row. A client that predates the keys omits them; an ingest that predates them drops them as unknown.
+- *(Amendment 68, accreleus/quasar#1346, additive; number taken at landing)* **WebTransport audio buffer.** Three
+  keys let a WebTransport session's audio dropouts be read apart, absent until that client's audio has played and
+  never posted by a WebRTC session. **`wt_audio_buffer_ms`** is the least audio queued in its playout ring at a
+  quantum since the previous sample, in ms of audio: `0` means the ring ran empty and played silence, a value at
+  **`wt_audio_target_ms`** (the depth it aims for: the larger of its base target, what the output device and posting
+  need, and the jitter allowance it measures from audio packet arrival, capped at 150 ms) means it was never in
+  danger. **`wt_audio_underruns`** is cumulative for the page view: the times
+  the ring ran empty and played silence, however long each run lasted. It is the silence-run half of
+  `audio_concealment_events`, so that count minus this one is the dropouts a lost packet's fade caused: events
+  rising with underruns flat is packet loss, underruns rising is the buffer running dry. A client that predates the
+  keys omits them; an ingest that predates them drops them as unknown.
 - *(UI-P6, additive)* `codec_mime_type` is an optional per-sample **string** carrying the
   `getStats()` codec `mimeType` the receiver is actually decoding. It is a sibling of the numeric
   `metrics` object, not a key inside it. The server normalises it to the wire codec vocabulary and
