@@ -6143,6 +6143,10 @@ when its agent reconnects. A forgotten host that later re-enrolls comes back as 
   for GC (the backing store died with the host). FK policy in `schema.md` (migration `0014`).
 - **Errors:** `404 not_found` (no such host); `409 conflict` (host is online, or still holds a
   non-terminal session). The body distinguishes the two.
+  *(Amendment 69, accreleus/quasar#1288, approved by the lead as additive 2026-11-14.)*
+  `409 host_not_removable`: the host's agent is the one on the control plane's own machine, the
+  same refusal `POST /v1/admin/platform/hosts/{id}/remove` makes; the host row is kept. The
+  refusal is server-side whatever the client shows.
 
 ---
 
