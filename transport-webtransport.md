@@ -161,6 +161,11 @@ Two QUIC primitives:
 
    A receiver drops a datagram on a channel it does not know.
 
+   *(Amendment 74, accreleus/quasar#1333, 2026-11-14.)* `0x00` is reserved, agent → client: a
+   one-byte datagram the agent may send to probe a stalled path. It carries no `pkt_seq`, is not
+   counted in §Feedback, is never assigned to a channel, and a receiver drops it. A datagram is
+   never empty: Chrome hands a page no further datagram on a connection after an empty one.
+
 Every multi-byte binary field is little-endian.
 
 **Datagram size.** The agent sizes every datagram so that its QUIC packet fits a **1200-byte UDP
