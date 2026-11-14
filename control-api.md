@@ -4289,6 +4289,11 @@ own launch give-up time, and fall back to WebRTC when it passes, when `hello` is
 lost and a fresh transport token does not restore it. A client that was displaced (close `4410`,
 `bye {reason: "taken_over"}`) does not fall back: it stops.
 
+*(Amendment 76, accreleus/quasar#1330, 2026-11-15.)* A client MAY also fall back without a fresh
+token when a fresh connection on the same path would be lost the same way, as when the path
+reorders and the client gives up frames for several seconds running. It reports that fallback
+as `stream_lost`.
+
 **Close first.** A client that falls back closes its WebTransport session before it opens
 signaling, and sends no WebTransport `hello` for the session after that, so a late `hello` of its
 own cannot take over its WebRTC peer (`transport-webtransport.md` §Falling back to WebRTC).
