@@ -304,9 +304,10 @@ frame (`maximum_bitstream_size`), and the frame lands within it.
   above it. `feedback` is the client's report and is not trusted to grant rate; the cap is the
   transport's own state, which the client cannot inflate.
   *(Amendment 72, accreleus/quasar#1058, proposed 2026-11-14:)* The cap counts while QUIC
-  limits the sender: more than a congestion window waits on it at two judgements in a row, at
-  least 100 ms apart, whatever the encoder gives; or it has reported congestion since the agent
-  last judged the estimate and the encoder fills the budget it was given. An
+  limits the sender: more than a congestion window waits on it at every judgement for at least
+  100 ms (two judgements in a row on the agent's 100 ms tick), whatever the encoder gives; or it
+  has reported congestion since the agent last judged the estimate and the encoder fills the
+  budget it was given. An
   application-limited sender's window measures what it sent, not what the link carries, and is
   not a cap. Once a waiting queue has put the capped estimate under `floor_kbps`, the cap stays
   in force until the capped estimate is back at or over the floor or the encoder stops filling
