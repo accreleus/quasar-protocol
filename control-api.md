@@ -1057,7 +1057,7 @@ bodies mirror its rows and **session states**) and `signaling.md` (the launch re
   `host_not_ready` (503, *amendment 11, #260* — a host/GPU that could otherwise serve the request
   is online, and the **only** reason none qualified is a failing evidence-based readiness check;
   the remedy is the host's admin, not the caller),
-  `internal` (500). **Retryable:** `no_host_available` *(not one with `reason: home_host_unavailable`, amendment 40)*, `capacity_exhausted`, `host_not_ready`, `rate_limited`
+  `internal` (500). **Retryable:** `no_host_available` *(not one with `reason: home_host_unavailable`, amendment 40, and not one a swap answers, amendment 71)*, `capacity_exhausted`, `host_not_ready`, `rate_limited`
   (and `session_quota_exceeded` / `home_in_use` once one of the caller's sessions ends).
   **`home_not_provisioned` is NOT retryable** — retrying reproduces it forever. It is resolved by
   a user *action* (launch the parent app once, so its home exists), which is why the message names
@@ -3705,6 +3705,9 @@ compatibility tool the launched game's per-game mapping names (§Compatibility t
 "Placement"). Every enabled tool installs on every host, so it clears without an admin once a host
 has installed it. If that host's install failed, it clears only when the failed hold is released
 (§Compatibility tools, "The first difference").
+*(Amendment 71, accreleus/quasar#1178.)* On `POST /v1/sessions/{id}/swap` the same `reason` means
+the target game's mapped GE tool is not among the tools the session mounted at launch; the message
+says to launch the game on its own, and a retry changes nothing.
 
 *(Amendment 59, accreleus/quasar#1133.)* `reason` is also `steam_restarting` on every
 `503 capacity_exhausted` a launch gets while the caller's parked session is stopping (a claim that
@@ -3997,6 +4000,12 @@ interpipe boundary while encode + `webrtcbin` stay up, so the browser stream nev
     `running`, or a swap is already in progress (`state_detail = "swapping"`).
   - `404 not_found` — no such app, or the app is disabled (same visibility rule as `GET /v1/apps/{id}`).
   - `409 swap_exceeds_reservation` — as above.
+  - `503 no_host_available` *(Amendment 71, accreleus/quasar#1178; the first arm is how the
+    endpoint already answers)* — the session's host cannot take the target: the app is not selected
+    for that host (§App placement), or, with `reason: "compat_tool_missing"`, the target is a
+    derived Steam game whose per-game mapping names a GE tool that this session did not mount at
+    launch (§Compatibility tools, "Placement"). Neither is retryable: a swap does not move hosts
+    and does not wait for an install.
   - `403 forbidden` — caller is neither owner nor admin; `404 not_found` — no such session.
   - **`403 forbidden` — the session's OWNER is not entitled to the target app** *(Steam library
     discovery Phase 2 — a **new terminal condition** on this endpoint; the status code itself
@@ -5373,6 +5382,17 @@ error clears only when that failed hold is released (§Install job, "The first d
 Valve tool never constrains placement, and neither does the fleet default (a GE default missing
 on a host falls back to Steam's own default there, because the payload leaves it out). A launch of
 the Steam parent app itself (or a parked start) names no game and has no tool constraint.
+
+*(Amendment 71, accreleus/quasar#1178.)* **A swap** into a derived Steam game whose per-game
+mapping names a GE tool is admitted only if that tool's `steam_name` is in the session's
+`compat_tool_names`, the tools it mounted at launch. A swap sends no compat block and the agent
+carries the running session's launch-time table into the target, so the host's install state now
+decides nothing: a tool installed after the session started does not apply to it, and a tool the
+session mounted keeps working if the host's report later drops it. A session with no recorded
+names mounts nothing. Otherwise the swap is `503 no_host_available` with
+`reason: "compat_tool_missing"`, before any claim, hold or write, and never waits. It is checked
+after the swap's reservation, entitlement and placement checks, so a target that fails those
+reports their reason. A tool that is not usable (§Usable) reads as disabled or marked in the message.
 
 **What the session receives.** At every `session_assign` of a Steam-family app (the enabled app
 with `library_provider = "steam"` and the tiles derived from it, parked sessions included) to a
