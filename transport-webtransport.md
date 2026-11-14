@@ -526,6 +526,19 @@ from that buffer.
    The repeat NACK and the late rule (3) count from when the first NACK is sent. A fragment
    rebuilt before its NACK is never NACKed, and so is not in the client's count of fragments
    found missing (`control-api.md` stats, `packets_lost`).
+5. **Reordering.** *(Amendment 73, accreleus/quasar#1330, proposed 2026-11-14.)* A client MAY
+   measure how late reordered datagrams arrive (from a later `pkt_seq` arriving to an earlier one
+   arriving) and, while recent measurements show the path reordering (not one late datagram),
+   hold a gap that long before it reports the gap in feedback or sends its first NACK (rule 2),
+   whether or not a fragment of a later frame has arrived. The hold is at most 150 ms, and no
+   longer than `retransmit_window_ms` less one frame interval and one round trip, so a held NACK
+   still finds the fragment in the agent's buffer; until the client knows both `retransmit_window_ms`
+   (from `hello_ack`) and the round trip, it holds nothing. The repeat NACK and the late rule (3) then
+   each wait that much longer. A gap wider than reordering could open (more datagrams than arrive
+   in the longest hold allowed, at the current rate) is an outage, and feedback reports it without
+   this hold. A client that sees no reordering holds nothing beyond rule 4. Feedback still reports
+   every `pkt_seq` before a held gap on the cadence of §Feedback; a message whose range would
+   start at the held gap waits for it, so one may come up to the hold later than that cadence.
 
 `keyframe_request {reason: "loss"}` remains for a client that does no NACK at all.
 
