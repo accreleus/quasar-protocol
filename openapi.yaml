@@ -1907,6 +1907,13 @@ paths:
             session's host - or parent_app_disabled. RH05 home_conflict takes
             precedence for a conflicting claim or known tombstone.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "503":
+          description: >-
+            no_host_available (amendment 71, accreleus/quasar#1178) - the app is not selected for the
+            session's host, or, with error.reason compat_tool_missing, the target is a derived Steam
+            game whose mapped GE tool the session did not mount at launch. NOT retryable: a swap does
+            not move hosts or wait for an install.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /v1/sessions/{id}/display:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     patch:
