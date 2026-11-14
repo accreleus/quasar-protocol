@@ -9346,7 +9346,7 @@ components:
         encode_ms_p95: { type: number }
         encode_ms_max: { type: number }
         overlay_frames: { type: integer }
-        abr_floor_kbps: { type: number, description: "The governor's live floor, sent ONLY when the ladder has moved it off the launch floor. Absent means 'the floor the session launched with', never 'unknown'. Uncurated: readable via GET .../metrics, not in the diagnostic lens." }
+        abr_floor_kbps: { type: number, description: "The governor's live floor, sent ONLY when the ladder has moved it off the launch floor. Absent means 'the floor the session launched with', never 'unknown'. Stream health judges the setpoint against it when present (amendment 75). Uncurated: readable via GET .../metrics, not in the diagnostic lens." }
         abr_mode: { type: string, description: "The ABR mode this session is actually running ('smooth' | 'protective' | 'off'). Reported rather than inferred: deriving it from setpoint presence was wrong for 'off', where rtpgccbwe stays attached. Uncurated (a label, not a series)." }
         abr_setpoint_kbps: { type: number, description: "The in-session ABR governor's CURRENT CBR setpoint at drain time — a level, not a window average. Absent when ABR is disarmed." }
         adaptation_state: { type: string, description: "The agent's own per-window bottleneck label ('healthy' | 'network_congested' | 'encoder_saturated' | 'unknown'). SIGNAL-ONLY — it changes no ABR behaviour, and it can never say 'client_presentation_limited' because the agent never sees browser data (invariant #1)." }

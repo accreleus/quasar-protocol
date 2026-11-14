@@ -1450,9 +1450,12 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   omit-when-default convention as `ladder_fps` above. The companion to
   `abr_setpoint_kbps`: without it a consumer cannot tell a setpoint that was *chosen* from
   one that is *pinned at the floor*, because since the floor-follows-rung amendment the
-  floor is not a session constant. Signal-only for the control plane — nothing server-side
-  reacts to it; it is stored verbatim into the metrics JSONB for the diagnostic bundle and
-  soak reports.
+  floor is not a session constant. *(Amendment 75, accreleus/quasar#1375, 2026-11-14.)* The
+  control plane's stream-health evaluation (AS10-06) judges `abr_setpoint_kbps` against this
+  floor when a sample carries it, and against the resolved rung's `abr_floor_kbps`
+  (`sessions.stream_profile_id`) when it is absent; a change of this floor between samples
+  restarts the below-floor clock. It is also stored verbatim into the metrics JSONB for the
+  diagnostic bundle and soak reports.
 - **(approved 2026-08-19) host-stage latency probe keys** — eleven optional numeric
   fields, emitted only while the node-agent's host-stage latency probe is enabled
   (`QUASAR_LATENCY_PROBE=1`, or the `latency_probe` host setting — Live class). All
