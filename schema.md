@@ -3228,6 +3228,9 @@ finally impossible, or `uncertain`. An `uncertain` attempt is terminal for
 retry accounting but keeps a protective admission restriction until resolved.
 *(Amendment 51, #656, migration 0109.)* `release_requested_at TIMESTAMPTZ NULL`
 records an administrator's release of an `uncertain` attempt; it lifts nothing.
+*(Amendment 86, accreleus/quasar#968.)* It also records the release of an `applied` attempt's
+`recovery` restriction (an `applied` replay without its verified active snapshot), which the
+control plane deletes in the same transaction; such an attempt stays `applied`.
 `released` is the only phase an attempt leaves `uncertain` for, written when the
 agent reports it (live or in a complete inventory); `terminal_at` keeps its
 `uncertain` time. A requested release that is still `uncertain` is sent again on

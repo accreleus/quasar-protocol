@@ -3927,6 +3927,13 @@ agent as `config_policy_release` below and returns as the one later entry the
 control plane accepts, `released`. The control plane never clears the hold on
 its own or by elapsed time.
 
+*(Amendment 86, accreleus/quasar#968.)* An `applied` entry in an inventory whose active snapshot
+for the group is not `verified` with the entry's digest is not a safe terminal outcome for
+admission: the control plane keeps the attempt's hold as a `recovery` hold, which only that same
+explicit repair ends (or a later inventory that carries the proof). The control plane ends it on
+its own side and never sends `config_policy_release` for an `applied` attempt; the agent changes
+nothing.
+
 #### Releasing an uncertain restart record (amendment 51, #656)
 
 ```json

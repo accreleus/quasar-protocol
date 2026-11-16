@@ -11763,6 +11763,27 @@ report `released`, as it is trusted for every other phase of its own journal;
 The release sends nothing else to the agent and changes nothing on the host
 machine.
 
+*(Amendment 86, accreleus/quasar#968, 2026-11-16.)* **An `applied` attempt without its proof.**
+A complete journal inventory that replays an `applied` restart attempt releases its admission
+hold only when the inventory's active snapshot for the group is `verified` with the attempt's
+digest: a historical result proves nothing about what runs now. When it keeps the hold, the
+control plane converts that attempt's `idle_apply` row to `recovery`
+(`configuration_recovery`) in the same transaction, so this route can end it. It converts an
+existing row only and never inserts one. A later complete inventory that carries the matching
+verified snapshot still deletes it. A live `applied` report on the current connection is itself
+that verification and releases the hold as before.
+
+For an attempt that is `applied` and holds a `recovery` restriction, this route accepts the same
+body. The agent takes no part: its journal holds a final `applied` record, which holds nothing.
+In one transaction the control plane records the request (`release_requested_at`), writes the
+audit event as above for the first request, deletes the attempt's `recovery` restriction, and
+does steps 3 and 4 above. The attempt stays `applied` and its setting group is unchanged. It
+answers `200` with the attempt, its `recovery_release`
+`{"state":"released","requested_at":<time>,"waiting_for":null}`; a repeated request answers the
+same and writes nothing. An `applied` attempt with neither a `recovery` restriction nor a
+recorded release is still `409 attempt_not_uncertain`. Nothing is sent to the agent, so this
+works with an agent of any version.
+
 ### Active admission reasons on the existing Host response
 
 `Host.admission_restrictions` is an always-present array on existing Host
