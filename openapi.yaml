@@ -5342,6 +5342,26 @@ components:
             when the app in the session picks another mode in its own display settings;
             width/height/fps stay the launch mode. In-memory cache, dropped on a control-plane
             restart like external_width. Read-only.
+        render_width:
+          type: integer
+          description: >-
+            Amendment 84 (accreleus/quasar#996), additive. The session's current RENDER width
+            (the app-facing mode inside the compositor, set by PATCH /v1/sessions/{id}/display
+            render_width) on session.stream; absent on an app's display_stream. Same presence
+            rule as external_width: present whenever the control plane knows it, including at
+            the pinned stream width; ABSENT MEANS UNKNOWN. Known from a 202 of that PATCH or a
+            display-aware session_metrics sample (one with external_resize_supported), where an
+            absent render_width means the pinned stream width (stream.width). In-memory cache, lost on a
+            control-plane restart. Read-only.
+        render_height:
+          type: integer
+          description: "Amendment 84. Pairs with render_width; see its description."
+        ui_scale:
+          type: number
+          description: >-
+            Amendment 84. The session's current UI scale (PATCH /v1/sessions/{id}/display
+            ui_scale). Same presence rule and cache as render_width; a display-aware sample
+            without ui_scale means 1.0. Read-only.
         rungs:
           type: array
           description: >-
@@ -9443,7 +9463,7 @@ components:
         probe_pts_unmatched: { type: integer, description: "Encoder-input PTS that never matched a compositor-emit ring entry — the correlation key stopped surviving to the encoder. Probe-gated." }
         probe_send_desyncs: { type: integer, description: "Encoder-src entries dropped from the S3 pairing for exceeding one frame period of age — the count that says enc_out_to_send's tail is truncated rather than clean. Probe-gated." }
         render_height: { type: integer, description: "The compositor's CURRENT app-facing wl_output logical height; see render_width." }
-        render_width: { type: integer, description: "The compositor's CURRENT app-facing wl_output logical width. Present only when it differs from the session's pinned stream size. With render_height and ui_scale this is the ONLY authoritative readback of live render resolution — the value lives nowhere else." }
+        render_width: { type: integer, description: "The compositor's CURRENT app-facing wl_output logical width. Present only when it differs from the session's pinned stream size. With render_height and ui_scale this is the ONLY authoritative readback of live render resolution; the Session resource carries a cached copy (Session.stream.render_width, amendment 84)." }
         rtp_bitrate_kbps: { type: number, description: "RTP packet bitrate before WebRTC transport overhead (SRTP, RTX, FEC). Always a little above bitrate_kbps; a large gap is retransmission." }
         rtp_fps: { type: number, description: "RTP access units completed per second, counted on marker packets — the last host-side rate before the wire." }
         source_fps: { type: number, description: "New buffers committed by the MAPPED FULLSCREEN app top-level per second. Cursor, popup, subsurface and configure-only commits are excluded, so this is the app's own paint rate, not Wayland traffic." }

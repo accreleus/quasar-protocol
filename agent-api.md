@@ -1394,7 +1394,10 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   authoritative readback of the live render resolution / UI scale** — neither value lives in
   `session_state`, the `Session` resource, or the `sessions` table (both are agent-held,
   ephemeral state); a consumer that wants to know the current render size or UI scale reads the
-  latest `session_metrics` sample, or otherwise trusts its own last-acked value.
+  latest `session_metrics` sample, or otherwise trusts its own last-acked value. *(Amendment 84,
+  accreleus/quasar#996: the control plane caches the last-known values from these samples and
+  serves them on the `Session` resource as `stream.render_width` / `render_height` / `ui_scale`;
+  the samples stay the authority. No wire change here.)*
 - **`stream_width` / `stream_height`** *(optional, session-display-stream, approved 2026-08-16)* — the
   encoder's **current** external/streamed size, present **only when non-default**, i.e. ≠ the
   session's launch size — same omit-when-default convention as `render_width`/`render_height`
