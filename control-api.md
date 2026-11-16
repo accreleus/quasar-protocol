@@ -9802,6 +9802,14 @@ precedence is inserted between those two keys — see §Platform-release beta ch
   is on a build whose schema may be ahead of every tagged release; switching back to `stable`
   therefore shows only stable releases at or above it, which is frequently **none**, and an empty
   `available` is the correct answer rather than an offer to move backwards.
+- **`held_back`** *(amendment 83, accreleus/quasar#1211, 2026-11-16, additive)*: says why
+  `available` is empty when the rule above emptied it. `null`, or
+  `{ "channel", "schema_version", "reason": "schema_below_installed" }` for the newest release
+  the channel selects that `available` omits **only** because its `schema_version` is below the
+  installed control plane's (`channel` and `schema_version` are that release's). `null` whenever
+  `available` is non-empty or no such release was detected. Always serialized by a server
+  implementing this amendment, absent from an older one. It gates nothing and offers nothing: a
+  client may say that a release was held back, never offer to apply it.
 - **A stable release whose manifest is missing or invalid is not listed either** — it cannot be
   applied by digest (ADR 0001), so offering it would be offering something unfollowable. It is
   **not a fault in this view** *(amendment 26, #157, below)*: the detection job counts it in its
@@ -10666,7 +10674,9 @@ the installed control plane does not run: the entries before the one whose `comm
 installed control plane's `source_commit`, or all of them when none does (the installed build is
 a stable release, an edge build, unstamped, or older than the list). `null` on every other
 release. A client shows the first `new_commit_count` entries of `manifest.commits` as the commits
-newer than what is installed. It is derived and served, like `migrates`, so the server and a
+newer than what is installed. *(Amendment 83, accreleus/quasar#1211, 2026-11-16.)* It is `0` when
+the installed control plane is newer than the release by the edge ordering rule: the same
+`schema_version`, and the installed control plane's `built_at` is later than the release's. It is derived and served, like `migrates`, so the server and a
 client cannot disagree about what counts as new.
 
 ### Daily or weekly — `release_check`
