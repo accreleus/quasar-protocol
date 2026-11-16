@@ -8528,6 +8528,24 @@ components:
             runtime_spec: { type: object, additionalProperties: true }
             managed_home: { type: boolean, description: "P5-01: whether this app provisions a per-user managed home directory." }
             home_container_path: { type: string, description: "P5-01: container path where the home is mounted (default /home/quasar)." }
+            effective_managed_home:
+              type: boolean
+              readOnly: true
+              description: >-
+                Amendment 82 (accreleus/quasar#1201): whether a launch of this app gets a managed
+                home now - the managed_home merge of the app's own value and its runtime preset's
+                (for a derived tile, its parent's value and preset), by the launch path's rule (control-api.md
+                Runtime presets, merge rules). Equals managed_home when there is no preset.
+                Always serialized by an amendment-aware server; absent from an older one; ignored
+                on write.
+            effective_home_container_path:
+              type: string
+              readOnly: true
+              description: >-
+                Amendment 82: the container path a launch of this app mounts the home at now, by
+                the same merge (an app still on the schema default takes the preset's path).
+                Equals home_container_path when there is no preset. Same presence rule as
+                effective_managed_home.
             share_steam_library:
               type: boolean
               description: >-
