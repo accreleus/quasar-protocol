@@ -1524,10 +1524,18 @@ paths:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     get:
       tags: [hosts]
-      summary: A single host (admin).
+      summary: A single host (admin; response is wrapped in {host}, amendment 77).
       x-required-role: admin
       responses:
-        "200": { description: OK. , content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [host]
+                properties:
+                  host: { $ref: "#/components/schemas/Host" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -1545,10 +1553,18 @@ paths:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
       tags: [hosts]
-      summary: Cordon a host out of service.
+      summary: Cordon a host out of service (response is wrapped in {host}, amendment 77).
       x-required-role: admin
       responses:
-        "200": { description: Draining. , content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "200":
+          description: Draining.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [host]
+                properties:
+                  host: { $ref: "#/components/schemas/Host" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -1556,10 +1572,18 @@ paths:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
       tags: [hosts]
-      summary: Return a host to service.
+      summary: Return a host to service (response is wrapped in {host}, amendment 77).
       x-required-role: admin
       responses:
-        "200": { description: In service. , content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "200":
+          description: In service.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [host]
+                properties:
+                  host: { $ref: "#/components/schemas/Host" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -2034,7 +2058,15 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/AdminUserUpdate" } } }
       responses:
-        "200": { description: Updated. , content: { application/json: { schema: { $ref: "#/components/schemas/AdminUser" } } } }
+        "200":
+          description: Updated (wrapped in {user}, amendment 77).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/AdminUser" }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }

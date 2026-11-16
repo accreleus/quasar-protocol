@@ -6040,6 +6040,12 @@ the admin oversight surface. P3-01 adds the two **lifecycle** operations an oper
 host out of service for maintenance and bring it back. Both are **admin-only** (a valid non-admin
 bearer is `403`, before any host lookup, per §Authorization) and both return the updated host body.
 
+*(Amendment 77, accreleus/quasar#1293, 2026-11-16, erratum.)* `GET /v1/hosts/{id}` answers
+`{ "host": { ... } }`, the same envelope as the drain and uncordon bodies below, never a bare
+host. `PATCH /v1/users/{id}` likewise answers `{ "user": { ... } }` (an `AdminUser`). This is what
+the control plane has always sent; `openapi.yaml` declared the bare shapes and now declares the
+envelopes.
+
 > **Amendment — host-observability, additive.** The host body (`GET /v1/hosts`,
 > `GET /v1/hosts/{id}`, and the host list) gains `storage` — the agent-reported storage
 > volumes from its latest `capacity` report (`agent-api.md` `host.storage`): an array of
