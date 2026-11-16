@@ -8542,8 +8542,8 @@ components:
               type: string
               readOnly: true
               description: >-
-                Amendment 82: the container path a launch of this app mounts the home at now, by
-                the same merge (an app still on the schema default takes the preset's path).
+                Amendment 82: the container path a managed home of this app would be mounted at
+                now (nothing is mounted while effective_managed_home is false), by the same merge (an app still on the schema default takes the preset's path).
                 Equals home_container_path when there is no preset. Same presence rule as
                 effective_managed_home.
             share_steam_library:

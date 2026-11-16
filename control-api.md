@@ -2800,6 +2800,11 @@ the launch path uses, from the app's own values and its runtime preset's (for a 
 its parent's values and preset). With no preset they equal the stored values. `managed_home` and
 `home_container_path` keep their meaning, the app's own stored columns. Both new fields are
 always serialized by an amendment-aware server, absent from an older one, and ignored on write.
+`effective_home_container_path` is where a managed home would be mounted; when
+`effective_managed_home` is false nothing is mounted there. Known under-declaration:
+`openapi.yaml` still declares the admin branch of `GET /v1/apps/{id}` and the create and PATCH
+answers as `{ app: App }`, though an admin receives the `AdminApp` shape there, these fields included. A
+generated client reads them from `AdminApp`.
 
 ---
 
