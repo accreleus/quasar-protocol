@@ -4232,6 +4232,15 @@ says which failed first:
 | the placed host's WebTransport endpoint is usable (§WebTransport endpoint) | `host_no_endpoint` |
 | the launching device's fresh probe has `webtransport.available` and `webtransport.datagrams` true | `device_no_webtransport` |
 | the same probe has `webcodecs.<codec>` true for the session's codec (catalog spelling, `hevc`) and `webcodecs.opus_decode` true | `device_no_webcodecs` |
+| *(amendment 78)* the same probe has `webgpu.available` true | `device_no_webgpu` |
+
+*(Amendment 78, accreleus/quasar#1424, 2026-11-16, erratum.)* The client draws every WebTransport
+frame with WebGPU, so a browser without a usable adapter fell back to WebRTC on every launch
+(`transport_fallback_reason: "decoder_unsupported"`). The fourth check plans it onto WebRTC from the start.
+It reads the existing key with its existing meaning: `available` is true only for a hardware
+adapter, so a browser with only a software adapter (`isFallbackAdapter`) is planned onto WebRTC
+too. A probe without the `webgpu` key fails this check. The check runs last, so a session that
+fails an earlier one keeps that reason.
 
 A probe is fresh under the same rule as the codec clamp (§Codec resolution). Placement does not
 look at transport: a host without an endpoint is never avoided, it yields `webrtc`. A console
@@ -4399,7 +4408,8 @@ optional objects. The column is schema-free, so nothing else changes:
 `webcodecs` keys use the catalog codec spelling, like `codecs`; a key is `true` only when the
 client proved `isConfigSupported` for the configuration it would use. `webgpu` is stored for the
 presenter and for PyroWave and decides nothing in this amendment. *(Amendment 55:
-`webgpu.available` gates PyroWave, §Ultra-low latency (PyroWave).)* A native client reports the
+`webgpu.available` gates PyroWave, §Ultra-low latency (PyroWave).)* *(Amendment 78: it also gates
+WebTransport, §`POST /v1/sessions` — `transport`.)* A native client reports the
 same keys (`native-client.md` additive superset).
 
 ## Ultra-low latency (PyroWave) *(Amendment 55, accreleus/quasar#1050, pre-approved by the owner 2026-11-06; revised by amendment 58, accreleus/quasar#1059, pre-approved by the owner 2026-11-07)*
