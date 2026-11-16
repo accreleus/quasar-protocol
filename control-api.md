@@ -6282,9 +6282,11 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
   keys omits them; an ingest that predates them drops them as unknown.
 - *(Amendment 85, accreleus/quasar#1302, additive, 2026-11-16)* **WebTransport FEC repairs.**
   **`wt_fec_repaired`** is cumulative for the page view: the video fragments a WebTransport
-  client rebuilt from FEC repair datagrams (`transport-webtransport.md` §FEC). A rebuilt fragment
-  is never NACKed, so it is not in `packets_lost`: on that transport `packets_lost` is the loss
-  FEC did not repair, and `packets_lost` + `wt_fec_repaired` is the loss on the path. Posted only
+  client rebuilt from FEC repair datagrams (`transport-webtransport.md` §FEC). It is accumulated
+  like `packets_lost`: each connection's own count is added to the page's total, so a reconnect
+  never resets it. Both keys count video **fragments**, not packets. A rebuilt fragment is never
+  NACKed, so it is not in `packets_lost`: on that transport `packets_lost` is the fragments FEC
+  did not repair, and `packets_lost` + `wt_fec_repaired` is the fragments the path lost. Posted only
   while the connection's `hello_ack.fec` names a scheme; never posted by a WebRTC session. Its
   agent-side companions are `session_metrics.wt_fec_overhead_pct` and `wt_fec_kbps`
   (`agent-api.md`). A client that predates the key omits it; an ingest that predates it drops
