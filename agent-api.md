@@ -1577,6 +1577,21 @@ copy leaves a stale or absent record that reads as the opposite of what happened
 - **Authority: none.** Like every other `session_trace_event`, these are observability. No
   session state, scheduling decision, ABR action or admission choice may key on them.
 
+**`transport.rtp_mtu_shrunk` (amendment 81, accreleus/quasar#1152, 2026-11-16).**
+> *Additive: one new `event` value on this message. No existing field or event changes. An older
+> control plane stores it like any other event (`trace-format.md` §3.1).*
+
+Emitted on the **diagnostics lane** (droppable, like `abr.retarget`) each time a WebRTC session's
+RTP packet size steps down mid-session because the client's path drops full-size packets. A
+session steps at most three times, at least 3 s apart, and never back up.
+
+| `event` | when | payload |
+|---|---|---|
+| `transport.rtp_mtu_shrunk` | each live RTP MTU step | `from` (int, bytes, the size before), `to` (int, bytes, the size after), and the NACK counts of the window that decided the step: `nacked_large`, `lost_large`, `sent_large` (packets within 100 bytes of `from`; `lost_large` counts those NACKed a third time), `nacked_small`, `sent_small` (packets under 900 bytes), all ints |
+
+A dropped copy is visible: the next step's `from` is not the last stored `to`. Authority: none,
+as for every event here.
+
 **`diag.*` — on-demand capture results (session-capture, approved by Michael 2026-08-23).**
 > *Additive amendment to this message. No existing field changes; the addition is a family of
 > `event` values and the handling rules that go with them. An older control plane stores a
