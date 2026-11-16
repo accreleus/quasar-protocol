@@ -2791,6 +2791,21 @@ untouched. **An app with no preset dispatches a `runtime_spec` byte-identical to
 feature existed** — the no-preset path returns the stored JSONB verbatim, without even a
 decode/re-encode round trip.
 
+*(Amendment 82, accreleus/quasar#1201, 2026-11-16, additive.)* The admin app shape (`AdminApp`:
+`GET /v1/admin/apps`, the admin branch of `GET /v1/apps/{id}`, and the app create and PATCH
+answers) gains two read-only fields, the home a launch of the app gets now:
+**`effective_managed_home`** (bool) and **`effective_home_container_path`** (string). They are
+the `managed_home` / `home_container_path` merge above, computed at read time by the same rule
+the launch path uses, from the app's own values and its runtime preset's (for a derived tile,
+its parent's values and preset). With no preset they equal the stored values. `managed_home` and
+`home_container_path` keep their meaning, the app's own stored columns. Both new fields are
+always serialized by an amendment-aware server, absent from an older one, and ignored on write.
+`effective_home_container_path` is where a managed home would be mounted; when
+`effective_managed_home` is false nothing is mounted there. Known under-declaration:
+`openapi.yaml` still declares the admin branch of `GET /v1/apps/{id}` and the create and PATCH
+answers as `{ app: App }`, though an admin receives the `AdminApp` shape there, these fields included. A
+generated client reads them from `AdminApp`.
+
 ---
 
 ## Stream profiles and launch profiles *(UI-P4, admin)*
