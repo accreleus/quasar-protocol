@@ -3669,20 +3669,23 @@ paths:
         the host's configuration is unverified. The request is recorded, audited once and sent
         to the agent as config_policy_release once its journal is reconciled; it lifts nothing.
         The recovery hold, the group's uncertain status and the host's draining status end only
-        when the agent reports the attempt released. Every 4xx writes nothing. Normative
-        behavior: control-api.md section "Releasing a recovery hold".
+        when the agent reports the attempt released. Amendment 86: an applied attempt that
+        holds a recovery restriction (an applied replay without its verified active snapshot)
+        is released by the control plane alone, at once, answering 200; nothing is sent to the
+        agent. Every 4xx writes nothing. Normative behavior: control-api.md section "Releasing
+        a recovery hold".
       x-required-role: admin
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/RecoveryHoldReleaseRequest" } } }
       responses:
-        "200": { description: "Already released; nothing sent.", content: { application/json: { schema: { $ref: "#/components/schemas/IdleApplyAttempt" } } } }
+        "200": { description: "Already released, or (amendment 86) an applied attempt's recovery hold released now; nothing sent.", content: { application/json: { schema: { $ref: "#/components/schemas/IdleApplyAttempt" } } } }
         "202": { description: "Recorded; pending until the agent reports released. recovery_release.waiting_for says what it waits for.", content: { application/json: { schema: { $ref: "#/components/schemas/IdleApplyAttempt" } } } }
         "400": { $ref: "#/components/responses/ValidationFailed", description: "validation_failed: malformed host or attempt ID, or a body other than exactly {\"acknowledge\":\"unverified\"}. No write." }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound", description: "No restart attempt with this ID on this host. No write." }
-        "409": { $ref: "#/components/responses/Conflict", description: "attempt_not_uncertain: the attempt is neither uncertain nor released. No write." }
+        "409": { $ref: "#/components/responses/Conflict", description: "attempt_not_uncertain: the attempt is neither uncertain nor released, nor (amendment 86) applied with a recovery restriction or a recorded release. No write." }
   /v1/admin/hosts/{id}/policy/retry:
     parameters: [ { $ref: "#/components/parameters/PathId" } ]
     post:
