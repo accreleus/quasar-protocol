@@ -1456,6 +1456,20 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   (`sessions.stream_profile_id`) when it is absent; a change of this floor between samples
   restarts the below-floor clock. It is also stored verbatim into the metrics JSONB for the
   diagnostic bundle and soak reports.
+- **`abr_link_rate_kbps`** *(number, optional; amendment 79, accreleus/quasar#1434,
+  2026-11-16)* — the ABR governor's **unclamped link rate** in kbit/s at drain time: what the
+  receiver reports show the link carrying, before the floor clamps it into the setpoint. A level,
+  like `abr_setpoint_kbps`. **Present only while the governor runs its per-report loop** (a
+  WebTransport session in `smooth`); absent otherwise, and from an older agent, meaning "not
+  measured", never zero. When a sample carries it, the control plane's stream-health evaluation
+  judges **this rate** against the floor instead of `abr_setpoint_kbps`, with the same
+  comparison: a sample is below the floor when the value is **at or below** it (the floor being
+  the sample's `abr_floor_kbps`, or the resolved rung's when the sample has none, amendment 75).
+  The setpoint cannot go under the floor, so a session pinned there was always "at or below";
+  the unclamped rate is above the floor whenever the link carries more. So a session held at the
+  lowest rung's floor on a link that carries more is not ended, and one whose link carries the
+  floor or less is ended after the same 3 minutes. A sample without it is judged on
+  `abr_setpoint_kbps` as before. Stored verbatim into the metrics JSONB.
 - **`wt_fec_overhead_pct`** / **`wt_fec_kbps`** *(number, optional; amendment 85,
   accreleus/quasar#1302, 2026-11-16)* — the FEC repair the agent sent in the window
   (`transport-webtransport.md` §FEC): repair datagram payload bytes as a percent of the video
