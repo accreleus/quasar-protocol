@@ -7226,7 +7226,9 @@ components:
             ADDITIVE, amendment 48 (#840). On a preview release whose manifest carries commits,
             how many of its leading entries the installed control plane does not run: the
             entries before the one whose commit equals the installed control plane's
-            source_commit, or all of them when none does. Null on every other release. A client
+            source_commit, or all of them when none does; 0 when the installed control plane is
+            newer by the edge ordering rule (same schema_version, later built_at; amendment 83).
+            Null on every other release. A client
             shows the first new_commit_count entries of manifest.commits. DERIVED AND SERVED,
             like migrates. Always serialized by a server implementing amendment 48; a client
             reads absent as null.
@@ -7452,6 +7454,22 @@ components:
             on stable; a stable or beta release with a missing or invalid manifest is never here
             either (and is not a fault - amendment 26).
           items: { $ref: "#/components/schemas/PlatformRelease" }
+        held_back:
+          description: >-
+            Amendment 83 (accreleus/quasar#1211), additive. Why `available` is empty when ADR
+            0002 emptied it: the newest release the channel selects that `available` omits ONLY
+            because its schema_version is below the installed control plane's. null whenever
+            available is non-empty or no such release was detected. Gates nothing; a client
+            never offers it. Always serialized by a server implementing amendment 83; a client
+            reads absent as null.
+          oneOf:
+            - type: object
+              required: [channel, schema_version, reason]
+              properties:
+                channel: { type: string, description: "The held-back release's channel (on beta, stable)." }
+                schema_version: { type: integer }
+                reason: { type: string, description: "schema_below_installed, the only value; an open string." }
+            - { type: "null" }
         targets:
           type: array
           description: >-
