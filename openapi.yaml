@@ -5310,6 +5310,26 @@ components:
             when the app in the session picks another mode in its own display settings;
             width/height/fps stay the launch mode. In-memory cache, dropped on a control-plane
             restart like external_width. Read-only.
+        render_width:
+          type: integer
+          description: >-
+            Amendment 84 (accreleus/quasar#996), additive. The session's current RENDER width
+            (the app-facing mode inside the compositor, set by PATCH /v1/sessions/{id}/display
+            render_width) on session.stream; absent on an app's display_stream. Same presence
+            rule as external_width: present whenever the control plane knows it, including at
+            the launch width; ABSENT MEANS UNKNOWN. Known from a 202 of that PATCH or a
+            display-aware session_metrics sample (one with external_resize_supported), where an
+            absent render_width means the launch width. In-memory cache, lost on a
+            control-plane restart. Read-only.
+        render_height:
+          type: integer
+          description: "Amendment 84. Pairs with render_width; see its description."
+        ui_scale:
+          type: number
+          description: >-
+            Amendment 84. The session's current UI scale (PATCH /v1/sessions/{id}/display
+            ui_scale). Same presence rule and cache as render_width; a display-aware sample
+            without ui_scale means 1.0. Read-only.
         rungs:
           type: array
           description: >-
