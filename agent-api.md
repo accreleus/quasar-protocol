@@ -2284,6 +2284,15 @@ For `local_only`, `running` means the console session is **displaying** *(amendm
 container is alive, its desktop holds the display on the console card, and a frame is on screen.
 A still desktop is displaying. No offer is emitted.
 
+*(Amendment 88, accreleus/quasar#1451, 2026-11-16, erratum.)* A stop can reach the agent between
+the `session_assign` ack and `session_start`, and the agent then drops the pending assignment.
+So while a stop of the session is in its grace (it began less than the `session_stop` ack
+timeout ago), the control plane does not send `session_start`, and an `ack{ok:false}`
+to a `session_assign` or `session_start` sent before the stop does not fail the session: the
+session is already `stopping` and ends `stopped` with the stop's reason, as `control-api.md`
+§`DELETE /v1/sessions/{id}` says. A start whose ack is lost or times out is not a refusal and
+changes nothing here. No message changes.
+
 ### `session_stop` — teardown + release
 ```json
 { "type": "session_stop", "id": "<command-id>", "session_id": "<uuid>", "reason": "user_requested" }
@@ -2349,7 +2358,8 @@ assigned.
 - **`ack{ok:false, error}` — the agent rejected the command (e.g. it does not hold this session,
   or the spec is unusable). The session is left running the *previous* app and stays `running` —
   the swap is a no-op.** This is the load-bearing difference from `session_assign`/`session_start`,
-  where `ack{ok:false}` fails the session: **a rejected swap never fails the session.** The control
+  where `ack{ok:false}` fails the session *(amendment 88: unless a stop of that session is in its
+  grace, §`session_start`)*: **a rejected swap never fails the session.** The control
   plane surfaces the swap as failed to the caller but does not change session state.
 
 **`session_state` callbacks during a swap** (top-level `state` stays `running` throughout — swap
