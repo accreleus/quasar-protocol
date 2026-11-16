@@ -1456,6 +1456,13 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   (`sessions.stream_profile_id`) when it is absent; a change of this floor between samples
   restarts the below-floor clock. It is also stored verbatim into the metrics JSONB for the
   diagnostic bundle and soak reports.
+- **`wt_fec_overhead_pct`** / **`wt_fec_kbps`** *(number, optional; amendment 85,
+  accreleus/quasar#1302, 2026-11-16)* — the FEC repair the agent sent in the window
+  (`transport-webtransport.md` §FEC): repair datagram payload bytes as a percent of the video
+  payload bytes sent in the same window, and as a rate in kbit/s. **Present in every window of a
+  WebTransport session whose `hello_ack.fec` named a scheme**, `0` for a window that sent no
+  repair; absent otherwise (WebRTC, FEC not negotiated, an older agent), meaning "no FEC", never
+  zero. Signal-only for the control plane. Stored verbatim into the metrics JSONB.
 - **(approved 2026-08-19) host-stage latency probe keys** — eleven optional numeric
   fields, emitted only while the node-agent's host-stage latency probe is enabled
   (`QUASAR_LATENCY_PROBE=1`, or the `latency_probe` host setting — Live class). All

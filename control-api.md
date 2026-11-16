@@ -6280,6 +6280,15 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
   `audio_concealment_events`, so that count minus this one is the dropouts a lost packet's fade caused: events
   rising with underruns flat is packet loss, underruns rising is the buffer running dry. A client that predates the
   keys omits them; an ingest that predates them drops them as unknown.
+- *(Amendment 85, accreleus/quasar#1302, additive, 2026-11-16)* **WebTransport FEC repairs.**
+  **`wt_fec_repaired`** is cumulative for the page view: the video fragments a WebTransport
+  client rebuilt from FEC repair datagrams (`transport-webtransport.md` §FEC). A rebuilt fragment
+  is never NACKed, so it is not in `packets_lost`: on that transport `packets_lost` is the loss
+  FEC did not repair, and `packets_lost` + `wt_fec_repaired` is the loss on the path. Posted only
+  while the connection's `hello_ack.fec` names a scheme; never posted by a WebRTC session. Its
+  agent-side companions are `session_metrics.wt_fec_overhead_pct` and `wt_fec_kbps`
+  (`agent-api.md`). A client that predates the key omits it; an ingest that predates it drops
+  it as unknown.
 - *(UI-P6, additive)* `codec_mime_type` is an optional per-sample **string** carrying the
   `getStats()` codec `mimeType` the receiver is actually decoding. It is a sibling of the numeric
   `metrics` object, not a key inside it. The server normalises it to the wire codec vocabulary and
