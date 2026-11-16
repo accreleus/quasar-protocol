@@ -3924,11 +3924,12 @@ The session `stream` block gains:
 - **`render_width` / `render_height` / `ui_scale`** *(optional int, int, number; amendment 84,
   accreleus/quasar#996, 2026-11-16, additive)* — the session's **current render size** (the
   app-facing mode inside the compositor) and UI scale, as `PATCH /v1/sessions/{id}/display` set
-  them. **Present whenever the control plane knows them, including at the launch size and
+  them. **Present whenever the control plane knows them, including at the pinned stream size and
   `1.0`; absent means unknown**, the `external_width` rule. The control plane knows them from a
   `202` of that PATCH, or from a display-aware `session_metrics` sample (one carrying
   `external_resize_supported`, `agent-api.md`), in which an absent `render_width`/`render_height`
-  means the launch `width`/`height` and an absent `ui_scale` means `1.0`. Same in-memory,
+  means the session's pinned stream size (`stream.width`/`stream.height`, what `session_assign`
+  set) and an absent `ui_scale` means `1.0`. Same in-memory,
   restart-dropped cache and lifecycle as `external_width`. A client that opens a running session
   (a second tab, a takeover) reads them instead of assuming the launch size.
 
@@ -4070,10 +4071,13 @@ banner at the top of this document. Owner-or-admin (same rule as `DELETE`/`swap`
   call** — unlike swap there is no `swapping`-style detail to poll, because neither render size,
   UI scale, nor external/stream size are part of the session state machine (`schema.md`).
 - **Render resolution and UI scale are EPHEMERAL** (unchanged from session-display-update).
-  Neither value is written to the `sessions` table, and neither appears on the `Session` resource
-  returned here or by `GET /v1/sessions/{id}`. A client reads the live values back from
-  `session_metrics` (`agent-api.md` — the *only* authoritative readback), or keeps its own
-  last-acked value.
+  Neither value is written to the `sessions` table. *(Amendment 84, accreleus/quasar#996:)* the
+  control plane caches the last-known values, from this endpoint's `202` and from
+  `session_metrics`, and serves them on the `Session` resource, here and from
+  `GET /v1/sessions/{id}`, as `stream.render_width` / `render_height` / `ui_scale` (§Sessions,
+  same rules as `stream.external_width`). `session_metrics` (`agent-api.md`) stays the
+  authoritative readback; a client reads the resource's values, and keeps its own last-acked
+  value only while they are absent.
 - **External/stream resolution is also EPHEMERAL, with one difference:** it changes what
   is actually **encoded**, so the control plane keeps an **in-memory cache of the last-known
   external size** — populated from this endpoint's own `202` ack path as well as from
