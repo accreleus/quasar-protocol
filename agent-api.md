@@ -1456,6 +1456,17 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   (`sessions.stream_profile_id`) when it is absent; a change of this floor between samples
   restarts the below-floor clock. It is also stored verbatim into the metrics JSONB for the
   diagnostic bundle and soak reports.
+- **`abr_link_rate_kbps`** *(number, optional; amendment 79, accreleus/quasar#1434,
+  2026-11-16)* — the ABR governor's **unclamped link rate** in kbit/s at drain time: what the
+  receiver reports show the link carrying, before the floor clamps it into the setpoint. A level,
+  like `abr_setpoint_kbps`. **Present only while the governor runs its per-report loop** (a
+  WebTransport session in `smooth`); absent otherwise, and from an older agent, meaning "not
+  measured", never zero. When a sample carries it, the control plane's stream-health evaluation
+  judges **this rate** against the floor (the amendment 75 floor) instead of
+  `abr_setpoint_kbps`: a session pinned at its floor counts as below the floor only while the
+  link rate is under it, so a session held at the lowest rung's floor on a link that carries that
+  floor is not ended, and one whose link carries less is ended after the same 3 minutes. A sample
+  without it is judged on `abr_setpoint_kbps` as before. Stored verbatim into the metrics JSONB.
 - **(approved 2026-08-19) host-stage latency probe keys** — eleven optional numeric
   fields, emitted only while the node-agent's host-stage latency probe is enabled
   (`QUASAR_LATENCY_PROBE=1`, or the `latency_probe` host setting — Live class). All
