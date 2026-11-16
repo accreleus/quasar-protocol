@@ -1462,11 +1462,14 @@ kept distinct and reconciled in `session_metrics.source`, `schema.md`.)
   like `abr_setpoint_kbps`. **Present only while the governor runs its per-report loop** (a
   WebTransport session in `smooth`); absent otherwise, and from an older agent, meaning "not
   measured", never zero. When a sample carries it, the control plane's stream-health evaluation
-  judges **this rate** against the floor (the amendment 75 floor) instead of
-  `abr_setpoint_kbps`: a session pinned at its floor counts as below the floor only while the
-  link rate is under it, so a session held at the lowest rung's floor on a link that carries that
-  floor is not ended, and one whose link carries less is ended after the same 3 minutes. A sample
-  without it is judged on `abr_setpoint_kbps` as before. Stored verbatim into the metrics JSONB.
+  judges **this rate** against the floor instead of `abr_setpoint_kbps`, with the same
+  comparison: a sample is below the floor when the value is **at or below** it (the floor being
+  the sample's `abr_floor_kbps`, or the resolved rung's when the sample has none, amendment 75).
+  The setpoint cannot go under the floor, so a session pinned there was always "at or below";
+  the unclamped rate is above the floor whenever the link carries more. So a session held at the
+  lowest rung's floor on a link that carries more is not ended, and one whose link carries the
+  floor or less is ended after the same 3 minutes. A sample without it is judged on
+  `abr_setpoint_kbps` as before. Stored verbatim into the metrics JSONB.
 - **(approved 2026-08-19) host-stage latency probe keys** — eleven optional numeric
   fields, emitted only while the node-agent's host-stage latency probe is enabled
   (`QUASAR_LATENCY_PROBE=1`, or the `latency_probe` host setting — Live class). All
