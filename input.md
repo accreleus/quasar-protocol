@@ -14,7 +14,7 @@ DataChannel transport: the agent-offered channel is **reliable + ordered** by de
 - Scroll (`dx`,`dy`) is in high-resolution wheel units.
 - Mouse buttons use Linux input codes: left `0x110` (BTN_LEFT), right `0x111`, middle `0x112`.
 - Keys use **Linux evdev keycodes**. The client maps `KeyboardEvent.code` -> evdev keycode (a static lookup table; lives in the client). The host passes the evdev code straight to the compositor.
-- Gamepad: button/axis indexing follows the **W3C Standard Gamepad** layout from the browser Gamepad API. The host maps this to the virtual pad it presents (Phase 0 may map to compositor input directly; Phase 1 routes through inputtino so a containerized game sees a real evdev device).
+- Gamepad: button/axis indexing follows the **W3C Standard Gamepad** layout from the browser Gamepad API. The host maps this to the virtual pad it presents for the message's controller number (§Gamepad index, amendment 80) (Phase 0 may map to compositor input directly; Phase 1 routes through inputtino so a containerized game sees a real evdev device).
 - Unknown fields on any message MUST be ignored by the host. The host deserializes with `serde_json` which ignores unknown keys by default; clients MUST tolerate forward-compatible additive fields. This amendment relies on that rule (see `mm` below).
 
 ## Messages (client -> host)
@@ -53,6 +53,28 @@ The host translates each message to a compositor input call (`gst-wayland-displa
 - `mb` -> pointer_button(button, pressed);  `ms` -> pointer_axis(dx,dy)
 - `k`  -> keyboard_input(code, pressed)
 - `gp` -> diff against last state; emit button/axis changes
+
+### Gamepad index *(Amendment 80, accreleus/quasar#1428, 2026-11-16)*
+`gp.i` is the controller number, `0` to `3`; a `gp` without `i` is number `0`.
+- **The client numbers its controllers densely.** A controller takes the lowest free number when
+  it connects (the first connected is `0`) and frees it when it disconnects. The client never
+  sends a platform index as is: the browser's `Gamepad.index` is a sparse slot, so a lone
+  controller can report `1`. A lone controller is therefore always `0`. Before freeing a number,
+  the client SHOULD send one `gp` for it with every button and axis at rest, so nothing stays
+  held on the host.
+- **The host keeps one virtual pad and one last state per number it presents**, diffs a `gp` only
+  against the last state of the same number, and never feeds two numbers into one pad. It
+  presents pads `0` to `n − 1`, all created with the session's app container, because the
+  container's device set is fixed when it is created. A pad that gets no input reads as a
+  connected controller at rest.
+- **The node agent presents one pad, `0`** (`n = 1`). It drops a `gp` with any other number, and
+  logs the first drop of each number per session. Presenting more pads is a host change, with no
+  wire change.
+
+No message shape changes. Mixed versions: a host from before this amendment merges every number
+into its one pad, so two controllers still overwrite each other there. A web client from before
+it sends `Gamepad.index`; ADR 0002 moves the control plane, which serves the web client, before
+any host, so an amended agent meets an amended web client. A native client numbers densely too.
 
 ## Host-side relative-mouse batching (Moonlight-derived, 2026-06)
 The agent coalesces bursty relative-mouse arrivals into a single uinput write per ~1 ms window, decoupled from both the browser render clock and per-arrival injection. This smooths the bursty per-message uinput cadence that was the dominant cause of perceived mouse steppiness (the streamed video appeared smooth while input felt jittery).
