@@ -4231,16 +4231,22 @@ says which failed first:
 |---|---|
 | the placed host's WebTransport endpoint is usable (§WebTransport endpoint) | `host_no_endpoint` |
 | the launching device's fresh probe has `webtransport.available` and `webtransport.datagrams` true | `device_no_webtransport` |
+| *(amendment 78, erratum)* the session's codec is one the WebTransport media path carries (today `h264`, `hevc` and `av1`, so this check never fails yet) | `codec_unsupported_on_transport` |
 | the same probe has `webcodecs.<codec>` true for the session's codec (catalog spelling, `hevc`) and `webcodecs.opus_decode` true | `device_no_webcodecs` |
 | *(amendment 78)* the same probe has `webgpu.available` true | `device_no_webgpu` |
 
-*(Amendment 78, accreleus/quasar#1424, 2026-11-16, erratum.)* The client draws every WebTransport
-frame with WebGPU, so a browser without a usable adapter fell back to WebRTC on every launch
-(`transport_fallback_reason: "decoder_unsupported"`). The fourth check plans it onto WebRTC from the start.
-It reads the existing key with its existing meaning: `available` is true only for a hardware
-adapter, so a browser with only a software adapter (`isFallbackAdapter`) is planned onto WebRTC
-too. A probe without the `webgpu` key fails this check. The check runs last, so a session that
-fails an earlier one keeps that reason.
+*(Amendment 78, accreleus/quasar#1424, 2026-11-16, erratum.)* The `webgpu` check is the web
+client's presenter requirement: it draws every WebTransport frame with WebGPU, so a browser
+without a usable adapter fell back to WebRTC on every launch
+(`transport_fallback_reason: "decoder_unsupported"`). The check plans it onto WebRTC from the
+start. It reads the existing key with its existing meaning: `available` is true only for a
+hardware adapter, so a browser with only a software adapter (`isFallbackAdapter`) is planned
+onto WebRTC too. Any client that wants WebTransport, a native one included, reports
+`webgpu.available: true` when it can present the frames; a probe without the `webgpu` key fails
+this check. The check runs last, so a session that fails an earlier one keeps that reason. This
+`device_no_webgpu` is a `transport_reason`; PyroWave's `device_no_webgpu` (§Ultra-low latency
+(PyroWave)) is a `pyrowave.reason`. The two never share a field. The
+`codec_unsupported_on_transport` row is an erratum: the control plane already returns it.
 
 A probe is fresh under the same rule as the codec clamp (§Codec resolution). Placement does not
 look at transport: a host without an endpoint is never avoided, it yields `webrtc`. A console

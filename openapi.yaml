@@ -5938,7 +5938,7 @@ components:
           description: "Amendment 54: the transport the stream plan chose. Always serialized by a server implementing the amendment; absent from an older one, read as webrtc."
         transport_reason:
           type: [string, "null"]
-          description: "Amendment 54: why a wanted WebTransport was not chosen (profile_disallows, amendment 61's instance_default_disallows, host_no_endpoint, device_no_webtransport, device_no_webcodecs, amendment 78's device_no_webgpu; an open string), else null. Absent from an older server."
+          description: "Amendment 54: why a wanted WebTransport was not chosen (profile_disallows, amendment 61's instance_default_disallows, host_no_endpoint, device_no_webtransport, device_no_webcodecs, and from amendment 78 codec_unsupported_on_transport and device_no_webgpu; an open string), else null. Absent from an older server."
         transport_fallback_reason:
           type: [string, "null"]
           description: "Amendment 54: the reason in the latest transport.fallback trace event the client posted, else null. Observability only. Absent from an older server."
