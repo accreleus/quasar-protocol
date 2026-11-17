@@ -6235,8 +6235,7 @@ when its agent reconnects. A forgotten host that later re-enrolls comes back as 
   with a recovery actor) can name neither a machine role nor its own enrollment node, it cannot tell
   which host is its own and refuses every host; when it knows its own node, it refuses only that
   host, as before. The guard fails closed, because removing the control plane's own host by mistake
-  is worse than refusing another. The served `machine_role` does not decide this. The refusal is
-  server-side whatever the client shows.
+  is worse than refusing another. The refusal is server-side whatever the client shows.
 
 ---
 
