@@ -6230,8 +6230,12 @@ when its agent reconnects. A forgotten host that later re-enrolls comes back as 
   non-terminal session). The body distinguishes the two.
   *(Amendment 69, accreleus/quasar#1288, approved by the lead as additive 2026-11-14.)*
   `409 host_not_removable`: the host's agent is the one on the control plane's own machine, the
-  same refusal `POST /v1/admin/platform/hosts/{id}/remove` makes; the host row is kept. The
-  refusal is server-side whatever the client shows.
+  same refusal `POST /v1/admin/platform/hosts/{id}/remove` makes; the host row is kept.
+  *(Amendment 89, accreleus/quasar#1395, 2026-11-17, erratum.)* When an owned control plane (one
+  with a recovery actor) can name neither a machine role nor its own enrollment node, it cannot tell
+  which host is its own and refuses every host; when it knows its own node, it refuses only that
+  host, as before. The guard fails closed, because removing the control plane's own host by mistake
+  is worse than refusing another. The refusal is server-side whatever the client shows.
 
 ---
 
@@ -12563,7 +12567,8 @@ unchanged (it still refuses an online host).
     is nobody to tell) or `reason: "updater_absent"` (`updater_present` is false: no recovery actor
     answered) — amendment 1's `EligibilityReason` values, reused.
   - **`409 host_not_removable`** — the host's `install_mode` is not `owned`, or its agent is the one
-    on the control plane's own machine (above).
+    on the control plane's own machine, or *(amendment 89)* the control plane cannot tell which
+    host is its own (above).
   - `409 conflict` — non-terminal sessions remain and `force` is false (step 3; the cordon taken in
     step 2 is restored).
 
