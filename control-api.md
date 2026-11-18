@@ -4032,7 +4032,7 @@ interpipe boundary while encode + `webrtcbin` stay up, so the browser stream nev
     endpoint already answers)* — the session's host cannot take the target: the app is not selected
     for that host (§App placement), or, with `reason: "compat_tool_missing"`, the target is a
     derived Steam game whose per-game mapping names a GE tool that this session did not mount at
-    launch, or *(amendment 87)* whose mapping was written after the session was created, so the
+    launch, or *(amendment 87; amendment 90)* whose mapping was committed after the launch read it, so the
     table the session carries may not hold it (§Compatibility tools, "Placement"). Neither is retryable: a swap does not move hosts
     and does not wait for an install.
   - `403 forbidden` — caller is neither owner nor admin; `404 not_found` — no such session.
@@ -5439,10 +5439,17 @@ the Steam parent app itself (or a parked start) names no game and has no tool co
 *(Amendment 71, accreleus/quasar#1178.)* **A swap** into a derived Steam game whose per-game
 mapping names a GE tool is admitted only if that tool's `steam_name` is in the session's
 `compat_tool_names`, the tools it mounted at launch, and *(amendment 87, accreleus/quasar#1427,
-2026-11-16, erratum)* that mapping was last written no later than the session was created
-(`compat_tool_mappings.updated_at` ≤ `sessions.created_at`). A mapping written later may be
-missing from the table the session carries, even when its tool is mounted, so the swap is
-refused; any write counts, a re-save of the same tool included, which errs toward refusing. A swap sends no compat block and the agent
+2026-11-16, erratum; amendment 90, accreleus/quasar#1555, 2026-11-18, erratum)* that mapping was
+committed before the launch read the mappings: `compat_tool_mappings.revision` ≤
+`sessions.compat_mapping_revision`. Every mapping write takes a new revision under the mapping lock,
+held until it commits, so revisions follow commit order, and the launch records the highest revision
+it read, reading it before the mappings. A mapping committed later may be missing from the table
+the session carries, even when its tool is mounted, so the swap is refused; any write counts, a
+re-save of the same tool included, which errs toward refusing. `updated_at` is not compared: it is
+the write transaction's start, which can predate the session when that write waited on the lock. A
+session with no recorded revision (`NULL`, every session launched before migration 0118) carries
+no mapping, so every swap from it into a game with such a mapping is refused and the game is
+launched on its own. A swap sends no compat block and the agent
 carries the running session's launch-time table into the target, so the host's install state now
 decides nothing: a tool installed after the session started does not apply to it, and a tool the
 session mounted keeps working if the host's report later drops it. A session with no recorded
