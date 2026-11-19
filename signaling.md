@@ -428,6 +428,40 @@ Two bounded recovery paths are defined:
 > - **Unchanged:** the message shapes, the close codes (`4410` to the displaced client, which
 >   still MUST NOT reconnect), the token lifecycle, and `agent-api.md`'s envelope.
 
+> **Amendment 92 — a reload rejoins its own live session within a peer-rejoin grace
+> (accreleus/quasar#1005), signed off by the operator 2026-11-19. Changes the peer-loss end
+> rule; no message, field, close code or API route is added.** It supersedes "then ends the
+> session, after a one-second grace that distinguishes this from a stop already in flight"
+> and "**A reload therefore ends the session.**" in the close/reload bullet above.
+> - **A stop in flight is still distinguished first.** The host waits out the existing
+>   one-second grace for a stop command that races the association's end; a stop that
+>   arrives takes the ordinary clean teardown path.
+> - **The peer-rejoin grace.** With no stop in flight, the host does not end the session
+>   when the `"input"` DataChannel's association ends. It holds the session for **ten
+>   seconds** after that one-second grace and keeps encoding to nobody. The session stays
+>   `running`; its session id, scheduler reservation, container and application do not
+>   change, and the control plane still mints signaling tokens for it
+>   (`control-api.md` §`POST /v1/sessions/{id}/signaling-token`).
+> - **A rejoin inside the grace.** A reloaded client knows its session id from its route,
+>   mints a token for that session, opens a new signaling WebSocket, recreates its peer
+>   connections and sends `restart_ice` for each. The host serves it as amendment 27
+>   describes: the attach is a new peer to the host, it replaces the peer's transport, and
+>   the session continues. The stream and the application resume on the same session; no
+>   new session is created.
+> - **A different client.** The grace is time-bounded, not identity-based: signaling
+>   carries no device identity, so every attach inside the grace is a new peer. A
+>   different client is served by amendment 27's existing rules, unchanged: a live peer
+>   is displaced with close `4410`, and a peer past the replacement bound is refused with
+>   `takeover_rate_limited`. After the grace it is refused as before (`4404`, mint
+>   `409 session_not_reconnectable`).
+> - **The grace expires.** If no attach arrives, the host ends the session on the same
+>   clean teardown path as before: `stopped`, `state_detail` `peer disconnected: WebRTC data
+>   channel closed`, with no `error_message`. An attach after that gets `4404`, and the
+>   mint `409 session_not_reconnectable`.
+> - **Unchanged.** The message shapes, the close codes, the token lifecycle, amendment
+>   27's bounds, and the idle window for a peer whose connections were lost without
+>   being closed (an attach within that window is still served).
+
 Clients use bounded retry/backoff and expose cancellation. A terminal session returns `409
 session_not_reconnectable`; an unavailable host remains distinguishable through close code 4500.
 The `restart_ice` request is additive; all existing offer/answer/ICE shapes remain valid.
