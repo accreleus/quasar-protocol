@@ -4025,7 +4025,11 @@ interpipe boundary while encode + `webrtcbin` stay up, so the browser stream nev
   reasoning and why narrowing it is a larger change than this amendment.
 - **Errors** (the session is left untouched in every rejection):
   - `409 session_not_swappable` — the session is not in a swappable state: top-level `state` is not
-    `running`, or a swap is already in progress (`state_detail = "swapping"`).
+    `running`, or a swap is already in progress (`state_detail = "swapping"`), or *(amendment 91,
+    accreleus/quasar#1429, 2026-11-19, additive)* the target has a managed home (its own, or its
+    parent's for a derived tile) and the session's host agent is not connected or does not report
+    `terminal_home_cleanup_v1`: no hold could own the target's home between the guard and the
+    commit, so the swap is refused rather than run unprotected.
   - `404 not_found` — no such app, or the app is disabled (same visibility rule as `GET /v1/apps/{id}`).
   - `409 swap_exceeds_reservation` — as above.
   - `503 no_host_available` *(Amendment 71, accreleus/quasar#1178; the first arm is how the
