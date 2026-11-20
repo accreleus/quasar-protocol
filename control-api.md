@@ -5671,20 +5671,23 @@ non-terminal report. If the parked runtime's own cleanup proof arrives first whi
 session is live (the agent tore it down to build fresh), the hold passes to the play session
 instead of clearing, so the home is never unheld in between. Until one of those, only the parked
 runtime's own proof clears the hold. A play session that ends before the agent adopted (its
-assign lost, refused or unacknowledged, its start refused, a stop, a reap, a control-plane
-restart) therefore leaves the hold on the parked id, and the agent's proof for the play id
-clears nothing. The control plane stops the parked id: at once where it fails the play session
-itself, and through the heartbeat's orphan stop and the cleanup reconcile, which skip a runtime
-only while a live session adopts it. Meanwhile a launch is answered as one held by a released
-runtime (§Park on exit), the 2 minutes counting from the play session's end.
+assign lost, refused or unacknowledged, its start refused or unacknowledged, a stop, a reap,
+a control-plane restart) therefore leaves the hold on the parked id, and the agent's proof for
+the play id clears nothing. An assign failure sends a best-effort stop to the parked id. The heartbeat's
+orphan stop and the cleanup reconcile also stop that runtime once no live session adopts it.
+Meanwhile a launch is answered as one held by a released runtime (§Park on exit), the 2 minutes
+counting from the play session's end.
 
 The response is today's `201`: the new session, `assigned`, with its signaling token. The client
 connects as for any launch, and the agent sends it a fresh offer. When the agent no longer holds
 the parked runtime (it restarted, or the container is gone), it builds the session fresh from the
-app, so a claim never fails because the parked session was lost. A stop is sent only to a parked
-session that is still live when the stop is taken: a claimed session is already `stopped`, so no
-expiry, eviction, drain or second launch ever stops its id. (A claim that ended before the
-agent adopted does stop it, as above: the agent then still runs it under that id.)
+app, so a claim never fails because the parked session was lost. When the agent declines an
+adoption and still holds the old runtime, the fresh build waits for its runner to exit.
+Verified cleanup is a separate proof for the managed-home hold. Expiry, eviction, drain and
+superseding launches stop live parked sessions. A claim that ends before adoption can still
+stop the old id as described above. If `session_start` is refused or its dispatch fails, the
+control plane records the failure and immediately queues a best-effort stop for the new session.
+The same start-failure handling applies to the new parked session on park on exit.
 
 When any other check fails, the parked session is stopped (`session_stop`, `reason: "parked_superseded"`)
 and this launch is refused **`503 capacity_exhausted` with `Retry-After: 2`**. While that Steam
