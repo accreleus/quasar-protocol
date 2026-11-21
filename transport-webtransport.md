@@ -337,7 +337,9 @@ Receiver feedback for congestion control, sent every 50 ms (20–100 ms) while d
   reported again; the agent uses the latest).
 - `ref_us`: the client's monotonic clock, microseconds, that arrival offsets count from.
 - `arrivals_b64`: base64 of `count` u16 values, one per `pkt_seq` in order: the arrival time in
-  units of 50 µs after `ref_us`, or `0xFFFF` for not received (yet).
+  units of 50 µs after `ref_us`, or `0xFFFF` for not received (yet). The arrival time is taken
+  when the datagram is read from the QUIC connection, before any reorder, jitter or reassembly
+  hold. *(Amendment 93, accreleus/quasar#1433, 2026-11-21.)*
 - `recv_kbps`, `lost`, `interval_ms`: the receive rate, datagrams lost, and the length of the
   interval the message covers, for the agent's logs and metrics.
 
