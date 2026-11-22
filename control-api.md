@@ -10300,8 +10300,10 @@ one client-side mapping serves the wire, this API and the history: `updater_abse
 **`unsupported`** (no ack within the ack timeout), plus amendment 5's two appended signature
 refusals **`signature_missing`** and **`signature_invalid`** (#120). `reason` is non-null exactly
 when the state is `failed`. The two signature values are **appended**, so no existing identifier
-moves, and they are **inert unless an operator turns signature verification on** — it is off by
-default (ADR 0003). A client meeting an unrecognized value still renders it verbatim.
+moves. Signature verification is **on by default** (`verify`, ADR 0003 as amended by accreleus/quasar#621, amendment 94), so
+both occur on a stock instance: `signature_missing` when a request names a release version that
+publishes no signature, `signature_invalid` when a signature does not verify or cannot be
+fetched. A client meeting an unrecognized value still renders it verbatim.
 *(Amendment 14, #353, appends `recipe_unsupported`, `owner_conflict`, `backup_failed`,
 `backup_unconfirmed` and `interrupted` after them, produced only by an owned machine —
 §"RH06 — Quasar-owned installation", "Failure reasons".)*
