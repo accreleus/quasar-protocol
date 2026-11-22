@@ -1811,7 +1811,7 @@ they can be rendered by one mapping.
 | `updater_unreachable` | the updater's socket could not be reached, or its result file for this `request_id` stopped advancing or disappeared. "I cannot see the actor", as distinct from `updater_absent`'s "there is no actor". *(Amendment 14:)* on an `owned` host, the recovery actor's socket did not answer, or its status for this `request_id` stopped advancing; the identifier is unchanged. |
 | `timeout` | the apply did not reach a terminal state within the deadline. Emitted by whichever side observes it first; the control plane writes it on the attempt when no terminal `release_state` arrives (`control-api.md`). |
 | `unsupported` | **written by the control plane, never sent on this wire** — no `ack` arrived within the ack timeout, so this agent build predates this amendment. Listed here because it shares the attempt's `reason` column and one client-side mapping. |
-| `signature_missing` | the host is configured to **require** a signed release (`QUASAR_UPDATER_SIGNATURE_MODE=require`) and this release publishes no signature over its manifest. Distinguished from `signature_invalid` because it is the one signature refusal that says nothing is wrong with the release — only that this host will not take an unsigned one. **Appended by amendment 5 (#120); see the note below.** |
+| `signature_missing` | the host is configured to **require** a signed release (`QUASAR_UPDATER_SIGNATURE_MODE=require`) and this release publishes no signature over its manifest, or, under `verify` (the default), the request names a release version and that release publishes no signature. Distinguished from `signature_invalid` because it is the one signature refusal that says nothing is wrong with the release except that it is unsigned — only that this host will not take a release without a signature. **Appended by amendment 5 (#120); see the note below. Widened to `verify` by amendment 94 (accreleus/quasar#621).** |
 | `signature_invalid` | the release's manifest signature did not verify: a bad signature, a key outside `QUASAR_UPDATER_TRUSTED_KEYS`, a signed manifest that does not name the very digests this request asks for, a signature that could **not be fetched** at all, or a host told to verify with no trusted keys configured. All of these are one identifier on purpose — each is "this host cannot establish that these digests are the ones that were signed", and the updater's `output` carries which. **Fail closed: "could not tell" is never reported as "unsigned".** **Appended by amendment 5 (#120); see the note below.** |
 | `recipe_unsupported` | *(appended by amendment 14, #353)* the recovery actor does not carry the **recipe revision** a requested image declares (ADR 0008). Found after the pull and **before anything is stopped**, so nothing changed. Reachable only by an apply that moves an image without the recovery actor that supports it — the control plane moves the actor first (§`release_apply`). |
 | `owner_conflict` | *(appended by amendment 14)* a container that looks like a Quasar platform service is on this machine but does not carry this installation's ownership labels (a leftover Compose stack, a definition a manager holds). The recovery actor never acts on a container it did not create, so it refuses and changes nothing; its `output` names the container. (Ack rejection when known at submission; otherwise before any stop.) |
@@ -1828,9 +1828,12 @@ verbatim**, never reject the message. Amendment 14 also confirms `signature_miss
 `signature_invalid` as members of this vocabulary on an `owned` host, where the recovery actor
 performs ADR 0003's verification exactly as the updater does; nothing about them changes.
 
-**The two signature reasons are appended, and are inert until an operator opts in.** Signature
-verification is **off by default** (ADR 0003; `docs/configuration.md` "Release signature
-verification"), so a stock instance emits neither. They are appended to the end of the vocabulary
+**The two signature reasons are appended.** Signature verification is **on by default** since
+amendment 94 (accreleus/quasar#621): the recovery actor verifies under `verify` against the org's release key
+unless an operator set `QUASAR_UPDATER_SIGNATURE_MODE=off` (ADR 0003; `docs/configuration.md`
+"Release trust"), so a stock instance may emit either: `signature_missing` when a request names
+a release version that publishes no signature, `signature_invalid` when a signature does not
+verify or cannot be fetched. They are appended to the end of the vocabulary
 rather than grouped with the other pre-pull refusals so that no existing identifier changes
 position, and a consumer that predates them keeps the contract's standing behaviour for an
 identifier it does not recognise: **store it and render it verbatim**, never reject the message.
