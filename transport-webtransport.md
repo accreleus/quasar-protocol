@@ -564,11 +564,11 @@ from that buffer.
    this hold. A client that sees no reordering holds nothing beyond rule 4. Feedback still reports
    every `pkt_seq` before a held gap on the cadence of §Feedback; a message whose range would
    start at the held gap waits for it, so one may come up to the hold later than that cadence.
-6. **Recovery frame.** *(Amendment 96, accreleus/quasar#1348, 2026-11-23.)* An agent MAY answer
-   `keyframe_request {reason: "late"}` from a client that has sent `decoded` with a frame
-   flagged `recovery` instead of a keyframe. It codes that frame from one frame that is at or
-   before the `decoded` of the client's latest `feedback` or `keyframe_request` and after the
-   last keyframe the agent sent; with no such frame it sends the keyframe. A frame `recovery` flags is,
+6. **Recovery frame.** *(Amendment 96, accreleus/quasar#1348, 2026-11-23.)* An agent MAY answer a
+   `keyframe_request {reason: "late"}` that carries `decoded` with a frame flagged `recovery`
+   instead of a keyframe. It codes that frame from one frame that is at or before that
+   `decoded` and after the last keyframe the agent sent; with no such frame it sends the
+   keyframe. A frame `recovery` flags is,
    for rule 3's wait, a keyframe: the client releases it and drops the frames before it, and
    gives it to the decoder it is decoding with, as a delta, without flushing, resetting or
    reconfiguring that decoder (a decoder only takes a delta that follows a keyframe it was given).
