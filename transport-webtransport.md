@@ -298,12 +298,15 @@ it speaks that is not higher. A client that cannot use the answer sends `bye` an
 ### Keyframe request (client → agent)
 
 ```json
-{ "type": "keyframe_request", "reason": "startup" | "loss" | "late" | "decode_error" }
+{ "type": "keyframe_request", "reason": "startup" | "loss" | "late" | "decode_error",
+  "decoded": 4711 }
 ```
 
 The agent forces an IDR through the same path PLI uses. It MAY coalesce requests: at least one IDR
 follows one or more requests, as soon as the encoder allows, and the agent SHOULD produce it within
-one frame interval.
+one frame interval. *(Amendment 96, accreleus/quasar#1348, 2026-11-23.)* `decoded` is §Feedback's. For a
+request with reason `late` that carries `decoded`, the agent MAY send a recovery frame
+(§Loss recovery 6) instead of the IDR.
 
 ### NACK (client → agent), and nack_miss (agent → client)
 
@@ -342,6 +345,17 @@ Receiver feedback for congestion control, sent every 50 ms (20–100 ms) while d
   hold. *(Amendment 93, accreleus/quasar#1433, 2026-11-21.)*
 - `recv_kbps`, `lost`, `interval_ms`: the receive rate, datagrams lost, and the length of the
   interval the message covers, for the agent's logs and metrics.
+- `decoded` *(amendment 96, optional, u16)*: the newest `frame_seq` the client has given its
+  decoder, with every frame that one depends on also given to the same decoder since that
+  decoder was last configured: since the keyframe or recovery frame (§Loss recovery 6) it
+  resumed at, no non-`discardable` frame was skipped. It stays while the client waits for a
+  keyframe after a lost or late frame (§Loss recovery 3). It is absent from the moment the
+  client configures, restarts or replaces its decoder, after a decoder error, after the client
+  skips frames it was sent to catch up (a decode backlog), and while video is not being decoded
+  (PyroWave), until the client next gives its decoder a keyframe. A frame accepted by the
+  decoder's queue counts as given; a decoder error found later removes it with the rest.
+  The same field, with the same meaning, rides on `keyframe_request`. Each message carries the
+  client's state when it is sent; the agent reads the latest.
 
 The agent keeps the send time of every `pkt_seq` and estimates the available rate from the delay
 and loss pattern, together with the QUIC connection's own congestion state. The estimate feeds the
@@ -413,7 +427,7 @@ An encoded access unit, split into fragments that each fit one datagram.
 offset size field
 0      u8   channel     0x01
 1      u32  pkt_seq
-5      u8   flags       bit0 keyframe, bit1 discardable, bit2 retransmit; others 0
+5      u8   flags       bit0 keyframe, bit1 discardable, bit2 retransmit, bit3 recovery; others 0
 6      u8   config_id   the hello_ack configuration this frame decodes under, wraps
 7      u16  frame_seq   per-session access-unit counter, +1 per unit in encode order, wraps
 9      u16  frag_index  0-based
@@ -434,6 +448,10 @@ The header is 25 bytes; at the 1200-byte UDP budget a fragment carries at least 
 - Every fragment of a frame carries the same `frame_seq`, `config_id`, `flags` (apart from
   `retransmit`), `frag_count`, `ts_90khz` and `capture_us`.
 - `discardable`: nothing later references this frame, so losing it never needs a keyframe.
+- `recovery` *(amendment 96)*: the frame codes only from one frame the client reported in
+  `decoded` and from frames before that one, never from a frame after it (§Loss recovery 6).
+  Never set with `keyframe`. The agent sets it only for a client that has sent `decoded` on
+  this connection.
 
 ## Audio (`0x02`, agent → client)
 
@@ -546,6 +564,24 @@ from that buffer.
    this hold. A client that sees no reordering holds nothing beyond rule 4. Feedback still reports
    every `pkt_seq` before a held gap on the cadence of §Feedback; a message whose range would
    start at the held gap waits for it, so one may come up to the hold later than that cadence.
+6. **Recovery frame.** *(Amendment 96, accreleus/quasar#1348, 2026-11-23.)* An agent MAY answer
+   `keyframe_request {reason: "late"}` from a client that has sent `decoded` with a frame
+   flagged `recovery` instead of a keyframe. It codes that frame from one frame that is at or
+   before the `decoded` of the client's latest `feedback` or `keyframe_request` and after the
+   last keyframe the agent sent; with no such frame it sends the keyframe. A frame `recovery` flags is,
+   for rule 3's wait, a keyframe: the client releases it and drops the frames before it, and
+   gives it to the decoder it is decoding with, as a delta, without flushing, resetting or
+   reconfiguring that decoder (a decoder only takes a delta that follows a keyframe it was given).
+   A client whose decoder has no `decoded` to report (configured, restarted, after an error or a
+   skip) treats a `recovery` frame as a delta it cannot decode yet: it drops it and keeps waiting
+   for a keyframe, asking for one as usual. Every frame after a recovery frame depends only on
+   frames up to it.
+
+   **Compatibility.** A client that never sends `decoded` is never sent a `recovery` frame: every
+   repair stays the keyframe of rule 3. An agent that does not implement this ignores `decoded`
+   (unknown fields are ignored) and sends keyframes as before. A client that sends `decoded` to an
+   older agent gets keyframes. Reasons other than `late` (`startup`, `loss`, `decode_error`) always
+   get the keyframe.
 
 `keyframe_request {reason: "loss"}` remains for a client that does no NACK at all.
 
