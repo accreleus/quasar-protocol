@@ -561,6 +561,12 @@ payloads, each padded with zeros to the longest; it rebuilds any **one** of them
 agent chooses `count`, `stride` and how many repair datagrams to send from the loss it sees in
 feedback. The agent SHOULD send a frame's repair datagrams right after that frame's video
 datagrams, before any datagram of a later frame *(amendment 65)*.
+*(Amendment 95, accreleus/quasar#1433, 2026-11-23.)* The agent MAY also send repair datagrams
+beyond what the loss calls for, to probe how much the path carries. They follow the rules above
+(a frame's repairs after its video datagrams, never retransmitted), carry `pkt_seq` and are
+reported in §Feedback like any other. A client treats them as any repair: one for a frame already
+whole, or one it no longer holds, is dropped, and one that can rebuild a missing fragment may be
+used.
 
 ```
 0      u8   channel     0x04
