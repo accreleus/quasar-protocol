@@ -337,6 +337,12 @@ frame (`maximum_bitstream_size`), and the frame lands within it.
   (§Switching codec). The 1 s timer starts at **`min(first feedback received after the switch on,
   switch on + 1 s)`**, so a switch on is judged on what the link does at PyroWave's rate, never on
   the estimate it replaced, and withholding `feedback` cannot postpone it.
+  *(Amendment 97, accreleus/quasar#1664, signed off 2026-11-27:)* For the first **10 s** after a
+  switch on, a **rising** estimate restarts the 1 s timer: it starts again whenever the estimate is
+  more than 1 % above the lowest it has been since the timer last started. The first full-rate
+  frames can cost the estimate a cut from which it climbs back, which does not show a link that
+  cannot hold PyroWave. A flat estimate under the floor, and any estimate under it after those
+  10 s, steps down after 1 s as above.
 
 ## Link
 
@@ -348,7 +354,8 @@ so the agent measures it there:
   keeps PyroWave on the LAN: over the internet the gate fails, and the session streams the
   standard codec with reason `rtt_too_high`.
 - **Rate.** There is no up-front throughput test: the session starts at the target, and the floor
-  rule (§Rate) steps it down within a second if the link cannot hold it.
+  rule (§Rate) steps it down within a second if the link cannot hold it (or, while the estimate
+  is still climbing back in the first 10 s, once it stops climbing: amendment 97).
 
 The device probe's `bandwidth_kbps` and `rtt_ms` (`control-api.md` `POST /v1/me/devices`) are
 **not** inputs to this gate: they measure the client ↔ control plane path, from a sample of a few
