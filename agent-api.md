@@ -3079,7 +3079,9 @@ changes.
 ## Reconnection & reconciliation
 - On agent reconnect, the control plane trusts the agent's `heartbeat.running_sessions` /
   fresh `capacity` as ground truth for that host: sessions the control plane thinks are
-  `running` but the agent doesn't list are marked `failed` (reservation released); sessions the
+  `running` but the agent doesn't list are marked `failed` (reservation released) *(amendment 99,
+  #1697: one in `stopping` whose stop had started is ended `stopped`, keeping its `state_detail`;
+  a `stopping` one stopped before it started follows amendment 23's re-send below)*; sessions the
   agent runs but the control plane lost are stopped (`session_stop`) — the control plane is the
   scheduling authority.
 - *(Amendment 23, #503)* A stop the agent did not take is re-sent. When a heartbeat still lists
