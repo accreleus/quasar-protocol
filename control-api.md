@@ -3077,8 +3077,9 @@ paginated list. Not highlights itself: that is a ranked rail of at most five.
 Which sections the Home page shows, in what order, under what titles. Additive: new paths, no
 existing shape changed.
 
-**The server owns the structure; the existing reads still own the content.** A section names a
-`kind`, and each kind's content comes from the read that served it before this amendment:
+**The server owns the structure; the existing reads still own the content.** A section carries
+no data: no apps, no counts, no ranking. It is a reference, and the client fetches each kind's
+content from the read that served it before this amendment:
 
 | `kind` | content from |
 |---|---|
@@ -3086,8 +3087,15 @@ existing shape changed.
 | `jump_back_in` | `GET /v1/me/play-history`, joined to `GET /v1/apps` on `app_id` |
 | `favourites` | `GET /v1/apps`, the items with `favourite: true` |
 
-Nothing here carries an app, a count or a ranking. Clients render what they are handed, in the
-order handed; a client must not re-order, re-title or add sections of its own.
+Clients render what they are handed, in the order handed; a client must not re-order, re-title or
+add sections of its own.
+
+**The hero is not a section.** A client's page heading or hero (the web client's "Game on") is
+its own chrome and is not in the layout. The `highlights` section is the featured rail, and it
+goes where the layout puts it. A client whose design draws the rail inside its hero draws the
+hero at that position, and at the top of the page without the rail when no `highlights` section
+is shown. The featured rail is drawn at most once: at the first shown `highlights` section; a
+later one is skipped.
 
 **Three layers, first one set wins, whole:**
 1. the caller's **override** (`PUT /v1/me/home`), `source: "user"`;
