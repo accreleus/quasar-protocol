@@ -57,7 +57,8 @@ source of truth) and with `signaling.md` (this channel relays signaling — see 
 > machine lives in `schema.md`). A **force**-drain reuses the existing `session_stop`
 > `reason:"host_draining"` (already enumerated under §`session_stop`) — no new or changed message.
 > The offline reaper (§Reconnection & reconciliation) is unchanged; it now additionally stamps the
-> session `state_detail = 'host_lost'`, a control-plane-side `sessions` write that does not touch
+> session `state_detail = 'host_lost'` (on a session it fails; since amendment 99, #1697, a `stopping`
+> session ends `stopped` instead), a control-plane-side `sessions` write that does not touch
 > this wire. **This contract is therefore unchanged by P3-01; the note is recorded for
 > traceability.** See `docs/completed/phase3/P3-01-contract-host-lifecycle.md`.
 
@@ -3078,7 +3079,9 @@ changes.
 ## Reconnection & reconciliation
 - On agent reconnect, the control plane trusts the agent's `heartbeat.running_sessions` /
   fresh `capacity` as ground truth for that host: sessions the control plane thinks are
-  `running` but the agent doesn't list are marked `failed` (reservation released); sessions the
+  `running` but the agent doesn't list are marked `failed` (reservation released) *(amendment 99,
+  #1697: one in `stopping` whose stop had started is ended `stopped`, keeping its `state_detail`;
+  a `stopping` one stopped before it started follows amendment 23's re-send below)*; sessions the
   agent runs but the control plane lost are stopped (`session_stop`) — the control plane is the
   scheduling authority.
 - *(Amendment 23, #503)* A stop the agent did not take is re-sent. When a heartbeat still lists
@@ -3094,7 +3097,9 @@ changes.
   `session_transport_token` reaches the reconnected agent.
 - If the agent connection is lost for longer than the heartbeat-miss threshold, the host goes
   `offline` and all its non-terminal sessions become `failed`. This is the multi-host failure
-  model at N=1.
+  model at N=1. *(Amendment 99, accreleus/quasar#1697:)* except a `stopping` session, which ends
+  `stopped` keeping its `state_detail`, never `host_lost` (`schema.md` failure invariant 3). No
+  message or field changes.
 
 ## Phase 1 simplifications (revisit, do not bake in workarounds)
 - One agent connection per host process; the control plane addresses sessions by `session_id`.

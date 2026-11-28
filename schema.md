@@ -1083,6 +1083,7 @@ WebSocket + heartbeats, `agent-api.md`); **`draining`** is an administrative cor
 - **Offline reaping** (the existing frozen failure model — see the session state machine below and
   `agent-api.md` §Reconnection): when a host goes `offline`, its non-terminal sessions are driven to
   `failed` with `state_detail = 'host_lost'` (P3-01) and their reservations released.
+  *(Amendment 99, #1697:)* a `stopping` session ends `stopped` instead (failure invariant 3).
 
 > **Known limitation (Phase 3) — drain intent is not preserved across a full agent disconnect.**
 > Because `status` is a single column conflating liveness with cordon-intent, a `draining` host
@@ -1171,7 +1172,7 @@ signaling (P1-D).
 | `error_message` | `TEXT` NULL | populated on `failed`. |
 | `failure_code` | `TEXT` NULL | *(first-run-experience §S5, migration 0062, additive)* machine-readable classification of a terminal failure, sent by the agent as `session_state.reason_code` (`agent-api.md`). Today's only defined value is `'app_exited_early'`. Sits **beside** `error_message` rather than replacing it: `error_message` is operator prose that may be rewritten freely, while this is the stable key the UI branches on. NULL for every failure that carries no classification, and for every non-failed session. |
 | `app_log_tail` | `TEXT` NULL | *(first-run-experience §S5, migration 0062, additive)* the app container's own captured log tail (newline-joined, oldest first, ~100 lines bound), sent by the agent as `session_state.app_log_tail`. Its own column because it cannot share `error_message` — that field renders inline as a one-line reason everywhere it appears, and a hundred lines of Steam output pasted into it would wreck every existing surface. App containers run `--rm`, so these lines are otherwise unrecoverable once the daemon reaps the container (#463) — this column is the only surviving copy. NULL unless a failure warranted capturing it. |
-| `stop_reason` | `TEXT` NULL | *(amendment 24 #516, migration 0101, additive)* the `session_stop` reason (`agent-api.md`) the control plane recorded in the write that moved the session to `stopping`. Written once: a later stop of the same session keeps the first reason. NULL when the control plane never stopped the session through that path (live, `failed`, reaped). Unconstrained text, and **not served as is**: `control-api.md` §`stop_reason` exposes only its closed set and reads every other value as `null`. *(Amendment 39, #759:)* also `parked_expired`, `parked_evicted` and `parked_superseded` on parked rows, and `runtime_released`, written with the `stopped` of a play session whose held runtime the control plane released; the launch path reads it, as it reads a holder whose adopting row (`adopt_session_id`) ended unadopted, to answer `503` while that runtime's cleanup proof is pending (`control-api.md` §Warm Steam, "Park on exit"). `runtime_released` is the one exception to "written once": it replaces any earlier reason except `entitlement_revoked` (the only served one), because a user stop can race the game exit. |
+| `stop_reason` | `TEXT` NULL | *(amendment 24 #516, migration 0101, additive)* the `session_stop` reason (`agent-api.md`) the control plane recorded in the write that moved the session to `stopping`. Written once: a later stop of the same session keeps the first reason. NULL when the control plane never stopped the session through that path (live, `failed`, a session the reaper failed). *(Amendment 99, #1697:)* a `stopping` session the host-loss reaper ends `stopped` keeps the reason it had. Unconstrained text, and **not served as is**: `control-api.md` §`stop_reason` exposes only its closed set and reads every other value as `null`. *(Amendment 39, #759:)* also `parked_expired`, `parked_evicted` and `parked_superseded` on parked rows, and `runtime_released`, written with the `stopped` of a play session whose held runtime the control plane released; the launch path reads it, as it reads a holder whose adopting row (`adopt_session_id`) ended unadopted, to answer `503` while that runtime's cleanup proof is pending (`control-api.md` §Warm Steam, "Park on exit"). `runtime_released` is the one exception to "written once": it replaces any earlier reason except `entitlement_revoked` (the only served one), because a user stop can race the game exit. |
 | `home_seed` | `JSONB` NULL | *(RH05 #344, migration 0093)* actual initial Steam managed-home seeding outcome from an authenticated `session_state`. Exact object `{mode,reason}` only: `reflink/seeded`, `copy/seeded`, `existing/existing_home`, or `cold` paired with `template_unavailable`, `source_disabled`, `host_templates_disabled`, `host_setting_invalid`, `policy_unavailable`, `storage_unavailable`, `clone_failed` or `policy_changed`. NULL means no accepted evidence, never inferred cold. First accepted outcome wins; swaps leave it unchanged. No path, user identifier, image ref, command output or free text. Only `reflink/seeded` proves reflink storage saving. |
 | `kind` | `TEXT` NOT NULL DEFAULT `'play'` | *(Amendment 39, #759, migration 0105)* `CHECK (kind IN ('play','parked'))`. `play` = a session someone launched to play, which is every row before 0105. `parked` = a warm Steam: the user's Steam parent app running `-silent` with no viewer, holding a normal reservation (`control-api.md` §Warm Steam). Every user-facing read and count leaves `parked` rows out (the user's session list and per-session routes, play history, highlights, the per-user quota, `AdminApp.sessions_30d`); admin reads and the reservation sum include them. Served as `Session.kind`. |
 | `parked_until` | `TIMESTAMPTZ` NULL | *(Amendment 39, #759, migration 0105)* when a parked session expires: set to now plus `instance_settings.steam_warm_idle_minutes` at creation and by each library heartbeat. The `session.parked_expire` job stops a parked row past it. `NULL` on every play row. Not served. |
@@ -2536,6 +2537,9 @@ states.
 
 `stopped` and `failed` are the only **terminal** states; the other five are non-terminal and
 **every one of them can transition directly to `failed`**.
+*(Amendment 99, #1697:)* when the host is lost, `stopping` goes to `stopped`, not `failed`: the
+control plane ends it without the agent's confirmation, because its teardown was already asked
+for (failure invariant 3). `stopping → failed` stays possible on every other failure edge.
 
 *(Amendment 39, #759.)* Two writes for warm Steam (`control-api.md` §Warm Steam), with no new state.
 **A claim** moves a parked row `running → stopped` with `state_detail = 'claimed'`, written by the
@@ -2551,13 +2555,15 @@ parked row `assigned` on that GPU with the reservation moved to it.
 | `assigned` | scheduler chose host+GPU, reserved VRAM+slots, sent `session_assign` | **yes** | control plane (scheduler) | agent `ack{ok:false}`; assign times out; host goes `offline` before start |
 | `starting` | agent acked assign, bringing up compositor→encode→webrtcbin | yes | agent callback | pipeline build error (`session_state:failed`); agent WS drops; start times out |
 | `running` | pipeline live, signaling offer available; client may connect | yes | agent callback | pipeline crash (`session_state:failed`); **agent WS drops / host heartbeat-miss → host `offline`** |
-| `stopping` | teardown requested, pipeline coming down | yes (released on terminal) | control plane or agent | agent dies mid-teardown; teardown times out (control-plane reconciliation still ends it terminal) |
-| `stopped` | terminated normally, **reservation released** | no | agent callback (or control plane on confirmed teardown) | — (terminal) |
+| `stopping` | teardown requested, pipeline coming down | yes (released on terminal) | control plane or agent | teardown times out (control-plane reconciliation still ends it terminal); *(amendment 99, #1697)* not host loss: an agent that dies or is lost mid-teardown ends it `stopped` |
+| `stopped` | terminated normally, **reservation released** | no | agent callback (or control plane on confirmed teardown; *(amendment 99)* or the host-loss reaper on a `stopping` row, with no cleanup proof) | — (terminal) |
 | `failed` | terminated abnormally; `error_message` set, **reservation released** | no | agent callback / control-plane timeout / host-offline reaper | — (terminal) |
 
 ### Failure & reservation-release invariants (load-bearing)
 1. **`failed` is reachable from every non-terminal state.** There is no non-terminal state from
    which a session cannot fail; a stuck session is a bug, not a designed state.
+   *(Amendment 99, #1697:)* on host loss a `stopping` session ends `stopped` instead (invariant
+   3); it still always reaches a terminal state.
 2. **Every terminal transition releases the reservation in the same transaction** that writes the
    terminal state. The release is unconditional: reservation is *held* only while
    `state ∈ {assigned, starting, running, stopping}` (exactly the GPU-availability-sum filter), so on
@@ -2573,6 +2579,8 @@ parked row `assigned` on that GPU with the reservation moved to it.
    *(P3-01)* The reaper stamps `state_detail = 'host_lost'` on these sessions so a client can
    distinguish a host-loss from an ordinary failure; `state` stays `failed` (a free-text convention
    over the existing column, like P2-02's `swapping` — no new state).
+   *(Amendment 99, accreleus/quasar#1697, signed off 2026-11-28:)* Except a `stopping` session, whose teardown was already asked for: the reaper ends it `stopped`, keeping its `state_detail` and `stop_reason`, with no `error_message`, never `host_lost`, and no failure audit. A user who pressed Leave, or an agent that began its own teardown, then sees an ordinary stop, not a host loss. This holds for every host-loss path: heartbeat omission, a dropped or replaced agent connection, and the stale-host sweep. A `running`, `starting` or `assigned` session is reaped as above. Invariant 1 still holds: such a session leaves `stopping` terminal, by the reaper,
+   with its reservation released in the same transaction (invariant 2).
 4. Whether the client's WebRTC transport is connected is a *transport* detail, not a session
    state — the session is `running` once the pipeline is up regardless of browser connection
    (architecture invariant #3: transport is an interface, not part of the session model). A
