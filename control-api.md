@@ -1157,6 +1157,7 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `GET` / `PATCH /v1/me/ui-preferences` | user (self only) | client UI presentation preferences, synced across the caller's devices. No admin variant exists: these are keyed on the authenticated caller and there is no `{id}` form, so one user's preferences are unreadable by anyone else. |
 | `GET /v1/me/highlights` | user (self only) | *(home-rail amendment, 2026-08-05)* the caller's server-ranked home rail, derived from their own session history. No `user_id` parameter and no admin variant. **Entitlement-filtered**, and that filter is load-bearing rather than cosmetic — see below. |
 | `GET /v1/me/play-history` | user (self only) | *(Amendment 38, #720)* the caller's own play time, session count and last played per app, derived from their own sessions. No `user_id` parameter and no admin variant. **Entitlement-filtered** like `GET /v1/me/highlights`. |
+| `GET` / `PUT` / `DELETE /v1/me/home` | user (self only) | *(Amendment 101, accreleus/quasar#1701)* the caller's effective Home layout, and their own override of it. No `user_id` parameter and no admin variant: an admin sets the default at `/v1/admin/home`, never another user's override. §Home layout |
 | `PUT /v1/me/steam-warm` | user (self only) | *(Amendment 39, #759)* the library heartbeat: keeps the caller's warm Steam (a parked session) alive, or starts one when every rule allows. Always `204`, no body. No admin variant. §Warm Steam |
 | `GET` / `PATCH /v1/me/region-input` | user (self only) | *(Amendment 49, #845)* the caller's own Region and Input settings, with the install defaults read-only. No admin variant. §Region and Input settings |
 | `GET /v1/admin/storage/homes` | **admin** | *(P5-01)* list managed homes (storage oversight) |
@@ -1166,6 +1167,7 @@ caller anything. See §Client version gate on bearer-authenticated endpoints.
 | `PUT /v1/me/favourites/{app_id}` | user (self) | *(UI-P1)* favourite an app; owner is the bearer identity — no endpoint takes a `user_id`. Idempotent `204`; `404` under the same visibility rule as `GET /v1/apps/{id}`. **(Phase 2: `403 forbidden` when the caller is not entitled — checked *after* the `404`, and applied to every role including admin, because `/v1/me/*` is the user surface by definition)** |
 | `DELETE /v1/me/favourites/{app_id}` | user (self) | *(UI-P1)* unfavourite; idempotent **and unconditional** `204` for a well-formed UUID — deliberately never `404` |
 | `POST /v1/me/password` | user (self) | *(CP-01)* change the caller's own password; subject is the bearer identity, never a body field. Revokes all active tokens on success — client must re-authenticate |
+| `GET` / `PUT` / `DELETE /v1/admin/home` | **admin** | *(Amendment 101, accreleus/quasar#1701)* the instance's default Home layout, which every user without an override sees. §Home layout |
 | `GET /v1/admin/settings` | **admin** | *(LP-SEC-01)* read instance settings (`registration_mode`, `storage_provider`, **`library_discovery_enabled`** *(Phase 4)*, …) |
 | `PATCH /v1/admin/settings` | **admin** | *(LP-SEC-01)* update instance settings — how invites are enabled/disabled from the UI. *(Phase 4: also the discovery master switch. Every field is an **optional pointer**, so a `PATCH` that omits one leaves it alone — a plain bool would decode an absent `library_discovery_enabled` to `false` and silently switch discovery off every time an admin changed the registration mode)* |
 | `GET /v1/admin/secrets` | **admin** | *(secrets facility)* list the declared secrets + configured/readable/origin + a **masked** hint — never a value |
@@ -3069,6 +3071,116 @@ is always the bearer. No `user_id` parameter, no query parameters, no admin vari
 **Why a read of its own.** Not fields on `AppListItem`, for the reasons highlights gives: they
 would land on `AdminApp` too, and a per-user aggregate over `sessions` does not belong in the
 paginated list. Not highlights itself: that is a ranked rail of at most five.
+
+### Home layout *(Amendment 101, accreleus/quasar#1701, signed off 2026-11-28)*
+
+Which sections the Home page shows, in what order, under what titles. Additive: new paths, no
+existing shape changed.
+
+**The server owns the structure; the existing reads still own the content.** A section names a
+`kind`, and each kind's content comes from the read that served it before this amendment:
+
+| `kind` | content from |
+|---|---|
+| `highlights` | `GET /v1/me/highlights` (the featured rail) |
+| `jump_back_in` | `GET /v1/me/play-history`, joined to `GET /v1/apps` on `app_id` |
+| `favourites` | `GET /v1/apps`, the items with `favourite: true` |
+
+Nothing here carries an app, a count or a ranking. Clients render what they are handed, in the
+order handed; a client must not re-order, re-title or add sections of its own.
+
+**Three layers, first one set wins, whole:**
+1. the caller's **override** (`PUT /v1/me/home`), `source: "user"`;
+2. else the **admin default** (`PUT /v1/admin/home`), `source: "admin"`;
+3. else the **built-in default**, `source: "builtin"`:
+
+```json
+{ "source": "builtin",
+  "sections": [
+    { "id": "highlights",   "kind": "highlights",   "title": "Highlights",   "enabled": true, "params": {} },
+    { "id": "jump_back_in", "kind": "jump_back_in", "title": "Jump back in", "enabled": true, "params": {} },
+    { "id": "favourites",   "kind": "favourites",   "title": "Favourites",   "enabled": true, "params": {} }
+  ] }
+```
+
+Layers are never merged: an override is a complete layout and replaces the admin default
+entirely. A section kind a later server adds therefore reaches the built-in and admin layouts,
+not an override saved before it existed; the user sees it after clearing or re-saving theirs.
+
+#### The layout (`HomeLayout`)
+
+- `source`: `"user"`, `"admin"` or `"builtin"`, as above.
+- `sections`: ordered, top of the page first; 0 to 16 items. Each item:
+  - `id`: the section's stable name within this layout, `^[a-z0-9][a-z0-9_-]{0,31}$`, unique
+    within the layout. A client may key state on it (focus, scroll); it means nothing else.
+  - `kind`: what the section shows. Today `highlights`, `jump_back_in`, `favourites`; the set
+    is open and grows by amendment. A kind may appear more than once.
+  - `title`: the heading to show, 1 to 64 characters (Unicode code points), not only
+    whitespace. Shown as given. Where a client's design gives a kind no visible heading (the web
+    client's featured rail), the title is the section's accessible name.
+  - `enabled`: `false` keeps the section in the layout but off the page.
+  - `params`: an object of per-kind source parameters, always present on a read. **No kind
+    defines any today**, so it is `{}`; an amendment that adds one names its key, type, default
+    and which kind reads it.
+
+#### Rules for clients (normative)
+
+1. **Skip an unknown `kind`.** Render the remaining sections in order. Never fail the page.
+2. **Skip `enabled: false`.**
+3. **Ignore `params` keys you do not know.** A missing key takes its documented default.
+4. **`404` means an older server:** render the built-in default above, exactly. Any other
+   failure of `GET /v1/me/home` (5xx, network) also renders the built-in default rather than an
+   empty Home; the read is best-effort, like highlights.
+5. A section whose content read is empty (no favourites, never played) may be left off the page,
+   as before this amendment. That is presentation, not a layout change.
+6. A client need not make the content read of a kind the layout leaves out or disables.
+
+#### `GET /v1/me/home`
+
+**`RequireAuth`**; the subject is always the bearer. `200` with the effective `HomeLayout`.
+Always `200` for an authenticated caller: a user with no override on an instance with no admin
+default reads the built-in default.
+
+#### `PUT /v1/me/home` · `DELETE /v1/me/home`
+
+**`RequireAuth`**, the bearer's own override only.
+- `PUT` replaces the caller's override with the body, `{"sections": [ … ]}` (`HomeLayoutWrite`),
+  and answers `200` with the effective layout, now `source: "user"`. Whole replace: there is no
+  partial form, and the last write wins.
+- `DELETE` clears the override and answers `200` with the layout the caller now sees (`admin` or
+  `builtin`). Idempotent: clearing an absent override is the same `200`.
+
+#### `GET` / `PUT` / `DELETE /v1/admin/home`
+
+**Admin** (`RequireAuth` → `RequireAdmin`, §Authorization). The default every user without an
+override sees.
+- `GET`: `200`, `HomeLayout` with `source` `"admin"` when a default is set, else `"builtin"`.
+- `PUT`: body `HomeLayoutWrite`, sets the default; `200`, `source: "admin"`. A user's override
+  is untouched.
+- `DELETE`: clears the default; `200`, the built-in layout. Idempotent.
+
+#### Validation on write (`PUT`, both routes)
+
+A body that breaks any rule is `400 validation_failed` and nothing is written:
+- `sections` is present and an array of 0 to 16 objects;
+- each section has `id`, `kind`, `title` and `enabled`, meeting the rules above, and no other key
+  but `params`;
+- every `id` is unique within the body;
+- `kind` is one this server knows (the table above). Unknown kinds are a read-side rule only:
+  a server never stores a kind it cannot validate;
+- `params`, when present, is an object holding only keys defined for that kind, so `{}` today.
+  Absent reads back as `{}`.
+
+Top-level keys other than `sections` are ignored, so a client may send back the body it read,
+`source` included. A layout stored by a newer server and read by an older one after a downgrade is
+served as stored; its unknown kinds fall to client rule 1.
+
+**Why its own route, not a key in `ui-preferences`.** `ui-preferences` is state the server
+stores and never reads, merged one level deep with unknown keys preserved. A Home layout is read
+by the server to answer `GET /v1/me/home`, is validated and replaced whole, and needs a "clear,
+fall back to the admin default" verb (`DELETE`). It is stored in its own column, never inside the
+`ui-preferences` document, so neither route can see or write the other's value (`schema.md`
+§`user_ui_preferences`).
 
 ---
 
