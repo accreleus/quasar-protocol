@@ -9902,6 +9902,13 @@ precedence is inserted between those two keys — see §Platform-release beta ch
   **not a fault in this view** *(amendment 26, #157, below)*: the detection job counts it in its
   own run summary (`platform.release_detect`, §Background jobs), which is how a broken publish
   stops being silent.
+  *(Amendment 98, accreleus/quasar#824, signed off 2026-11-27:)* On a machine whose recovery
+  actor has release-signature verification on (`verify` or `require`, ADR 0003), a stable release
+  whose detached signature (`platform-release-manifest.v2.json.sig`) is not published, or does not
+  verify over the published manifest under that actor's trusted keys, counts as invalid in this
+  sense: it is not listed, and the detection run counts it. So does one the actor could not be
+  asked about on that pass. With verification off, on a machine with no recovery actor, or with an
+  actor that predates the check, listing is unchanged. The apply-time gate is unchanged.
   *(Amendment 14 note, #353, as corrected by amendment 26: no shipped control plane ever emitted
   a `manifest_invalid` fault, and amendment 26 removed the kind. So a control plane that predates
   amendment 14 shows **nothing** for a release that publishes no `platform-release-manifest.json`
