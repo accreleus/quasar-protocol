@@ -720,6 +720,7 @@ A token is valid iff `revoked_at IS NULL AND expires_at > now()`.
 | `compat_tool_default_id` | `UUID` NULL → `compat_tools(id)` **ON DELETE RESTRICT** | *(Amendment 56, accreleus/quasar#1066, migration 0113, pre-approved 2026-11-06.)* The fleet default compatibility tool, an enabled tool at write time; NULL (the default) = Steam's own default, as before. Sent to Steam-family sessions as appid `0` (`control-api.md` §Compatibility tools). |
 | `pyrowave_max_per_gpu` | `INT` NOT NULL DEFAULT `1` | *(Amendment 58, accreleus/quasar#1059, pre-approved 2026-11-07; PyroWave's migration, 0114 or above.)* `CHECK (pyrowave_max_per_gpu BETWEEN 1 AND 4)`. How many sessions on one GPU may hold a PyroWave slot (`sessions.pyrowave_slot`; `control-api.md` §The PyroWave ceiling). Lowering it ends no session; it only refuses new slots. |
 | `default_transport` | `TEXT` NOT NULL DEFAULT `'webrtc'` | *(Amendment 61, accreleus/quasar#1217, migration 0116, signed off 2026-11-08.)* `CHECK (default_transport IN ('webrtc','webtransport'))`. The transport of every launch profile whose `transport` is `default` (`control-api.md` §Transport ▸ The instance default). Read once per launch; a change never alters a running session's transport. |
+| `home_layout` | `JSONB` NULL | *(Amendment 101, accreleus/quasar#1701, migration 0119)* the admin default Home layout, `{"sections": [ … ]}` as `PUT /v1/admin/home` validated it (`control-api.md` §Home layout). `NULL`, the default, = the built-in layout. Writing it sets `updated_by`. |
 | `compat_tools_max_enabled` | `INT` NOT NULL DEFAULT `8` | *(Amendment 56, migration 0113.)* `CHECK (compat_tools_max_enabled BETWEEN 1 AND 32)`. How many GE tools may be enabled at once (`409 compat_tool_limit`). Lowering it below the current count refuses no existing tool; it only refuses new enables. |
 | `compat_tools_disk_reserve_gib` | `INT` NOT NULL DEFAULT `10` | *(Amendment 56, migration 0113.)* `CHECK (compat_tools_disk_reserve_gib BETWEEN 1 AND 1024)`. Free space, in GiB, an install must leave on a host's tools filesystem beyond the asset and the 4 GiB unpacked cap (trust rule T7); sent in the job params as `reserve_bytes`. |
 
@@ -1815,6 +1816,7 @@ so the correct behaviour on either parent's deletion is for the row to disappear
 | `user_id`       | `UUID` PK     | `REFERENCES users(id) ON DELETE CASCADE` |
 | `session_overlay` | `JSONB` NOT NULL DEFAULT `'{}'` | validated key-by-key on write; unknown keys preserved |
 | `updated_at`    | `TIMESTAMPTZ` NOT NULL DEFAULT `now()` |
+| `home_layout`   | `JSONB` NULL | *(Amendment 101, accreleus/quasar#1701, migration 0119)* the user's Home layout override, `{"sections": [ … ]}` as `PUT /v1/me/home` validated it (`control-api.md` §Home layout). `NULL` = no override: the admin default or the built-in one applies. **Read by the server** to answer `GET /v1/me/home`, unlike `session_overlay`, and never served or written through `ui-preferences`. A user who sets an override before any ui-preference gets a row with `session_overlay` at its default. |
 
 JSONB rather than columns: these are pure client presentation values that the
 server never joins, filters or aggregates on, and adding a knob must not cost a
@@ -2754,6 +2756,13 @@ The swap guard compares the two instead of `updated_at` with `created_at` (`cont
 §Compatibility tools, "Placement"). A session live across the upgrade has no revision, so a swap
 from it into a game with a GE mapping is refused and the game is launched on its own; that fails
 safe and ends with the session. The down drops both columns and the sequence and never refuses.
+
+### 0119 — Home layout *(Amendment 101, accreleus/quasar#1701, 2026-11-28.)*
+
+Adds `instance_settings.home_layout` and `user_ui_preferences.home_layout`, both `JSONB NULL`
+with no default, so every existing install reads the built-in layout and nothing changes on
+upgrade. Validation is the write handler's (`control-api.md` §Home layout), not a CHECK: the
+kind set grows by amendment without a migration. The down drops both columns and never refuses.
 
 ## Steam preparation persistence (2026-09-06, Quasar #145)
 
