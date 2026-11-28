@@ -6367,6 +6367,12 @@ keys in the `schema.md` field dictionary are persisted (unknown keys are ignored
   agent-side companions are `session_metrics.wt_fec_overhead_pct` and `wt_fec_kbps`
   (`agent-api.md`). A client that predates the key omits it; an ingest that predates it drops
   it as unknown.
+- *(Amendment 100, accreleus/quasar#1674, additive, signed off 2026-11-28)* **WebTransport decoder
+  failures.** **`wt_decode_errors`** is cumulative for the page view: the video decoder failures a
+  WebTransport client recovered from (by replacing the decoder) or ended on, each decoder counted
+  once however many errors it raised. Absent on a PyroWave-only session and never posted by a
+  WebRTC session. A client that predates the key omits it; an ingest that predates it drops it as
+  unknown.
 - *(UI-P6, additive)* `codec_mime_type` is an optional per-sample **string** carrying the
   `getStats()` codec `mimeType` the receiver is actually decoding. It is a sibling of the numeric
   `metrics` object, not a key inside it. The server normalises it to the wire codec vocabulary and
