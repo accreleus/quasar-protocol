@@ -3095,7 +3095,8 @@ its own chrome and is not in the layout. The `highlights` section is the feature
 goes where the layout puts it. A client whose design draws the rail inside its hero draws the
 hero at that position, and at the top of the page without the rail when no `highlights` section
 is shown. The featured rail is drawn at most once: at the first shown `highlights` section; a
-later one is skipped.
+later one is skipped. "Shown" means enabled and of a kind the client knows (client rules 1 and 2),
+whether or not the rail has cards: an empty rail still places the hero.
 
 **Three layers, first one set wins, whole:**
 1. the caller's **override** (`PUT /v1/me/home`), `source: "user"`;
@@ -3124,7 +3125,8 @@ not an override saved before it existed; the user sees it after clearing or re-s
   - `kind`: what the section shows. Today `highlights`, `jump_back_in`, `favourites`; the set
     is open and grows by amendment. A kind may appear more than once.
   - `title`: the heading to show, 1 to 64 characters (Unicode code points), not only
-    whitespace. Shown as given. Where a client's design gives a kind no visible heading (the web
+    whitespace, and no control characters (Unicode category Cc). Shown as given. Where a
+    client's design gives a kind no visible heading (the web
     client's featured rail), the title is the section's accessible name.
   - `enabled`: `false` keeps the section in the layout but off the page.
   - `params`: an object of per-kind source parameters, always present on a read. **No kind
@@ -3175,8 +3177,11 @@ and is not recorded.
 
 A body that breaks any rule is `400 validation_failed` and nothing is written:
 - `sections` is present and an array of 0 to 16 objects;
+- the body is at most 64 KiB;
 - each section has `id`, `kind`, `title` and `enabled`, meeting the rules above, and no other key
-  but `params`;
+  but `params`. Keys match exactly: a key that differs only in case (`"ID"`) or appears twice in
+  one section is refused;
+- `title` holds no control character (Unicode category Cc);
 - every `id` is unique within the body;
 - `kind` is one this server knows (the table above). Unknown kinds are a read-side rule only:
   a server never stores a kind it cannot validate;
