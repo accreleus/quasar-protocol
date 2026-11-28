@@ -3159,6 +3159,10 @@ override sees.
   is untouched.
 - `DELETE`: clears the default; `200`, the built-in layout. Idempotent.
 
+Both writes are recorded in the activity log, `home_layout.set` and `home_layout.cleared`, with
+`target_type` `instance` and no `details`. A user's own override is not an administrative action
+and is not recorded.
+
 #### Validation on write (`PUT`, both routes)
 
 A body that breaks any rule is `400 validation_failed` and nothing is written:
@@ -3381,7 +3385,7 @@ null when the actor row is gone or the event had no actor) and a server-derived
 `host.webtransport.update` *(amendment 54)* ·
 `host.settings.update` · `console.config.update` · `storage.home.tombstone` · `storage.gc.confirm` ·
 `session.{stop,capture,launched,failed}` · `job.{run,update}` · `instance.secret.{set,cleared}` ·
-`instance.settings.updated` · `user.{role_changed,disabled,enabled,quota_changed,deleted}` ·
+`instance.settings.updated` · `home_layout.{set,cleared}` *(amendment 101)* · `user.{role_changed,disabled,enabled,quota_changed,deleted}` ·
 `invite.{minted,revoked}` · `image.{installed,uninstalled,pinned,unpinned,updated,synced}`.
 That list is **documentation, not an enum** — `action` is a free string in both `schema.md`
 and this contract, and a consumer must render an unrecognized value rather than reject it.
